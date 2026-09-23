@@ -1,0 +1,21 @@
+{
+  "tau": 0.6,
+  "max_reentries": 3,
+  "queue": {"max_size": 100, "age_rate": 0.01},
+  "engine": {
+    "backend": "llamacpp",
+    "source": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "gguf": "/mnt/models/Qwen3.5-4B-Q4_K_M.gguf",
+    "context_tokens": 4096,
+    "threads": null
+  },
+  "llm": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:3b"},
+  "skills": {
+    "email": {"cost_budget": 1.0},
+    "contacts": "data/contacts.json",
+    "drafts": "data/drafts",
+    "packages": "data/packages.json"
+  },
+  "log": "data/decisions.jsonl"
+}
