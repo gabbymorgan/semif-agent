@@ -52,7 +52,16 @@ class SkillRunner:
         run_ok = assessment.success
         decisions = getattr(prediction, "decisions", [])
         for decision, result in decisions:
-            self.log.append(decision, result, extra={"skill": skill.name, "run_ok": run_ok})
+            self.log.append(
+                decision,
+                result,
+                extra={
+                    "phase": "predict",
+                    "skill": skill.name,
+                    "run_ok": run_ok,
+                    "run_id": request.id,
+                },
+            )
 
         return RunResult(
             skill=skill.name,

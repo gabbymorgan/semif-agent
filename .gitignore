@@ -2,4 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 data/decisions.jsonl
+data/runs.jsonl
 data/drafts/
+.pytest_cache/
+config.json
+*.log

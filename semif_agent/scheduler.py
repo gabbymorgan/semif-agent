@@ -24,6 +24,7 @@ from .skills import (
     compose_state,
     navigate,
 )
+from .trace import TraceLog
 
 GATE_YES = "yes"
 CHOICE_INTERRUPT = "interrupt"
@@ -60,10 +61,12 @@ class Scheduler:
         config: dict,
         tau: float = 0.6,
         max_reentries: int = 3,
+        trace: TraceLog | None = None,
     ):
         self.engine = engine
         self.llm = llm
         self.log = log
+        self.trace = trace if trace is not None else TraceLog()
         self.config = config
         self.tau = tau
         self.max_reentries = max_reentries
@@ -86,7 +89,9 @@ class Scheduler:
             options=[Option(GATE_YES, "Yes, it is actionable."), Option("no", "No, it is not.")],
         )
         result = self.engine.call(decision)
-        self.log.append(decision, result, extra={"phase": "gate"})
+        self.log.append(
+            decision, result, extra={"phase": "gate", "run_id": request.id}
+        )
         return result.prob(GATE_YES) >= self.tau
 
     def _choice(self, request: Request, current: Process) -> bool:
@@ -99,7 +104,11 @@ class Scheduler:
             ],
         )
         result = self.engine.call(decision)
-        self.log.append(decision, result, extra={"phase": "choice", "current": current.skill})
+        self.log.append(
+            decision,
+            result,
+            extra={"phase": "choice", "current": current.skill, "run_id": request.id},
+        )
         return result.prob(CHOICE_INTERRUPT) >= self.tau
 
     def _score(self, request: Request, current: str | None = None) -> tuple[float, str]:
@@ -109,7 +118,9 @@ class Scheduler:
             options=[Option(option_id, description) for option_id, description in URGENCY_OPTIONS],
         )
         result = self.engine.call(decision)
-        self.log.append(decision, result, extra={"phase": "score"})
+        self.log.append(
+            decision, result, extra={"phase": "score", "run_id": request.id}
+        )
         label = result.selected
         return URGENCY_WEIGHTS[label], label
 
@@ -126,7 +137,9 @@ class Scheduler:
 
     def _submit(self, text: str, source: str = "typed") -> tuple[str, str]:
         request = Request(text, source=source)
+        self.trace.append("submit", request.id, text=text, source=source)
         if not self._contains_request(request):
+            self.trace.append("dropped", request.id, reason="no actionable request")
             return "dropped", "no actionable request"
 
         if self.current is None:
@@ -134,6 +147,7 @@ class Scheduler:
             self.current = Process(request=request, skill="(scheduling)", weight=weight)
             outcome = self._dispatch(request)
             self.current = None
+            self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "running", f"[{label}] {outcome.summary}"
 
         interrupt = self._choice(request, self.current)
@@ -142,14 +156,18 @@ class Scheduler:
             previous.request.resume["from_skill"] = previous.skill
             self.queue.push(previous.request, previous.weight)
             self.current = Process(request=request, skill="(scheduling)", weight=1.0)
+            self.trace.append("preempted", request.id, preempted=previous.skill)
             outcome = self._dispatch(request)
             self.current = None
+            self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
 
         weight, label = self._score(request, current=self.current.skill)
         ok = self.queue.push(request, weight)
         if not ok:
+            self.trace.append("rejected", request.id, reason="queue is full")
             return "rejected", "queue is full"
+        self.trace.append("queued", request.id, weight=weight, label=label)
         return "queued", f"urgency {label} (weight {weight:.2f})"
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
@@ -166,29 +184,44 @@ class Scheduler:
         results = []
         while self.current is None and len(self.queue) > 0:
             request = self.queue.pop()
+            self.trace.append("dequeued", request.id)
             self.current = Process(request=request, skill="(scheduling)", weight=0.0)
             try:
                 outcome = self._dispatch(request)
             except EngineUnavailable as exc:
                 outcome = DispatchResult(kind="error", summary=f"engine unavailable: {exc}")
             self.current = None
+            self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             results.append(("ran", f"[{request.id}] {outcome.summary}"))
         return results
 
     # ---- dispatch ----
 
     def _dispatch(self, request: Request) -> DispatchResult:
-        navigation = navigate(self.engine, request, self.tree)
+        navigation = navigate(self.engine, self.log, request, self.tree)
         if isinstance(navigation, CreateSkill):
+            self.trace.append("create_skill", request.id, category=navigation.category)
             return DispatchResult(
                 kind="create_skill",
                 summary="skill authoring via opencode is deferred to v2; request logged.",
             )
         outcome = self.runner.run(navigation, request)
         if outcome.error:
+            self.trace.append(
+                "error", request.id, skill=navigation.name, message=outcome.error
+            )
             return DispatchResult(kind="error", summary=f"skill error: {outcome.error}")
+        self.trace.append(
+            "assessed",
+            request.id,
+            skill=navigation.name,
+            success=outcome.success,
+            summary=outcome.summary,
+            updated_request=outcome.updated_request,
+        )
         if outcome.updated_request and request.reentries < self.max_reentries:
             self.queue.push(_requeue(request, outcome.updated_request), 0.5)
+            self.trace.append("requeued", request.id, text=outcome.updated_request)
         return DispatchResult(
             kind="ran",
             summary=f"{navigation.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
@@ -209,4 +242,5 @@ class Scheduler:
 def _requeue(request: Request, updated_text: str) -> Request:
     updated = Request(updated_text, source="requeue")
     updated.reentries = request.reentries + 1
+    updated.meta["parent_run"] = request.id
     return updated

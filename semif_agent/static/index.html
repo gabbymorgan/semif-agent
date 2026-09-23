@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SemIf Agent Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SemIf <span class="muted">agent dashboard</span></div>
+    <div id="mode-badge" class="badge">…</div>
+  </header>
+
+  <section class="inputbar">
+    <form id="submit-form">
+      <input id="query-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="type a request, e.g. 'send my girlfriend an email that I'm running late'">
+      <button type="submit">submit</button>
+    </form>
+    <button id="refresh-btn" type="button" title="reload trace">refresh</button>
+  </section>
+
+  <main class="layout">
+    <aside class="panel left">
+      <div class="panel-head">
+        <h2>Timeline</h2>
+        <select id="phase-filter" title="filter by phase">
+          <option value="">all phases</option>
+        </select>
+      </div>
+      <div id="timeline" class="timeline"></div>
+    </aside>
+
+    <section class="panel center">
+      <div class="panel-head">
+        <h2>Decision flow</h2>
+        <span id="run-label" class="muted"></span>
+        <div class="spacer"></div>
+        <label class="scrub-label">time travel
+          <input id="scrubber" type="range" min="0" max="0" value="0" step="1">
+        </label>
+      </div>
+      <div id="flow" class="flow"></div>
+    </section>
+
+    <aside class="panel right">
+      <div class="panel-head">
+        <h2>Inspector</h2>
+        <button id="relabel-btn" type="button" class="small" disabled>relabel…</button>
+      </div>
+      <div id="inspector" class="inspector"></div>
+      <div class="panel-head">
+        <h2>Skill tree</h2>
+      </div>
+      <div id="skill-tree" class="skill-tree"></div>
+      <div class="panel-head">
+        <h2>Dream / status</h2>
+      </div>
+      <div id="status" class="status"></div>
+    </aside>
+  </main>
+
+  <div id="relabel-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Relabel decision</h3>
+      <p class="muted" id="relabel-id"></p>
+      <label>observed outcome
+        <select id="relabel-options"></select>
+      </label>
+      <div class="modal-actions">
+        <button id="relabel-cancel" type="button">cancel</button>
+        <button id="relabel-apply" type="button" class="primary">apply (3x weight)</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

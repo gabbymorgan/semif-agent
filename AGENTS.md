@@ -17,25 +17,42 @@ supplied options; an LLM is used only for generation and self-assessment.
 ## Architecture map
 
 ```
-cli.py          argparse: run (REPL / --script), dream, skills, status, relabel
+cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
+                dashboard
 scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py       tree + registry (email.compose, response.reject, tracking.check),
-                navigation = SemIf choices per level, create_skill branch (stub)
+                navigation = SemIf choices per level (logged), create_skill
+                branch (stub)
 skill.py        loop: observe -> predict -> act -> observe -> assess (LLM)
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 llm.py          OpenAI-compatible client for self-assessment (stdlib urllib)
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
+trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
+                preempted/assessed/...); decisions reference run_id in extra
 dream.py        NLL of observed outcome per row; weighted CE, accuracy, ECE
 decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
                 Request)
+dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status +
+                POST submit/relabel); static/ frontend served at /
 ```
 
 ## Run / verify
 
 Dev machine is a thin client (no GPU, ~1.4G disk): only pure stdlib unit tests
 run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
+
+## Git / sync
+
+- Canonical repo lives on Gitea: `git.manyworlds.fit` (SSH on port 22, key
+  `~/.ssh/id_ed25519` registered there). The box `guppy` keeps a working copy
+  at `~/semif-agent`; the dev machine at `~/Repos/semif-agent`. Push to Gitea,
+  pull on each side — never rsync/tar the code.
+- **`config.json` is gitignored and per-machine** (dev and the box use different
+  engine/LLM paths). Copy `config.example.json` to `config.json` and edit.
+  `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are runtime
+  artifacts and gitignored too.
 
 The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
 
@@ -54,7 +71,13 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
   ~/semif-venv/bin/python -m semif_agent.cli run --script demo.jsonl
   ~/semif-venv/bin/python -m semif_agent.cli dream            # cost report
   ~/semif-venv/bin/python -m semif_agent.cli relabel <id> <outcome>
+  ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
   ```
+- Dashboard: browser UI on http://localhost:8765/. It works in live mode on
+  the box (submit runs the real engine + LLM) and in replay mode anywhere
+  (reads decisions.jsonl + runs.jsonl; submit degrades to a JSON error without
+  the engine). Relabeling in the UI writes a human override (3x weight in
+  dream) via `POST /api/relabel`.
 - Integration tests (real engine + real LLM) only run on the box:
   `~/semif-venv/bin/python -m pytest tests/integration -q -s`
   They take ~100s (model load ~34s). Run them in the background and poll —
@@ -65,7 +88,7 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
 ### v1 (done)
 Core loop, urgency queue, skill tree, skill loop with real SemIf + real LLM
 self-assessment, decision logging, `dream` cost pass, REPL + JSONL CLI,
-unit tests (16) + box integration tests (2).
+unit tests (24) + box integration tests (2).
 
 ### v2
 - Real fine-tuning from `decisions.jsonl` at a regular interval ("dreaming"):
@@ -79,6 +102,8 @@ unit tests (16) + box integration tests (2).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
   for parallel decisions; single execution slot remains for processes.
+- Dashboard: run-requeue cross-linking (child run references its parent),
+  scheduler sim controls (busy/idle/tau) as a first-class panel.
 
 ### Later / open questions
 - Safety/authority: which inputs may interrupt high-stakes processes; is
@@ -136,6 +161,9 @@ unit tests (16) + box integration tests (2).
 - `DecisionLog.append` labels a row with the *selected* option by default
   (self-consistent, near-zero cost). Real labels come from `relabel` (human,
   weight 3x in `dream`) — failures alone don't produce correct labels.
+- Navigation decisions ARE logged (`navigate:category`, `navigate:leaf` in
+  skills.py) and therefore count toward dream cost. This is intended per the
+  design; don't silently drop them.
 - Queue ordering: urgency desc, then FIFO (`seq`). Recency is stored but is NOT
   in the sort key (it's anti-correlated with FIFO). Ageing pulls weights toward
   the max (1.0) so low items catch up; uniform additive boosts do nothing.
@@ -146,6 +174,8 @@ unit tests (16) + box integration tests (2).
 ## Testing
 
 - `python3 -m pytest tests/ -q --ignore=tests/integration` — anywhere, fast.
+  Includes the dashboard API tests (`tests/test_dashboard_api.py`), which spin
+  up the stdlib HTTP server on an ephemeral port with the engine never loaded.
 - `tests/integration/` — box only; requires real SemIf + real ollama.
 - After touching scheduler/skills/engine, re-run both; the integration tests are
   the only end-to-end verification.

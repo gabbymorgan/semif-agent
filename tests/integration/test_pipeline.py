@@ -39,6 +39,7 @@ def test_pipeline_end_to_end(tmp_path):
     config = load_config()
     require_real(config)
     config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
     scheduler, config = build_scheduler(config)
 
     inputs = [
@@ -55,6 +56,16 @@ def test_pipeline_end_to_end(tmp_path):
     rows = scheduler.log.read()
     assert len(rows) > 0, "expected SemIf decisions to be logged"
 
+    phases = [r.get("extra", {}).get("phase") for r in rows]
+    assert "navigate:category" in phases, "navigation decisions must be logged"
+    assert "navigate:leaf" in phases, "navigation decisions must be logged"
+    for row in rows:
+        assert row.get("extra", {}).get("run_id"), "every decision must carry a run_id"
+
+    trace_rows = scheduler.trace.read()
+    assert any(r["kind"] == "submit" for r in trace_rows)
+    assert any(r["kind"] == "assessed" for r in trace_rows)
+
     report = dream(scheduler.log)
     assert report.cross_entropy is not None
     print(report.render())
@@ -70,6 +81,7 @@ def test_busy_choice_path(tmp_path):
     config = load_config()
     require_real(config)
     config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
     scheduler, config = build_scheduler(config)
 
     scheduler.busy("driving on the freeway", skill="driving")

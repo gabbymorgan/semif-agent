@@ -23,6 +23,7 @@ from .llm import LLMClient
 from .log import DecisionLog
 from .scheduler import Scheduler
 from .skills import build_skills, build_tree, tree_summary
+from .trace import TraceLog
 
 
 def load_config(path: str = "config.json") -> dict:
@@ -45,6 +46,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         model=config.get("llm", {}).get("model", "qwen2.5:3b"),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
+    trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     scheduler = Scheduler(
         engine=engine,
         llm=llm,
@@ -52,6 +54,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         config=config,
         tau=float(config.get("tau", 0.6)),
         max_reentries=int(config.get("max_reentries", 3)),
+        trace=trace,
     )
     return scheduler, config
 
@@ -116,6 +119,8 @@ def scripted(scheduler: Scheduler, path: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(argv) if argv is not None else list(sys.argv[1:])
+    config = load_config(_extract_config_path(argv))
     parser = argparse.ArgumentParser(prog="semif-agent")
     parser.add_argument("--config", default="config.json")
     sub = parser.add_subparsers(dest="command")
@@ -131,8 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     relabel_p.add_argument("id")
     relabel_p.add_argument("outcome")
 
+    dash_p = sub.add_parser("dashboard", help="run the local browser dashboard")
+    dash_p.add_argument("--port", type=int, default=int(config.get("dashboard", {}).get("port", 8765)))
+    dash_p.add_argument(
+        "--replay",
+        action="store_true",
+        help="replay mode: do not warm the decision engine",
+    )
+
     args = parser.parse_args(argv)
-    config = load_config(args.config)
     scheduler, config = build_scheduler(config)
 
     if args.command == "run":
@@ -149,9 +161,26 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "relabel":
         ok = scheduler.log.relabel(args.id, args.outcome)
         print("relabeled." if ok else f"no row with id {args.id}")
+    elif args.command == "dashboard":
+        from .dashboard import serve
+
+        if args.replay:
+            print("replay mode: reading decision log + trace; engine not warmed.")
+        serve(scheduler, port=args.port)
     else:
         parser.print_help()
     return 0
+
+
+def _extract_config_path(argv: list[str]) -> str:
+    """Pull --config out of argv before the full parser runs, so the dashboard
+    subcommand can read dashboard.port from config for its default."""
+    for index, arg in enumerate(argv):
+        if arg == "--config" and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--config="):
+            return arg.split("=", 1)[1]
+    return "config.json"
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from typing import Callable
 
 from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
+from .log import DecisionLog
 
 
 @dataclass
@@ -158,8 +159,13 @@ def build_tree(skills: list[Skill]) -> dict[str, list[Skill]]:
     return tree
 
 
-def navigate(engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]) -> Skill | CreateSkill:
-    """Descend the tree one SemIf choice per level."""
+def navigate(
+    engine: SemIfEngine,
+    log: DecisionLog,
+    request: Request,
+    tree: dict[str, list[Skill]],
+) -> Skill | CreateSkill:
+    """Descend the tree one SemIf choice per level. Every choice is logged."""
     categories = sorted(tree.keys())
     create = Option("create_skill", "Create a new skill for this.")
     top = DecisionRequest(
@@ -168,6 +174,7 @@ def navigate(engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]
         options=[Option(c, c) for c in categories] + [create],
     )
     top_result = engine.call(top)
+    log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
     if category == "create_skill":
         return CreateSkill(category=None)
@@ -178,6 +185,7 @@ def navigate(engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]
         options=[Option(s.name, s.description) for s in skills] + [create],
     )
     leaf_result = engine.call(leaf)
+    log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
     if pick == "create_skill":
         return CreateSkill(category=category)
