@@ -1,8 +1,9 @@
 """The skill tree, registry, and SemIf-driven navigation.
 
 A skill is a leaf reached by a chain of SemIf choices (category -> skill).
-At every level a "create_skill" branch exists; opencode is the authoring tool
-there (deferred to v2, stubbed as CreateSkill).
+The category level carries a "create_category" branch and the leaf level a
+"create_skill" branch; both are stubs that log a suggestion event to the trace
+(deferred to v2 — no actual authoring yet).
 
 Only the real skills live here; navigation uses the real decision engine.
 """
@@ -18,6 +19,7 @@ from typing import Callable
 from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
 from .log import DecisionLog
+from .trace import TraceLog
 
 
 @dataclass
@@ -56,7 +58,12 @@ class Skill:
 
 @dataclass
 class CreateSkill:
-    """Sentinel for the 'create a missing skill' branch at a tree level."""
+    """Stub for a missing-category/skill suggestion at a tree level.
+
+    Navigation logs the suggestion event to the trace; actual authoring is
+    deferred to v2. `category` is None for a new-category suggestion, else the
+    category that needs the new skill.
+    """
 
     category: str | None = None
 
@@ -162,32 +169,58 @@ def build_tree(skills: list[Skill]) -> dict[str, list[Skill]]:
 def navigate(
     engine: SemIfEngine,
     log: DecisionLog,
+    trace: TraceLog,
     request: Request,
     tree: dict[str, list[Skill]],
 ) -> Skill | CreateSkill:
-    """Descend the tree one SemIf choice per level. Every choice is logged."""
+    """Descend the tree one SemIf choice per level. Every choice is logged.
+
+    The category level offers a "create_category" branch and the leaf level a
+    "create_skill" branch; both log a suggestion event to the trace and return
+    a CreateSkill stub (actual authoring is deferred to v2).
+    """
     categories = sorted(tree.keys())
-    create = Option("create_skill", "Create a new skill for this.")
+    create_category = Option("create_category", "Suggest a new category for this.")
     top = DecisionRequest(
         state=compose_state(request),
         question="Which top-level category handles this request?",
-        options=[Option(c, c) for c in categories] + [create],
+        options=[Option(c, c) for c in categories] + [create_category],
     )
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
-    if category == "create_skill":
+    if category == "create_category":
+        trace.append(
+            "create_category",
+            request.id,
+            state=top.state,
+            question=top.question,
+            options=[o.id for o in top.options],
+            selected=top_result.selected,
+            probs=top_result.probs,
+        )
         return CreateSkill(category=None)
     skills = tree[category]
+    create_skill = Option("create_skill", "Suggest creating a new skill.")
     leaf = DecisionRequest(
         state=compose_state(request, current=category),
         question=f"Within {category}, which skill?",
-        options=[Option(s.name, s.description) for s in skills] + [create],
+        options=[Option(s.name, s.description) for s in skills] + [create_skill],
     )
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
     if pick == "create_skill":
+        trace.append(
+            "skill_needed",
+            request.id,
+            category=category,
+            state=leaf.state,
+            question=leaf.question,
+            options=[o.id for o in leaf.options],
+            selected=leaf_result.selected,
+            probs=leaf_result.probs,
+        )
         return CreateSkill(category=category)
     return next(s for s in skills if s.name == pick)
 

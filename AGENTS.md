@@ -111,8 +111,9 @@ unit tests (24) + box integration tests (2).
   validate (accuracy/ECE on a held-out slice, prompt-hash regression), swap the
   pinned model revision. GPU offload: train on a beefier GPU; the running agent
   keeps a frozen inference revision until a swap validates.
-- `create_skill` branch: invoke opencode to author a skill manifest at a tree
-  leaf (currently a stub that only logs the request).
+- `create_skill` / `create_category` branches: navigation logs a suggestion event
+  (state, query, SemIf output) to the trace — currently a stub; opencode
+  authoring at a tree leaf is deferred.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)

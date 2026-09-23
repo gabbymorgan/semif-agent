@@ -198,12 +198,11 @@ class Scheduler:
     # ---- dispatch ----
 
     def _dispatch(self, request: Request) -> DispatchResult:
-        navigation = navigate(self.engine, self.log, request, self.tree)
+        navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
         if isinstance(navigation, CreateSkill):
-            self.trace.append("create_skill", request.id, category=navigation.category)
             return DispatchResult(
                 kind="create_skill",
-                summary="skill authoring via opencode is deferred to v2; request logged.",
+                summary="skill authoring via opencode is deferred to v2; suggestion logged.",
             )
         outcome = self.runner.run(navigation, request)
         if outcome.error:

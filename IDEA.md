@@ -32,7 +32,7 @@ All decisions are SemIf calls: `{state, question, options[]}`. State is the curr
 
 - **`choice`** — binary: `interrupt` / `defer`. Interrupt iff `P(interrupt) >= τ`.
 - **`score`** — ordinal urgency: `critical` / `high` / `medium` / `low`, mapped to numeric weights for sorting.
-- **skill navigation** — at each tree level: choose category / descend / `create_skill`.
+- **skill navigation** — at each tree level: choose category / descend; the category level offers a `create_category` suggestion and the leaf level a `create_skill` suggestion.
 - **`read_next()`** — argument selection within a skill (e.g., which contact is "girlfriend").
 
 **LLM/SemIf boundary**: SemIf for fast, repeated, low-latency decisions (gating, scoring, routing, argument selection). LLM for generation and assessment (email body, self-assessment summary). Never the reverse.
@@ -41,7 +41,7 @@ All decisions are SemIf calls: `{state, question, options[]}`. State is the curr
 
 - Structure: categories → skills → actions. Top level listed at each level.
 - Navigation is a chain of SemIf choices, one per level, descending until a leaf skill matches.
-- At each level a `create_skill` branch exists: **opencode authors the skill** (its only role) and drops a skill manifest into the registry. The new skill becomes a leaf immediately.
+- Navigation offers a `create_category` suggestion at the category level and a `create_skill` suggestion at the leaf level. Both are stubs that log a suggestion event (state, query, SemIf output) to the trace — **opencode authors the skill** (its only role) and drops a skill manifest into the registry, deferred to v2. The new skill becomes a leaf immediately.
 
 ### Skill manifest
 - name, category, description, allowed inputs, action list, cost budget, decision log reference.
