@@ -45,14 +45,26 @@ run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
 
 ## Git / sync
 
-- Canonical repo lives on Gitea: `git.manyworlds.fit` (SSH on port 22, key
-  `~/.ssh/id_ed25519` registered there). The box `guppy` keeps a working copy
-  at `~/semif-agent`; the dev machine at `~/Repos/semif-agent`. Push to Gitea,
-  pull on each side — never rsync/tar the code.
+- Canonical repo lives on Gitea: `git.manyworlds.fit`, **SSH on port 222**
+  (`ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git`). Key
+  `~/.ssh/id_ed25519` is registered there. The box `guppy` keeps a working copy
+  at `~/semif-agent`; the dev machine at `~/Repos/semif-agent`. Push/pull from
+  Gitea — never rsync/tar the code.
 - **`config.json` is gitignored and per-machine** (dev and the box use different
   engine/LLM paths). Copy `config.example.json` to `config.json` and edit.
   `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are runtime
   artifacts and gitignored too.
+- **Known Gitea quirk**: `git fetch` from the box can fail with
+  `remote: sh: bad option '--oneshot'` — a server-side `authorized_keys`
+  forced-command bug on this instance (deploy/account keys both hit it; the
+  dev key's entry works, so pushes from dev are fine). Fallback when the box
+  can't pull: make a bundle on dev and fetch it on the box —
+  `git bundle create /tmp/sf.bundle main` → scp to the box →
+  `git fetch /tmp/sf.bundle "+refs/heads/main:refs/remotes/origin/main"` →
+  `git checkout -f -B main refs/remotes/origin/main`. Fixing the Gitea SSH
+  (or using an HTTPS PAT on the box) is tracked as the durable solution.
+- Decision rows logged before the `run_id` threading landed show up under
+  run_id `"?"` in the dashboard — that's expected, not a bug.
 
 The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
 
