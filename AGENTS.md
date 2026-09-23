@@ -85,7 +85,10 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
   ~/semif-venv/bin/python -m semif_agent.cli relabel <id> <outcome>
   ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
   ```
-- Dashboard: browser UI on http://localhost:8765/. It works in live mode on
+- Dashboard: browser UI on the box at http://192.168.8.181:8765/ (bound to
+  `0.0.0.0` via `dashboard.host` in config.json, so any LAN machine can reach
+  it; `--host`/`--port` override on the CLI). Note the submit/relabel POST
+  endpoints are therefore open to the whole LAN. It works in live mode on
   the box (submit runs the real engine + LLM) and in replay mode anywhere
   (reads decisions.jsonl + runs.jsonl; submit degrades to a JSON error without
   the engine). Relabeling in the UI writes a human override (3x weight in
