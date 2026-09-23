@@ -139,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     dash_p = sub.add_parser("dashboard", help="run the local browser dashboard")
     dash_p.add_argument("--port", type=int, default=int(config.get("dashboard", {}).get("port", 8765)))
     dash_p.add_argument(
+        "--host",
+        default=str(config.get("dashboard", {}).get("host", "127.0.0.1")),
+        help="bind address (0.0.0.0 to expose on the LAN)",
+    )
+    dash_p.add_argument(
         "--replay",
         action="store_true",
         help="replay mode: do not warm the decision engine",
@@ -166,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.replay:
             print("replay mode: reading decision log + trace; engine not warmed.")
-        serve(scheduler, port=args.port)
+        serve(scheduler, port=args.port, host=args.host)
     else:
         parser.print_help()
     return 0

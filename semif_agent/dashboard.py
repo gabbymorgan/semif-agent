@@ -226,10 +226,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def serve(scheduler: Scheduler, port: int = 8765, host: str = "127.0.0.1") -> None:
     handler = type("Handler", (DashboardHandler,), {"scheduler": scheduler, "lock": threading.Lock()})
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"semif dashboard on http://{host}:{port}/  (Ctrl-C to stop)")
+    bound = server.server_address[0]
+    url = f"http://{bound}:{server.server_address[1]}/" if bound != "0.0.0.0" else _lan_url(port)
+    print(f"semif dashboard on {url}  (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+
+
+def _lan_url(port: int) -> str:
+    import socket
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+    except OSError:
+        ip = "127.0.0.1"
+    return f"http://{ip}:{port}/"

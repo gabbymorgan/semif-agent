@@ -20,5 +20,5 @@
   },
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
-  "dashboard": {"port": 8765}
+  "dashboard": {"port": 8765, "host": "0.0.0.0"}
 }
