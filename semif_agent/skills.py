@@ -2,10 +2,10 @@
 
 A skill is a leaf reached by a chain of SemIf choices (category -> skill).
 The category level carries a "create_category" branch and the leaf level a
-"create_skill" branch. create_category is live: the decision model is driven in
-normal generation mode to propose a title + description for a broad new
-category, which is persisted to a category registry and becomes a stub in the
-tree. create_skill is still a stub that logs a suggestion event (deferred).
+"create_skill" branch. Both are live: the decision model is driven in normal
+generation mode to propose a title + description — a broad new category or a
+specific new skill leaf — which is persisted to a category registry and merged
+into the running tree as a stub.
 
 Only the real skills live here; navigation uses the real decision engine.
 """
@@ -64,8 +64,9 @@ class Skill:
 class CreateSkill:
     """Suggestion that the current category needs a new skill.
 
-    Navigation logs the suggestion event to the trace; actual authoring is
-    deferred to v2. `category` names the category that needs the new skill.
+    Handled live, like CreateCategory: the decision model authors the new skill
+    stub, which is persisted and merged into the tree. `category` names the
+    category that needs the new skill.
     """
 
     category: str
@@ -88,12 +89,20 @@ class CategoryDraft:
     description: str
 
 
+@dataclass
+class SkillDraft:
+    """An authored skill leaf stub: one specific action within a category."""
+
+    name: str
+    description: str
+
+
 class CategoryRegistry:
     """Persisted category stubs, one file on disk.
 
-    Format: {name: {"description": str, "skills": []}}. The empty skills list is
-    the slot that create_skill will fill later; for now a stub category has no
-    leaves.
+    Format: {name: {"description": str, "skills": [{"name": str, "description":
+    str}, ...]}}. The skills list is filled by create_skill; each entry becomes
+    a stub leaf merged into the running tree.
     """
 
     def __init__(self, path: str = "data/categories.json"):
@@ -107,6 +116,16 @@ class CategoryRegistry:
     def register(self, name: str, description: str) -> None:
         categories = self.read()
         categories[name] = {"description": description, "skills": []}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(categories, indent=2) + "\n")
+
+    def register_skill(self, category: str, name: str, description: str) -> None:
+        """Add a skill leaf to a category, creating the category entry if needed."""
+        categories = self.read()
+        entry = categories.setdefault(category, {"description": "", "skills": []})
+        skills = entry.setdefault("skills", [])
+        if not any(s.get("name") == name for s in skills):
+            skills.append({"name": name, "description": description})
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
@@ -209,6 +228,29 @@ def build_tree(skills: list[Skill]) -> dict[str, list[Skill]]:
     return tree
 
 
+def merge_registry(tree: dict[str, list[Skill]], categories: dict[str, dict]) -> None:
+    """Fold persisted categories and their skills into a running tree.
+
+    Category stubs become empty buckets; registered skills become stub leaves
+    (no-op bodies) so they are navigable and rerunnable immediately.
+    """
+    for category, data in categories.items():
+        tree.setdefault(category, [])
+        existing = {s.name for s in tree[category]}
+        for skill in data.get("skills", []):
+            name = skill.get("name")
+            if not name or name in existing:
+                continue
+            tree[category].append(
+                Skill(
+                    name=name,
+                    category=category,
+                    description=skill.get("description", ""),
+                )
+            )
+            existing.add(name)
+
+
 def navigate(
     engine: SemIfEngine,
     log: DecisionLog,
@@ -218,9 +260,9 @@ def navigate(
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
-    The category level offers a "create_category" branch (handled live by
-    dispatch) and the leaf level a "create_skill" branch (still a stub); both
-    log a suggestion event to the trace.
+    The category level offers a "create_category" branch and the leaf level a
+    "create_skill" branch; both are handled live by dispatch and log a
+    suggestion event to the trace.
     """
     categories = sorted(tree.keys())
     create_category = Option("create_category", "Suggest a new category for this.")
@@ -322,3 +364,54 @@ def generate_category(
     """Author a new category stub with the decision model in generation mode."""
     raw = engine.generate(build_category_prompt(request, tree))
     return parse_category_draft(raw)
+
+
+def build_skill_prompt(
+    request: Request, category: str, tree: dict[str, list[Skill]]
+) -> list[dict]:
+    """Chat messages for the decision model used as the skill author.
+
+    The skill must be one specific, single-purpose action that fits inside the
+    given category — not a broad bucket. Existing skills in the category are
+    included so the model avoids duplicating them.
+    """
+    system = (
+        "You are the skill-tree authoring step of a local agent. A request inside "
+        f"the '{category}' category did not fit any existing skill. Propose ONE "
+        "new skill for this category: a specific, single-purpose action the agent "
+        "can take. Reply with JSON only: "
+        '{"title": "<short lowercase snake_case id, no spaces>", '
+        '"description": "<one to two sentence purpose>"}'
+    )
+    existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
+    user = (
+        f"Request: {request.text}\n"
+        f"Category: {category}\n"
+        f"Existing skills in this category: {existing}\n"
+        "Proposed new skill (JSON only):"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_skill_draft(raw: str) -> SkillDraft:
+    """Parse the model's JSON reply into a SkillDraft."""
+    parsed = LLMClient._parse_json(raw)
+    title = str(parsed.get("title", "")).strip()
+    description = str(parsed.get("description", "")).strip()
+    if not title or not description:
+        raise ValueError(f"skill draft missing title/description: {raw!r}")
+    name = re.sub(r"\s+", "_", title.lower())
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"skill title must be snake_case alnum: {title!r}")
+    return SkillDraft(name=name, description=description)
+
+
+def generate_skill(
+    engine: SemIfEngine, request: Request, category: str, tree: dict[str, list[Skill]]
+) -> SkillDraft:
+    """Author a new skill leaf stub with the decision model in generation mode."""
+    raw = engine.generate(build_skill_prompt(request, category, tree))
+    return parse_skill_draft(raw)

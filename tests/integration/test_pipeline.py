@@ -15,7 +15,7 @@ from semif_agent.cli import build_scheduler, load_config
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
-from semif_agent.skills import CategoryDraft, generate_category
+from semif_agent.skills import CategoryDraft, SkillDraft, generate_category, generate_skill
 
 
 def require_real(config: dict):
@@ -121,4 +121,20 @@ def test_generate_category(tmp_path):
     )
     print(f"draft: {draft.name!r} — {draft.description!r}")
     assert isinstance(draft, CategoryDraft)
+    assert draft.name and draft.description
+
+
+def test_generate_skill(tmp_path):
+    """Authoring a skill leaf stub through the real decision model."""
+    config = load_config()
+    require_real(config)
+    scheduler, config = build_scheduler(config)
+    draft = generate_skill(
+        scheduler.engine,
+        Request("tell me if my package was delivered"),
+        "tracking",
+        scheduler.tree,
+    )
+    print(f"draft: {draft.name!r} — {draft.description!r}")
+    assert isinstance(draft, SkillDraft)
     assert draft.name and draft.description

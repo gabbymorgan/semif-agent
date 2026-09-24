@@ -25,6 +25,8 @@ from .skills import (
     build_tree,
     compose_state,
     generate_category,
+    generate_skill,
+    merge_registry,
     navigate,
 )
 from .trace import TraceLog
@@ -80,8 +82,7 @@ class Scheduler:
         self.skills = build_skills(config)
         self.tree = build_tree(self.skills)
         self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
-        for category in self.registry.read():
-            self.tree.setdefault(category, [])
+        merge_registry(self.tree, self.registry.read())
         self.ctx = ActionContext(engine=self.engine, config=config)
         self.runner = SkillRunner(self.ctx, self.llm, self.log)
         self.current: Process | None = None
@@ -208,10 +209,7 @@ class Scheduler:
         if isinstance(navigation, CreateCategory):
             return self._create_category(request)
         if isinstance(navigation, CreateSkill):
-            return DispatchResult(
-                kind="create_skill",
-                summary="skill authoring via opencode is deferred to v2; suggestion logged.",
-            )
+            return self._create_skill(request, navigation.category)
         outcome = self.runner.run(navigation, request)
         if outcome.error:
             self.trace.append(
@@ -267,6 +265,45 @@ class Scheduler:
         return DispatchResult(
             kind="create_category",
             summary=f"created category {draft.name}: {draft.description}",
+            skill=draft.name,
+        )
+
+    def _create_skill(self, request: Request, category: str) -> DispatchResult:
+        """Author a new skill leaf stub with the decision model in generation mode."""
+        from .engine import EngineUnavailable
+
+        try:
+            draft = generate_skill(self.engine, request, category, self.tree)
+        except (EngineUnavailable, ValueError) as exc:
+            self.trace.append("error", request.id, phase="create_skill", message=str(exc))
+            return DispatchResult(kind="error", summary=f"create_skill failed: {exc}")
+        existing = {s.name for s in self.tree.get(category, [])}
+        if draft.name in existing:
+            self.trace.append(
+                "error",
+                request.id,
+                phase="create_skill",
+                category=category,
+                message=f"skill {draft.name} already exists",
+            )
+            return DispatchResult(
+                kind="error",
+                summary=f"create_skill failed: {draft.name} already exists",
+            )
+        self.registry.register_skill(category, draft.name, draft.description)
+        self.tree.setdefault(category, []).append(
+            Skill(name=draft.name, category=category, description=draft.description)
+        )
+        self.trace.append(
+            "skill_created",
+            request.id,
+            category=category,
+            skill=draft.name,
+            description=draft.description,
+        )
+        return DispatchResult(
+            kind="create_skill",
+            summary=f"created skill {category}.{draft.name}: {draft.description}",
             skill=draft.name,
         )
 

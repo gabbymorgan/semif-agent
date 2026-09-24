@@ -41,7 +41,7 @@ All decisions are SemIf calls: `{state, question, options[]}`. State is the curr
 
 - Structure: categories → skills → actions. Top level listed at each level.
 - Navigation is a chain of SemIf choices, one per level, descending until a leaf skill matches.
-- Navigation offers a `create_category` suggestion at the category level and a `create_skill` suggestion at the leaf level. `create_category` is live: the decision model, driven in normal generation mode, authors a broad title + description, and the stub is persisted to the category registry and merged into the running tree. `create_skill` logs a suggestion event (state, query, SemIf output) to the trace — **opencode authors the skill** (its only role) and drops a skill manifest into the registry, deferred to v2. The new skill becomes a leaf immediately.
+- Navigation offers a `create_category` suggestion at the category level and a `create_skill` suggestion at the leaf level. Both are live: the decision model, driven in normal generation mode, authors a title + description (broad bucket for a category, single specific action for a skill), and the stub is persisted to the category registry and merged into the running tree. The new skill becomes a leaf immediately; a real skill body (opencode authoring a skill manifest) remains deferred to v2.
 
 ### Skill manifest
 - name, category, description, allowed inputs, action list, cost budget, decision log reference.

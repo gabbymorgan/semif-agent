@@ -21,10 +21,10 @@ cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard
 scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
-skills.py       tree + registry (email.compose, response.reject, tracking.check),
+skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 navigation = SemIf choices per level (logged), create_category
-                authors + registers a category stub via the decision model in
-                generation mode; create_skill branch (stub)
+                and create_skill author + register stubs via the decision model
+                in generation mode
 skill.py        loop: observe -> predict -> act -> observe -> assess (LLM)
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 llm.py          OpenAI-compatible client for self-assessment (stdlib urllib)
@@ -116,12 +116,12 @@ unit tests (24) + box integration tests (2).
   validate (accuracy/ECE on a held-out slice, prompt-hash regression), swap the
   pinned model revision. GPU offload: train on a beefier GPU; the running agent
   keeps a frozen inference revision until a swap validates.
-- `create_skill` branch: navigation logs a suggestion event (state, query, SemIf
-  output) to the trace — currently a stub; opencode authoring at a tree leaf is
-  deferred. (`create_category` is live: the decision model, driven in normal
-  generation mode via `SemIfEngine.generate`, proposes a broad title +
-  description, and the stub is persisted to `data/categories.json` and merged
-  into the running tree.)
+- `create_skill` branch: now live, mirroring `create_category`. The decision
+  model, driven in normal generation mode via `SemIfEngine.generate`, proposes a
+  specific skill title + description for the chosen category; the stub is
+  persisted to `data/categories.json` (under that category's `skills` list) and
+  merged into the running tree as a leaf. Still deferred: a real skill body —
+  opencode authoring at a tree leaf remains future work.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
