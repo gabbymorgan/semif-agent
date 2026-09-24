@@ -234,6 +234,95 @@ unit tests (24) + box integration tests (2).
   stall with zero output usually means the ollama ROCm runner wedged;
   `sudo systemctl restart ollama` is the recovery.
 
+## Codegen guardrails backlog (one session per item)
+
+Context learned 2026-09-24 on the box: qwen38-iq3s looped ~40 min on one skill
+body (1.5 MB streamed) with no guard firing. Root causes: (1) `CodegenClient`
+sends `temperature 0.0` (greedy) and no penalties while the Modelfile has
+`repeat_penalty 1` (off) + `presence_penalty 0`; (2) the total `timeout` check
+only runs inside the `if not ready:` branch of `_read_stream`, so a
+continuously-streaming runaway never trips it. Known model facts: qwen38-iq3s
+runtime window `num_ctx=100000` (native `qwen35.context_length=262144`);
+ollama OpenAI-compat `/v1/chat/completions` supports `temperature`, `top_p`,
+`presence_penalty`, `frequency_penalty`, `max_tokens`, `reasoning_effort`, and
+`stream_options.include_usage` (returns exact token `usage`) — but NOT
+`repeat_penalty`/`min_p`/`top_k` (needs a Modelfile edit or native
+`/api/chat`). Degradation tracks ABSOLUTE tokens used (SMART<100K,
+WARN 100–200K, DUMB>200K), so limits are a total-context budget
+(prompt+output), not a fill %.
+
+- [ ] **1. Fix the total-timeout stream bug** (`semif_agent/codegen.py`)
+  - Move the `now - start >= self.timeout` check out of the `if not ready:`
+    branch to the top of the `_read_stream` loop so it fires while streaming.
+  - Test: fake SSE server that streams forever → `CodegenError` "total budget"
+    must raise while tokens still flow.
+  - Verify: `python3 -m pytest tests/ -q --ignore=tests/integration`.
+
+- [ ] **2. Auto-detect context window + layered token budget** (`codegen.py`, `cli.py`, `config.example.json`)
+  - `CodegenClient` lazily queries `GET /api/show {model}` → `parameters.num_ctx`
+    (fallback `model_info.<arch>.context_length`, then `context_window` config,
+    then default 100000).
+  - Per request: `total_limit = min(smart_limit, window*max_fill_ratio)`;
+    `output_limit = min(max_output, total_limit - prompt_est)`;
+    `warn_point = min(warn_limit, window*warn_fill_ratio)`.
+  - `max_output`: `>=1` = absolute tokens, `0<x<1` = fraction of window,
+    default `0.25`. Enforce in `_read_stream` via chars→tokens estimate
+    (`chars_per_token`). Abort → `CodegenError` → graceful stub.
+  - Print a start line: context tokens, output cap tokens + %, peak total fill.
+  - Config: `codegen.{context_window=0, smart_limit=100000, warn_limit=200000,
+    max_fill_ratio=0.8, warn_fill_ratio=0.5, max_output=0.25, chars_per_token=4.0}`.
+  - Tests: cap trips at fraction-of-window and absolute forms (fake server +
+    explicit window); `/api/show` parse (mock the fetch).
+
+- [ ] **3. Exact token accounting via include_usage** (`codegen.py`)
+  - Send `stream_options: {"include_usage": true}`; capture the `usage` chunk
+    in `_consume_frame`; after the stream log real `prompt/completion/total`
+    tokens, % of window, and zone `SMART|WARN|DUMB` (absolute thresholds
+    `smart_limit`/`warn_limit`).
+  - Test: fake server emits a usage chunk; assert it's captured and logged.
+
+- [ ] **4. SemIf degeneration watchdog** (`codegen.py`, `cli.py`, `scheduler.py`)
+  - Add optional `degeneration_check: Callable[[str], str|None]` to
+    `CodegenClient.chat`/`generate_skill_body`; `_read_stream` calls it every
+    `interval` chars with the last `window` chars (content+reasoning);
+    non-None → `CodegenError`.
+  - Wire in `cli.build_scheduler`: 2-option SemIf decision (continue/stop);
+    `P(stop) >= threshold` aborts. Record as a **trace-only** event
+    (kind `codegen`, with probs) — never in the decision log.
+  - Config: `codegen.degeneration.{enabled, threshold=0.9, interval=8000,
+    window=2000, min_chars=4000}`. Disabled when no engine (keeps
+    `CodegenClient` standalone pure for unit tests).
+  - Tests: a callback returning a reason aborts the stream; not invoked when
+    disabled.
+
+- [ ] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
+  - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`
+    (defaults `0.15`/`0.95`/`0.1`/`0.2`).
+  - `generate_skill_body` escalates on degeneration or invalid parse:
+    attempts 2–3 use `temp 0.3 / presence 0.3 / freq 0.5` + a corrective
+    message ("You are looping; emit the final Python now."). Max 3 attempts
+    (config `max_attempts`), then graceful stub. Retry = fresh short prompt,
+    i.e. context resets to SMART.
+  - Tests: payload carries the params; retry uses escalated params.
+
+- [ ] **6. Box Modelfile anti-loop levers** (guppy; infra, not a code change)
+  - `repeat_penalty`/`min_p` are not reachable via OpenAI-compat, so set them
+    server-side: edit the qwen38-iq3s Modelfile to `PARAMETER repeat_penalty 1.2`
+    and `PARAMETER min_p 0.05`, then `ollama create qwen38-iq3s -f ...`.
+  - Verify: `ollama show --modelfile qwen38-iq3s` shows the params; re-run
+    `test_generate_skill_body_codegen` and
+    `test_create_category_chain_runs_new_skill`; confirm no long loop.
+
+- [ ] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)
+  - `read_skill_contract` also yields sha256 of SKILL.md; record
+    `contract_sha256` on the `skill_writing` trace event (+ dashboard display).
+  - Test: the actually-sent HTTP payload's system message contains a SKILL.md
+    phrase (harness already records request bodies).
+
+- [ ] **8. Config + AGENTS.md docs**
+  - Update `config.example.json` codegen block and the AGENTS.md codegen
+    section with every new key from items 2, 4, 5.
+
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
   real endpoint. Pure unit tests touch data-structure math only (queue ordering,

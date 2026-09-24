@@ -78,7 +78,7 @@ class CreateSkill:
 class CreateCategory:
     """Suggestion that the request needs a brand-new top-level category.
 
-    Unlike CreateSkill this is handled live: the decision model is used in
+    Like CreateSkill this is handled live: the decision model is used in
     normal generation mode to author the category stub.
     """
 
