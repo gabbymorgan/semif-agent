@@ -17,11 +17,14 @@ from .queue import UrgencyQueue
 from .skill import SkillRunner
 from .skills import (
     ActionContext,
+    CategoryRegistry,
+    CreateCategory,
     CreateSkill,
     Skill,
     build_skills,
     build_tree,
     compose_state,
+    generate_category,
     navigate,
 )
 from .trace import TraceLog
@@ -76,6 +79,9 @@ class Scheduler:
         )
         self.skills = build_skills(config)
         self.tree = build_tree(self.skills)
+        self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
+        for category in self.registry.read():
+            self.tree.setdefault(category, [])
         self.ctx = ActionContext(engine=self.engine, config=config)
         self.runner = SkillRunner(self.ctx, self.llm, self.log)
         self.current: Process | None = None
@@ -199,6 +205,8 @@ class Scheduler:
 
     def _dispatch(self, request: Request) -> DispatchResult:
         navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
+        if isinstance(navigation, CreateCategory):
+            return self._create_category(request)
         if isinstance(navigation, CreateSkill):
             return DispatchResult(
                 kind="create_skill",
@@ -226,6 +234,40 @@ class Scheduler:
             summary=f"{navigation.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
             skill=navigation.name,
             decisions_logged=outcome.decisions_logged,
+        )
+
+    def _create_category(self, request: Request) -> DispatchResult:
+        """Author a new category stub with the decision model in generation mode."""
+        from .engine import EngineUnavailable
+
+        try:
+            draft = generate_category(self.engine, request, self.tree)
+        except (EngineUnavailable, ValueError) as exc:
+            self.trace.append("error", request.id, phase="create_category", message=str(exc))
+            return DispatchResult(kind="error", summary=f"create_category failed: {exc}")
+        if draft.name in self.tree:
+            self.trace.append(
+                "error",
+                request.id,
+                phase="create_category",
+                message=f"category {draft.name} already exists",
+            )
+            return DispatchResult(
+                kind="error",
+                summary=f"create_category failed: {draft.name} already exists",
+            )
+        self.registry.register(draft.name, draft.description)
+        self.tree[draft.name] = []
+        self.trace.append(
+            "category_created",
+            request.id,
+            category=draft.name,
+            description=draft.description,
+        )
+        return DispatchResult(
+            kind="create_category",
+            summary=f"created category {draft.name}: {draft.description}",
+            skill=draft.name,
         )
 
     def status(self) -> str:

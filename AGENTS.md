@@ -22,8 +22,9 @@ cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
 scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py       tree + registry (email.compose, response.reject, tracking.check),
-                navigation = SemIf choices per level (logged), create_skill
-                branch (stub)
+                navigation = SemIf choices per level (logged), create_category
+                authors + registers a category stub via the decision model in
+                generation mode; create_skill branch (stub)
 skill.py        loop: observe -> predict -> act -> observe -> assess (LLM)
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 llm.py          OpenAI-compatible client for self-assessment (stdlib urllib)
@@ -111,9 +112,12 @@ unit tests (24) + box integration tests (2).
   validate (accuracy/ECE on a held-out slice, prompt-hash regression), swap the
   pinned model revision. GPU offload: train on a beefier GPU; the running agent
   keeps a frozen inference revision until a swap validates.
-- `create_skill` / `create_category` branches: navigation logs a suggestion event
-  (state, query, SemIf output) to the trace — currently a stub; opencode
-  authoring at a tree leaf is deferred.
+- `create_skill` branch: navigation logs a suggestion event (state, query, SemIf
+  output) to the trace — currently a stub; opencode authoring at a tree leaf is
+  deferred. (`create_category` is live: the decision model, driven in normal
+  generation mode via `SemIfEngine.generate`, proposes a broad title +
+  description, and the stub is persisted to `data/categories.json` and merged
+  into the running tree.)
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)

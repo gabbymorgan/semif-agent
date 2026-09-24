@@ -2,8 +2,10 @@
 
 A skill is a leaf reached by a chain of SemIf choices (category -> skill).
 The category level carries a "create_category" branch and the leaf level a
-"create_skill" branch; both are stubs that log a suggestion event to the trace
-(deferred to v2 — no actual authoring yet).
+"create_skill" branch. create_category is live: the decision model is driven in
+normal generation mode to propose a title + description for a broad new
+category, which is persisted to a category registry and becomes a stub in the
+tree. create_skill is still a stub that logs a suggestion event (deferred).
 
 Only the real skills live here; navigation uses the real decision engine.
 """
@@ -12,12 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
+from .llm import LLMClient
 from .log import DecisionLog
 from .trace import TraceLog
 
@@ -58,14 +62,53 @@ class Skill:
 
 @dataclass
 class CreateSkill:
-    """Stub for a missing-category/skill suggestion at a tree level.
+    """Suggestion that the current category needs a new skill.
 
     Navigation logs the suggestion event to the trace; actual authoring is
-    deferred to v2. `category` is None for a new-category suggestion, else the
-    category that needs the new skill.
+    deferred to v2. `category` names the category that needs the new skill.
     """
 
-    category: str | None = None
+    category: str
+
+
+@dataclass
+class CreateCategory:
+    """Suggestion that the request needs a brand-new top-level category.
+
+    Unlike CreateSkill this is handled live: the decision model is used in
+    normal generation mode to author the category stub.
+    """
+
+
+@dataclass
+class CategoryDraft:
+    """An authored category stub: a broad bucket for future skills."""
+
+    name: str
+    description: str
+
+
+class CategoryRegistry:
+    """Persisted category stubs, one file on disk.
+
+    Format: {name: {"description": str, "skills": []}}. The empty skills list is
+    the slot that create_skill will fill later; for now a stub category has no
+    leaves.
+    """
+
+    def __init__(self, path: str = "data/categories.json"):
+        self.path = Path(path)
+
+    def read(self) -> dict[str, dict]:
+        if not self.path.is_file():
+            return {}
+        return json.loads(self.path.read_text())
+
+    def register(self, name: str, description: str) -> None:
+        categories = self.read()
+        categories[name] = {"description": description, "skills": []}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
 
 def compose_state(request: Request, current: str | None = None) -> str:
@@ -172,12 +215,12 @@ def navigate(
     trace: TraceLog,
     request: Request,
     tree: dict[str, list[Skill]],
-) -> Skill | CreateSkill:
+) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
-    The category level offers a "create_category" branch and the leaf level a
-    "create_skill" branch; both log a suggestion event to the trace and return
-    a CreateSkill stub (actual authoring is deferred to v2).
+    The category level offers a "create_category" branch (handled live by
+    dispatch) and the leaf level a "create_skill" branch (still a stub); both
+    log a suggestion event to the trace.
     """
     categories = sorted(tree.keys())
     create_category = Option("create_category", "Suggest a new category for this.")
@@ -199,7 +242,7 @@ def navigate(
             selected=top_result.selected,
             probs=top_result.probs,
         )
-        return CreateSkill(category=None)
+        return CreateCategory()
     skills = tree[category]
     create_skill = Option("create_skill", "Suggest creating a new skill.")
     leaf = DecisionRequest(
@@ -231,3 +274,51 @@ def tree_summary(tree: dict[str, list[Skill]]) -> str:
         names = ", ".join(s.name for s in tree[category])
         lines.append(f"  {category}: {names}")
     return "\n".join(lines)
+
+
+def build_category_prompt(request: Request, tree: dict[str, list[Skill]]) -> list[dict]:
+    """Chat messages for the decision model used as the category author.
+
+    The category must be a general bucket that many tools could fit under, not
+    a single skill. The existing tree is included so the model avoids duplicating
+    categories and stays broad enough to be useful.
+    """
+    system = (
+        "You are the skill-tree authoring step of a local agent. A request did "
+        "not fit any existing category. Propose one new top-level category of "
+        "tools/skills that would encompass this request. It must be broad enough "
+        "that many tools could fit under it — a general-purpose bucket, not a "
+        "single skill. Reply with JSON only: "
+        '{"title": "<short lowercase snake_case id, no spaces>", '
+        '"description": "<one to two sentence purpose>"}'
+    )
+    user = (
+        f"Request: {request.text}\n"
+        f"Existing categories and their skills:\n{tree_summary(tree)}\n"
+        "Proposed new category (JSON only):"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_category_draft(raw: str) -> CategoryDraft:
+    """Parse the model's JSON reply into a CategoryDraft."""
+    parsed = LLMClient._parse_json(raw)
+    title = str(parsed.get("title", "")).strip()
+    description = str(parsed.get("description", "")).strip()
+    if not title or not description:
+        raise ValueError(f"category draft missing title/description: {raw!r}")
+    name = re.sub(r"\s+", "_", title.lower())
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"category title must be snake_case alnum: {title!r}")
+    return CategoryDraft(name=name, description=description)
+
+
+def generate_category(
+    engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]
+) -> CategoryDraft:
+    """Author a new category stub with the decision model in generation mode."""
+    raw = engine.generate(build_category_prompt(request, tree))
+    return parse_category_draft(raw)

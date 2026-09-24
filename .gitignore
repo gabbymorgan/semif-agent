@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 data/decisions.jsonl
 data/runs.jsonl
+data/categories.json
 data/drafts/
 .pytest_cache/
 config.json

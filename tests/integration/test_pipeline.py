@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from semif_agent.cli import build_scheduler, load_config
+from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
+from semif_agent.skills import CategoryDraft, generate_category
 
 
 def require_real(config: dict):
@@ -89,3 +91,34 @@ def test_busy_choice_path(tmp_path):
     print(f"[{status}] {detail}")
     assert status in ("preempted", "queued", "dropped")
     scheduler.idle()
+
+
+def test_engine_generation_normal_mode(tmp_path):
+    """The pinned decision model must also generate text in the normal way."""
+    config = load_config()
+    require_real(config)
+    scheduler, config = build_scheduler(config)
+    out = scheduler.engine.generate(
+        [
+            {"role": "system", "content": "Reply with the single word ok."},
+            {"role": "user", "content": "say ok"},
+        ],
+        max_tokens=16,
+    )
+    print(f"generation: {out!r}")
+    assert isinstance(out, str) and out.strip()
+
+
+def test_generate_category(tmp_path):
+    """Authoring a category stub through the real decision model."""
+    config = load_config()
+    require_real(config)
+    scheduler, config = build_scheduler(config)
+    draft = generate_category(
+        scheduler.engine,
+        Request("tell me if my package was delivered"),
+        scheduler.tree,
+    )
+    print(f"draft: {draft.name!r} — {draft.description!r}")
+    assert isinstance(draft, CategoryDraft)
+    assert draft.name and draft.description

@@ -20,5 +20,6 @@
   },
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
+  "category_registry": "data/categories.json",
   "dashboard": {"port": 8765, "host": "0.0.0.0"}
 }

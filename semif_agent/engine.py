@@ -91,3 +91,27 @@ class SemIfEngine:
                 "total_seconds": result.get("total_seconds"),
             },
         )
+
+    def generate(
+        self,
+        messages: list[dict],
+        temperature: float = 0.2,
+        max_tokens: int = 256,
+    ) -> str:
+        """Drive the pinned decision model in the normal way: text generation.
+
+        SemIf scoring reads option logits directly; this instead uses the
+        underlying llama.cpp chat-completion endpoint on the same loaded model,
+        e.g. for skill-tree authoring. Each call resets the KV cache by
+        default, so interleaving scoring and generation on one model is safe.
+        """
+        model, tokenizer, metadata = self._ensure_loaded()
+        try:
+            reply = model.create_chat_completion(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            raise EngineUnavailable(f"generation failed: {exc}") from exc
+        return reply["choices"][0]["message"]["content"].strip()
