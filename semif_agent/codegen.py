@@ -34,23 +34,34 @@ def read_skill_contract(path: str | None = None) -> str:
 
 
 class CodegenClient:
-    """Minimal OpenAI-compatible chat client for writing skill bodies."""
+    """Minimal OpenAI-compatible chat client for writing skill bodies.
 
-    def __init__(self, base_url: str, model: str, timeout: float = 600.0):
+    No token cap by default: Qwen3-style models reason first and the cap
+    truncates the hidden reasoning, leaving `content` empty. Omit `max_tokens`
+    so the model runs to completion; the reasoning is filtered automatically
+    because only `content` is read.
+    """
+
+    def __init__(self, base_url: str, model: str, timeout: float = 1200.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
 
-    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.0) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float = 0.0,
+    ) -> str:
         url = f"{self.base_url}/chat/completions"
-        body = json.dumps(
-            {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-        ).encode("utf-8")
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"}
         )
@@ -145,7 +156,7 @@ def generate_skill_body(
     draft: SkillDraft,
     tree: dict,
     contract: str | None = None,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
 ) -> str:
     """Author a skill body with the big model; retries once on invalid output."""
     contract_text = contract if contract is not None else read_skill_contract()

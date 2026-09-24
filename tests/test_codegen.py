@@ -163,10 +163,12 @@ def test_merge_skill_bodies_creates_missing_category(tmp_path):
 
 class _FakeOpenAI(BaseHTTPRequestHandler):
     reply: str = GOOD_BODY
+    received: list = []
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length).decode("utf-8")
+        type(self).received.append(json.loads(raw))
         body = json.dumps({"choices": [{"message": {"content": self.reply}}]}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -179,7 +181,7 @@ class _FakeOpenAI(BaseHTTPRequestHandler):
 
 
 def _fake_server(reply: str) -> tuple[ThreadingHTTPServer, str]:
-    handler = type("Handler", (_FakeOpenAI,), {"reply": reply})
+    handler = type("Handler", (_FakeOpenAI,), {"reply": reply, "received": []})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
@@ -217,3 +219,27 @@ def test_codegen_client_unreachable_raises(tmp_path):
     draft = SkillDraft(name="probe", description="Probe the service.")
     with pytest.raises(Exception):
         generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+
+
+def test_chat_omits_max_tokens_by_default():
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        client.chat([{"role": "user", "content": "hi"}])
+        body = httpd.RequestHandlerClass.received[0]
+        assert "max_tokens" not in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_includes_max_tokens_when_set():
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        client.chat([{"role": "user", "content": "hi"}], max_tokens=512)
+        body = httpd.RequestHandlerClass.received[0]
+        assert body["max_tokens"] == 512
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

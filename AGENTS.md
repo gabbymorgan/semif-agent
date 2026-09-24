@@ -185,9 +185,16 @@ unit tests (24) + box integration tests (2).
 ### codegen (skill bodies, box)
 - Skill **bodies** are written by a separate OpenAI-compatible model, configured
   under `codegen` in config.json (default model `qwen38-iq3s`, the 12G 27B
-  IQ3_S GGUF — huge/slow; a 3-bit 27B write can take 30-120s). Title +
-  description for new skills still come from the **small** decision model
-  (`engine.generate`); only the runnable code body uses codegen.
+  IQ3_S GGUF — huge/slow). Title + description for new skills still come from
+  the **small** decision model (`engine.generate`); only the runnable code body
+  uses codegen.
+- **Do NOT cap `max_tokens`** on the codegen call. qwen38-iq3s reasons first
+  and a cap truncates the hidden reasoning, leaving `content` empty
+  (`finish_reason: length`) and the body write fails with "skill body is
+  empty". Unbounded, it runs to completion in ~7 min (~40k chars of reasoning
+  then the code); the client reads only `content`, so reasoning is filtered
+  automatically. The client default timeout is 1200s — raise `codegen.timeout`
+  in config if a harder prompt needs more.
 - Bodies are persisted to `data/skills/<category>/<name>.py` (gitignored) and
   loaded back at startup via `importlib`, so skills stay runnable across
   restarts. `SKILL.md` at the repo root is the contract the codegen model is

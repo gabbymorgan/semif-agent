@@ -13,10 +13,10 @@
   },
   "llm": {"base_url": "http://localhost:11434/v1", "model": "qwen3.5:4b"},
   "codegen": {
-    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model.",
+    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model. No max_tokens cap: qwen38-iq3s reasons extensively (~7 min) before emitting the body; reasoning is filtered automatically. timeout is seconds.",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen38-iq3s",
-    "timeout": 600
+    "timeout": 1200
   },
   "skill_bodies": "data/skills",
   "skills": {
