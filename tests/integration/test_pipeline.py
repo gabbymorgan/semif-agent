@@ -17,7 +17,10 @@ from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
 from semif_agent.skills import (
+    ActionResult,
     CategoryDraft,
+    Prediction,
+    Skill,
     SkillBodyStore,
     SkillDraft,
     build_skills,
@@ -238,3 +241,60 @@ def test_create_category_chain_runs_new_skill(tmp_path):
     assert created["written"] is True, "codegen must produce a runnable body"
     assessed = next(e for e in rows if e["kind"] == "assessed")
     assert assessed["skill"] == created["skill"], "the created skill must run"
+
+
+def test_skill_pauses_for_input_and_resumes(tmp_path):
+    """A run paused for input keeps `current` busy, then `answer` resumes it.
+
+    Uses the real scheduler (real engine + real LLM assessment on the resumed
+    run). The skill itself is injected, not authored, so the flow is
+    deterministic: pause -> answer -> resume -> assessed.
+    """
+    config = load_config()
+    require_real(config)
+    config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
+    scheduler, config = build_scheduler(config)
+
+    seen = []
+
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        if request.user_input:
+            seen.append(request.user_input)
+            return ActionResult(
+                action_log=f"resumed with {request.user_input}",
+                new_state=f"done {request.user_input}",
+            )
+        return ActionResult(
+            action_log="need a tracking number",
+            new_state=request.text,
+            needs_input="What's the tracking number?",
+        )
+
+    skill = Skill(
+        name="track.manual",
+        category="tracking",
+        description="Resolve a tracking number with the human.",
+        predict=predict,
+        act=act,
+    )
+
+    result = scheduler._run_skill(skill, Request("track my package manually"))
+    print(f"[{result.kind}] {result.summary}")
+    assert result.kind == "needs_input"
+    assert scheduler.pending is not None
+    assert scheduler.current is not None
+
+    status, detail = scheduler.answer("AB123")
+    print(f"[{status}] {detail}")
+    assert status == "ran"
+    assert seen == ["AB123"]
+    assert scheduler.pending is None
+    assert scheduler.current is None
+
+    rows = scheduler.trace.read()
+    kinds = [e["kind"] for e in rows]
+    assert "needs_input" in kinds and "answered" in kinds and "assessed" in kinds

@@ -13,6 +13,7 @@ from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import Scheduler
 from semif_agent.skills import (
+    ActionResult,
     CategoryDraft,
     CategoryRegistry,
     CreateCategory,
@@ -29,6 +30,10 @@ from semif_agent.skills import (
     parse_skill_draft,
 )
 from semif_agent.trace import TraceLog
+
+
+def test_action_result_needs_input_defaults_none():
+    assert ActionResult("log", "state").needs_input is None
 
 
 def test_build_category_prompt_contains_request_and_tree():

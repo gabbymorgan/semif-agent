@@ -121,6 +121,10 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             continue
         status, detail = scheduler.submit(line)
         print(f"[{status}] {detail}")
+        while scheduler.pending is not None:
+            answer = input(f"{scheduler.pending.question} ")
+            status, detail = scheduler.answer(answer)
+            print(f"[{status}] {detail}")
 
 
 def scripted(scheduler: Scheduler, path: str) -> None:

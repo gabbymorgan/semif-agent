@@ -5,7 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   runs: [],
   tree: { categories: {} },
-  status: { current: null, queue: [], tau: 0.6 },
+  status: { current: null, pending: null, queue: [], tau: 0.6 },
   dream: {},
   selectedRunId: null,
   selectedDecisionId: null,
@@ -126,6 +126,13 @@ function eventRow(evt) {
   } else if (evt.kind === "skill_created") {
     div.textContent = `created ${evt.skill}${evt.written ? " (body written)" : " (stub)"}`;
     div.title = evt.body || evt.description || "";
+  } else if (evt.kind === "needs_input") {
+    div.textContent = "needs input";
+    div.title = evt.question || "";
+  } else if (evt.kind === "answered") {
+    div.textContent = `answered: ${evt.text || ""}`;
+  } else if (evt.kind === "pending_abandoned") {
+    div.textContent = "pending input abandoned";
   }
   return div;
 }
@@ -362,6 +369,13 @@ function eventNode(evt) {
       node.appendChild(p);
     }
     node.classList.add(evt.written ? "ok" : "stub");
+  } else if (evt.kind === "needs_input") {
+    node.classList.add("needs-input");
+    body.textContent = `awaiting input: ${evt.question || ""}`;
+  } else if (evt.kind === "answered") {
+    body.textContent = `answered: ${evt.text || ""}`;
+  } else if (evt.kind === "pending_abandoned") {
+    body.textContent = "pending input abandoned";
   } else {
     body.textContent = evt.summary || evt.text || "";
   }
@@ -470,6 +484,12 @@ function renderStatus() {
     .map((item) => `${item.id} w=${item.weight.toFixed(2)} ${item.text}`)
     .join("\n") || "queue empty";
   el.appendChild(q);
+
+  const pending = state.status.pending;
+  $("#answer-form").classList.toggle("hidden", !pending);
+  if (pending) {
+    $("#answer-input").placeholder = `${pending.skill}: ${pending.question}`;
+  }
 }
 
 function stat(k, v) {
@@ -541,6 +561,24 @@ $("#submit-form").addEventListener("submit", async (e) => {
     flash(`submit failed: ${err.message}`);
   }
   $("#query-input").value = "";
+  await refreshAll();
+});
+
+$("#answer-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("#answer-input").value.trim();
+  if (!text) return;
+  try {
+    const res = await getJSON("/api/answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`answer failed: ${err.message}`);
+  }
+  $("#answer-input").value = "";
   await refreshAll();
 });
 

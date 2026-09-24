@@ -19,14 +19,20 @@ supplied options; an LLM is used only for generation and self-assessment.
 ```
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard
-scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue
+scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue;
+                a skill run paused for input (needs_input) keeps `current`
+                busy; `answer` routes straight to the pending run, bypassing
+                gate/score/navigation
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 navigation = SemIf choices per level (logged), create_category
                 and create_skill author + register stubs via the decision model
                 in generation mode; SkillBodyStore + materialize_skill persist
-                and hot-load runnable skill bodies from data/skills/
-skill.py        loop: observe -> predict -> act -> observe -> assess (LLM)
+                and hot-load runnable skill bodies from data/skills/;
+                ActionResult.needs_input pauses a run for human input
+skill.py        loop: observe -> predict -> act -> observe -> assess (LLM);
+                a run paused for input is resumed by re-invoking act with the
+                answer on request.user_input (predict is never re-run)
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 codegen.py      CodegenClient (OpenAI-compatible) writes runnable skill bodies
                 against SKILL.md; parse/validate (compile + predict/act)

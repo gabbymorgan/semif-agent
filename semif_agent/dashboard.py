@@ -3,8 +3,8 @@
 A pure-stdlib HTTP server on localhost serving a Redux-DevTools-style
 inspector over the agent's decision flow. Reads the decision log
 (`decisions.jsonl`) plus the run lifecycle trace (`runs.jsonl`), exposes the
-static skill tree, the dream cost report, and two write endpoints: submit a
-request and relabel a decision (human override).
+static skill tree, the dream cost report, and three write endpoints: submit a
+request, answer a run paused for input, and relabel a decision (human override).
 
 The scheduler's engine and LLM are built lazily, so the dashboard runs on the
 thin dev box in replay mode (reads logs; submit degrades to a JSON error) and
@@ -98,12 +98,18 @@ def build_status(scheduler: Scheduler) -> dict:
         if scheduler.current
         else None
     )
+    pending = (
+        {"skill": scheduler.pending.skill.name, "question": scheduler.pending.question}
+        if scheduler.pending
+        else None
+    )
     queue = [
         {"id": request.id, "weight": weight, "text": request.text[:80]}
         for weight, request in scheduler.queue.items()
     ]
     return {
         "current": current,
+        "pending": pending,
         "queue": queue,
         "tau": scheduler.tau,
         "queue_max": scheduler.queue.max_size,
@@ -216,6 +222,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_error(500, str(exc))
                     return
             self._send(200, {"ok": ok})
+            return
+        if path == "/api/answer":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    status, detail = self.scheduler.answer(str(body.get("text", "")))
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
             return
         self._send_error(404, "no such endpoint")
 

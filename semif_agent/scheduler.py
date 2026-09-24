@@ -21,6 +21,7 @@ from .skills import (
     CategoryRegistry,
     CreateCategory,
     CreateSkill,
+    Prediction,
     Skill,
     SkillBodyStore,
     build_skills,
@@ -54,12 +55,28 @@ class Process:
 
 
 @dataclass
+class PendingRun:
+    """A skill run paused awaiting human input.
+
+    `prediction` is kept so resume re-invokes only `act` (predict is not
+    re-run, avoiding duplicate SemIf sub-decisions); `question` is what the
+    run asked the human.
+    """
+
+    request: Request
+    skill: Skill
+    prediction: Prediction
+    question: str
+
+
+@dataclass
 class DispatchResult:
-    kind: str  # ran | create_category | create_skill | error
+    kind: str  # ran | create_category | create_skill | needs_input | error
     summary: str
     skill: str | None = None
     decisions_logged: int = 0
     body_written: bool = False
+    needs_input: str | None = None
 
 
 class Scheduler:
@@ -95,6 +112,7 @@ class Scheduler:
         self.ctx = ActionContext(engine=self.engine, config=config)
         self.runner = SkillRunner(self.ctx, self.llm, self.log)
         self.current: Process | None = None
+        self.pending: PendingRun | None = None
 
     # ---- decision templates (all real SemIf, all logged) ----
 
@@ -164,18 +182,26 @@ class Scheduler:
             try:
                 outcome = self._dispatch(request)
             finally:
-                self.current = None
+                if self.pending is None:
+                    self.current = None
+            if outcome.kind == "needs_input":
+                return "needs_input", outcome.summary
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "running", f"[{label}] {outcome.summary}"
 
         interrupt = self._choice(request, self.current)
         if interrupt:
+            if self.pending is not None:
+                self.trace.append("pending_abandoned", self.pending.request.id)
+                self.pending = None
             previous = self.current
             previous.request.resume["from_skill"] = previous.skill
             self.queue.push(previous.request, previous.weight)
             self.current = Process(request=request, skill="(scheduling)", weight=1.0)
             self.trace.append("preempted", request.id, preempted=previous.skill)
             outcome = self._dispatch(request)
+            if outcome.kind == "needs_input":
+                return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
             self.current = None
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
@@ -190,9 +216,15 @@ class Scheduler:
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
         """Set a fake in-progress process so the choice/score path is exercised."""
+        if self.pending is not None:
+            self.trace.append("pending_abandoned", self.pending.request.id)
+            self.pending = None
         self.current = Process(request=Request(text, source="busy"), skill=skill, weight=1.0)
 
     def idle(self) -> None:
+        if self.pending is not None:
+            self.trace.append("pending_abandoned", self.pending.request.id)
+            self.pending = None
         self.current = None
 
     def run_queue(self) -> list[tuple[str, str]]:
@@ -212,7 +244,11 @@ class Scheduler:
                 self.trace.append("error", request.id, phase="dispatch", message=str(exc))
                 outcome = DispatchResult(kind="error", summary=f"dispatch failed: {exc}")
             finally:
-                self.current = None
+                if self.pending is None:
+                    self.current = None
+            if outcome.kind == "needs_input":
+                results.append(("needs_input", f"[{request.id}] {outcome.summary}"))
+                continue
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             results.append(("ran", f"[{request.id}] {outcome.summary}"))
         return results
@@ -249,11 +285,51 @@ class Scheduler:
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
         outcome = self.runner.run(skill, request)
+        return self._finish_run(skill, request, outcome)
+
+    def answer(self, text: str) -> tuple[str, str]:
+        """Feed the human's answer to a run paused for input.
+
+        Routed directly to the pending run — no gate, score, or navigation —
+        and the run resumes by re-invoking only `act` with the same prediction.
+        """
+        if self.pending is None:
+            return "error", "no run is waiting for input"
+        pending = self.pending
+        self.pending = None
+        pending.request.user_input = text
+        self.trace.append("answered", pending.request.id, text=text)
+        outcome = self.runner.resume(pending.skill, pending.request, pending.prediction)
+        result = self._finish_run(pending.skill, pending.request, outcome)
+        if result.kind == "needs_input":
+            return "needs_input", result.summary
+        self.current = None
+        self.trace.append("ran", pending.request.id, skill=result.skill, summary=result.summary)
+        return "ran", f"[resumed] {result.summary}"
+
+    def _finish_run(self, skill: Skill, request: Request, outcome) -> DispatchResult:
         if outcome.error:
             self.trace.append(
                 "error", request.id, skill=skill.name, message=outcome.error
             )
             return DispatchResult(kind="error", summary=f"skill error: {outcome.error}")
+        if outcome.needs_input:
+            self.pending = PendingRun(
+                request=request,
+                skill=skill,
+                prediction=outcome.prediction,
+                question=outcome.needs_input,
+            )
+            self.current = Process(request=request, skill=skill.name, weight=0.5)
+            self.trace.append(
+                "needs_input", request.id, skill=skill.name, question=outcome.needs_input
+            )
+            return DispatchResult(
+                kind="needs_input",
+                summary=outcome.needs_input,
+                skill=skill.name,
+                needs_input=outcome.needs_input,
+            )
         self.trace.append(
             "assessed",
             request.id,
@@ -413,6 +489,8 @@ class Scheduler:
         lines = []
         current = f"{self.current.skill} ({self.current.request.id})" if self.current else "idle"
         lines.append(f"current: {current}")
+        if self.pending is not None:
+            lines.append(f"awaiting input: {self.pending.question}")
         lines.append(f"queue: {len(self.queue)} pending")
         for weight, request in self.queue.items():
             lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")

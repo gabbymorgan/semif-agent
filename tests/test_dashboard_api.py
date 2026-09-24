@@ -12,11 +12,12 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from semif_agent.dashboard import DashboardHandler
-from semif_agent.decisions import DecisionRequest, DecisionResult, Option
+from semif_agent.decisions import DecisionRequest, DecisionResult, Option, Request
 from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import Scheduler
+from semif_agent.skills import ActionResult, Prediction, Skill
 from semif_agent.trace import TraceLog
 
 
@@ -182,5 +183,70 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
         created = next(e for e in run["events"] if e["kind"] == "skill_created")
         assert created["written"] is True
         assert created["body"] == "data/skills/tracking/track_live.py"
+    finally:
+        server.close()
+
+
+def need_input_skill(seen):
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        if request.user_input:
+            seen.append(request.user_input)
+            return ActionResult(action_log="ok", new_state=f"done {request.user_input}")
+        return ActionResult(
+            action_log="ask",
+            new_state=request.text,
+            needs_input="What's the tracking number?",
+        )
+
+    return Skill(
+        name="track.manual",
+        category="tracking",
+        description="Resolve a tracking number with the human.",
+        predict=predict,
+        act=act,
+    )
+
+
+def test_answer_without_pending_returns_error_json(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/answer", {"text": "hello"})
+        assert status == 200
+        assert payload["status"] == "error"
+        assert "waiting for input" in payload["detail"]
+    finally:
+        server.close()
+
+
+def test_status_includes_pending(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler._run_skill(need_input_skill([]), Request("track my package"))
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/status")
+        assert status == 200
+        assert payload["pending"]["skill"] == "track.manual"
+        assert payload["pending"]["question"] == "What's the tracking number?"
+    finally:
+        server.close()
+
+
+def test_answer_roundtrip_via_api(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    seen = []
+    scheduler._run_skill(need_input_skill(seen), Request("track my package"))
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/answer", {"text": "AB123"})
+        assert status == 200
+        assert payload["status"] == "ran"
+        assert seen == ["AB123"]
+
+        status, payload = server.get("/api/status")
+        assert payload["pending"] is None
     finally:
         server.close()

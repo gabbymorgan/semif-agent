@@ -55,10 +55,12 @@ def act(ctx, request, prediction) -> ActionResult:
   `ctx.config` (the agent config dict).
 - `request` is the `Request` being handled.
 - `Prediction(text: str, decisions: list)` and
-  `ActionResult(action_log: str, new_state: str)` are imported from
+  `ActionResult(action_log: str, new_state: str, needs_input: str | None = None)`
+  are imported from
   `semif_agent.skills`; return those exact types. `decisions` carries any
   `(DecisionRequest, DecisionResult)` pairs made during predict so they are
-  logged as training rows.
+  logged as training rows. `needs_input` carries a question for the human; see
+  the rules below.
 
 ### Rules (hard requirements)
 
@@ -70,6 +72,13 @@ def act(ctx, request, prediction) -> ActionResult:
 - **Never swallow the request.** If the skill cannot act, return an
   `ActionResult` with a short `action_log` explaining why and set `new_state`
   back to `request.text`.
+- **Request input when data is missing.** If a required piece of data is not
+  in the request or in local files, do not fail silently: return an
+  `ActionResult(action_log="...", new_state=request.text, needs_input="<question>")`.
+  The run pauses and the human is asked. The answer arrives on
+  `request.user_input` and `act` is called again with the *same* prediction —
+  check `request.user_input` on the resume pass to finish the run (or ask again
+  if it is still insufficient).
 - **Write files under configured data dirs only** (e.g. `ctx.config["drafts"]`),
   never anywhere else on disk.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.

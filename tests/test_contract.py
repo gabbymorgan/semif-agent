@@ -40,3 +40,7 @@ def test_request_requeue_preserves_state():
     assert updated.priority == original.priority
     assert updated.resume["from_skill"] == "email.compose"
     assert updated.reentries == original.reentries + 1
+
+
+def test_request_user_input_defaults_none():
+    assert Request(text="t").user_input is None

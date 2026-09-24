@@ -24,6 +24,8 @@ class RunResult:
     updated_request: str | None = None
     decisions_logged: int = 0
     error: str | None = None
+    needs_input: str | None = None
+    prediction: Prediction | None = None
 
 
 class SkillRunner:
@@ -37,8 +39,6 @@ class SkillRunner:
         try:
             prediction = skill.predict(self.ctx, request) if skill.predict else Prediction(text="")
             action = skill.act(self.ctx, request, prediction)
-            observed = action.new_state
-            assessment: Assessment = self.llm.assess(skill.name, baseline, action.action_log)
         except Exception as exc:
             return RunResult(
                 skill=skill.name,
@@ -46,6 +46,64 @@ class SkillRunner:
                 summary="",
                 action_log="",
                 new_state=baseline,
+                error=str(exc),
+            )
+        if action.needs_input:
+            return RunResult(
+                skill=skill.name,
+                success=False,
+                summary="",
+                action_log=action.action_log,
+                new_state=baseline,
+                needs_input=action.needs_input,
+                prediction=prediction,
+            )
+        return self._finish(skill, request, prediction, action)
+
+    def resume(self, skill: Skill, request: Request, prediction: Prediction) -> RunResult:
+        """Re-invoke act with the human's answer (on request.user_input) and finish.
+
+        predict is not re-run: its SemIf sub-decisions were already made and are
+        logged here, at completion, so their run_ok label reflects the outcome.
+        """
+        baseline = request.text
+        try:
+            action = skill.act(self.ctx, request, prediction)
+        except Exception as exc:
+            return RunResult(
+                skill=skill.name,
+                success=False,
+                summary="",
+                action_log="",
+                new_state=baseline,
+                error=str(exc),
+            )
+        if action.needs_input:
+            return RunResult(
+                skill=skill.name,
+                success=False,
+                summary="",
+                action_log=action.action_log,
+                new_state=baseline,
+                needs_input=action.needs_input,
+                prediction=prediction,
+            )
+        return self._finish(skill, request, prediction, action)
+
+    def _finish(
+        self, skill: Skill, request: Request, prediction: Prediction, action
+    ) -> RunResult:
+        baseline = request.text
+        observed = action.new_state
+        try:
+            assessment: Assessment = self.llm.assess(skill.name, baseline, action.action_log)
+        except Exception as exc:
+            return RunResult(
+                skill=skill.name,
+                success=False,
+                summary="",
+                action_log="",
+                new_state=observed,
                 error=str(exc),
             )
 
@@ -71,4 +129,5 @@ class SkillRunner:
             new_state=observed,
             updated_request=assessment.updated_request,
             decisions_logged=len(decisions),
+            prediction=prediction,
         )

@@ -31,6 +31,7 @@ from .trace import TraceLog
 class ActionResult:
     action_log: str
     new_state: str
+    needs_input: str | None = None
 
 
 @dataclass

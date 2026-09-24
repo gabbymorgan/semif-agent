@@ -71,6 +71,7 @@ class Request:
     priority: float = 0.5
     reentries: int = 0
     resume: dict[str, Any] = field(default_factory=dict)
+    user_input: str | None = None
 
     def copy_for_requeue(self) -> "Request":
         return Request(
