@@ -140,6 +140,13 @@ def test_parse_skill_draft_normalizes_title():
     assert draft.name == "live_tracking"
 
 
+def test_parse_skill_draft_allows_dotted_name():
+    draft = parse_skill_draft(
+        '{"title": "tracking.status_lookup", "description": "Look up a package status."}'
+    )
+    assert draft.name == "tracking.status_lookup"
+
+
 def test_parse_skill_draft_missing_fields_raises():
     with pytest.raises(ValueError):
         parse_skill_draft('{"title": "only_title"}')

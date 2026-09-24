@@ -430,8 +430,8 @@ def parse_skill_draft(raw: str) -> SkillDraft:
     if not title or not description:
         raise ValueError(f"skill draft missing title/description: {raw!r}")
     name = re.sub(r"\s+", "_", title.lower())
-    if not name.replace("_", "").isalnum():
-        raise ValueError(f"skill title must be snake_case alnum: {title!r}")
+    if not re.fullmatch(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*", name):
+        raise ValueError(f"skill title must be snake_case alnum (dots allowed): {title!r}")
     return SkillDraft(name=name, description=description)
 
 
