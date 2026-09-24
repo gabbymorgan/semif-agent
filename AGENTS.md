@@ -55,15 +55,13 @@ run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
   engine/LLM paths). Copy `config.example.json` to `config.json` and edit.
   `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are runtime
   artifacts and gitignored too.
-- **Known Gitea quirk**: `git fetch` from the box can fail with
-  `remote: sh: bad option '--oneshot'` — a server-side `authorized_keys`
-  forced-command bug on this instance (deploy/account keys both hit it; the
-  dev key's entry works, so pushes from dev are fine). Fallback when the box
-  can't pull: make a bundle on dev and fetch it on the box —
-  `git bundle create /tmp/sf.bundle main` → scp to the box →
-  `git fetch /tmp/sf.bundle "+refs/heads/main:refs/remotes/origin/main"` →
-  `git checkout -f -B main refs/remotes/origin/main`. Fixing the Gitea SSH
-  (or using an HTTPS PAT on the box) is tracked as the durable solution.
+- The Gitea instance was rebuilt fresh (Sep 2026) after its git pack transfer
+  broke (`sh: bad option '--oneshot'` — a stray system `uploadpack.packObjectsHook`
+  killed pack generation; the old AGENTS.md note blaming `authorized_keys` was
+  a misdiagnosis). Both the dev key (`shitass@nunya`) and the box key
+  (`guppy@semif-agent`) are re-registered; clone/fetch/push all work now. If a
+  fresh machine can't pull, the durable fix is on the Gitea host:
+  `git config --system --unset-all uploadpack.packObjectsHook`.
 - Decision rows logged before the `run_id` threading landed show up under
   run_id `"?"` in the dashboard — that's expected, not a bug.
 
@@ -77,6 +75,9 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
   SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh-add ~/.ssh/id_ed25519
   ```
   The agent dies if this machine restarts; redo it each session.
+- `semif_agent` is editable-installed into the box venv
+  (`pip install -e ~/semif-agent --no-deps`), so `python -m semif_agent.cli ...`
+  works from any directory on the box, not just the repo root.
 - Run the agent on the box:
   ```sh
   cd ~/semif-agent && export HF_HOME=/home/abby/hf
@@ -86,14 +87,17 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
   ~/semif-venv/bin/python -m semif_agent.cli relabel <id> <outcome>
   ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
   ```
-- Dashboard: browser UI on the box at http://192.168.8.181:8765/ (bound to
-  `0.0.0.0` via `dashboard.host` in config.json, so any LAN machine can reach
-  it; `--host`/`--port` override on the CLI). Note the submit/relabel POST
-  endpoints are therefore open to the whole LAN. It works in live mode on
-  the box (submit runs the real engine + LLM) and in replay mode anywhere
-  (reads decisions.jsonl + runs.jsonl; submit degrades to a JSON error without
-  the engine). Relabeling in the UI writes a human override (3x weight in
-  dream) via `POST /api/relabel`.
+- Dashboard: runs as a systemd **user** service on the box
+  (`semif-dashboard.service`, linger enabled, binds `0.0.0.0:8765`), so it's up
+  after reboots with no manual launch — browser UI at http://192.168.8.181:8765/.
+  Manage it with `systemctl --user status/restart semif-dashboard.service`.
+  Note the submit/relabel POST endpoints are therefore open to the whole LAN.
+  It works in live mode on the box (submit runs the real engine + LLM) and in
+  replay mode anywhere (`--replay`; reads decisions.jsonl + runs.jsonl; submit
+  degrades to a JSON error without the engine). Relabeling in the UI writes a
+  human override (3x weight in dream) via `POST /api/relabel`. On the dev
+  machine, replay mode: `cd ~/Repos/semif-agent && python3 -m semif_agent.cli
+  dashboard --replay` (binds 127.0.0.1:8765).
 - Integration tests (real engine + real LLM) only run on the box:
   `~/semif-venv/bin/python -m pytest tests/integration -q -s`
   They take ~100s (model load ~34s). Run them in the background and poll —
