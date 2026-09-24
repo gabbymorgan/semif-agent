@@ -177,6 +177,7 @@ def test_generate_skill_body_codegen(tmp_path):
         tree,
     )
     print(f"generated {len(code)} bytes of skill body")
+    draft.code = code
     store = SkillBodyStore(str(tmp_path / "skills"))
     skill = materialize_skill(draft, "tracking", store)
     assert callable(skill.predict) and callable(skill.act)
