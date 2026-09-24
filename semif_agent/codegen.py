@@ -114,10 +114,12 @@ class CodegenClient:
         Reads are gated by `select` so the socket never blocks-and-times-out:
         a socket that delivers no bytes for `idle_warn` seconds prints a
         warning, and `idle_timeout` seconds of silence raises CodegenError.
-        The total wall-clock budget is `self.timeout`, so a slow-but-streaming
-        generation is never cut short. Thresholds <= 0 disable that check. If
-        the underlying socket can't be reached, falls back to a plain blocking
-        read (relying on the outer TimeoutError handling).
+        The total wall-clock budget `self.timeout` is enforced against the
+        whole stream and checked on every loop iteration, so even a
+        continuously-streaming generation that never sends `[DONE]` is cut
+        short. Thresholds <= 0 disable the idle checks. If the underlying
+        socket can't be reached, falls back to a plain blocking read
+        (`_read_stream_blocking`, which enforces the same total budget).
         """
         parts: list[str] = []
         sock = self._stream_socket(response)
@@ -127,6 +129,10 @@ class CodegenClient:
         last_activity = start
         warned = False
         while True:
+            if time.monotonic() - start >= self.timeout:
+                raise CodegenError(
+                    f"codegen request exceeded {self.timeout:.0f}s total budget"
+                )
             ready, _, _ = select.select([sock], [], [], 1.0)
             now = time.monotonic()
             if not ready:
@@ -142,10 +148,6 @@ class CodegenClient:
                     raise CodegenError(
                         f"codegen stream stalled: no tokens for {idle:.0f}s "
                         f"(idle_timeout={self.idle_timeout:.0f}s)"
-                    )
-                if now - start >= self.timeout:
-                    raise CodegenError(
-                        f"codegen request exceeded {self.timeout:.0f}s total budget"
                     )
                 continue
             try:
@@ -163,9 +165,20 @@ class CodegenClient:
         return "".join(parts)
 
     def _read_stream_blocking(self, response) -> str:
-        """Fallback reader when the response socket can't be located."""
+        """Fallback reader when the response socket can't be located.
+
+        A plain blocking read relies on the per-read socket timeout for
+        silence, but that bounds individual reads, not the whole stream — so
+        enforce the same total wall-clock budget `self.timeout` in the loop,
+        or a continuously-streaming runaway would never be cut short.
+        """
         parts: list[str] = []
+        start = time.monotonic()
         for raw in response:
+            if time.monotonic() - start >= self.timeout:
+                raise CodegenError(
+                    f"codegen request exceeded {self.timeout:.0f}s total budget"
+                )
             if not self._consume_frame(raw.decode("utf-8").strip(), parts):
                 break
         if parts:

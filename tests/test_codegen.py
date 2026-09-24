@@ -320,6 +320,89 @@ def _sse_frame(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+class _RunawayStreamOpenAI(BaseHTTPRequestHandler):
+    """Streams content frames forever, never sending `[DONE]`.
+
+    Stands in for a degenerated generation that keeps producing tokens
+    without finishing; the client must trip its total wall-clock budget
+    even while bytes are still flowing. Drops out quietly when the client
+    aborts the connection.
+    """
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.flush()
+        try:
+            while True:
+                frame = _sse_frame(
+                    {"choices": [{"delta": {"content": "x"}}]}
+                )
+                self.wfile.write(frame.encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(0.02)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+def test_chat_stream_total_budget_fires_while_streaming():
+    """A continuously-streaming runaway must be cut short by the total
+    budget, not loop forever. idle_timeout (0.5s) < timeout (1.0s) makes the
+    assertion meaningful: had the stream gone silent, "stalled" would have
+    fired first — matching "total budget" proves the check ran while tokens
+    were still flowing."""
+    handler = type("Handler", (_RunawayStreamOpenAI,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        client = CodegenClient(
+            base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1",
+            model="test",
+            timeout=1.0,
+            stream=True,
+            idle_warn=0.25,
+            idle_timeout=0.5,
+        )
+        started = time.monotonic()
+        with pytest.raises(CodegenError, match="total budget"):
+            client.chat([{"role": "user", "content": "hi"}])
+        elapsed = time.monotonic() - started
+        assert 0.9 <= elapsed < 5.0, f"budget should fire ~1s in, took {elapsed:.1f}s"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _ForeverFrames:
+    """Infinite iterable of valid content SSE lines (no `[DONE]`)."""
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        time.sleep(0.05)
+        return _sse_frame({"choices": [{"delta": {"content": "x"}}]}).encode("utf-8")
+
+
+def test_read_stream_blocking_enforces_total_budget():
+    """The blocking fallback must enforce the total budget too — its
+    per-read socket timeout bounds individual reads, not the whole stream."""
+    client = CodegenClient(
+        base_url="http://unused", model="test", timeout=0.5, stream=True
+    )
+    started = time.monotonic()
+    with pytest.raises(CodegenError, match="total budget"):
+        client._read_stream_blocking(_ForeverFrames())
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, f"blocking fallback should fail fast, took {elapsed:.1f}s"
+
+
 class _StreamingOpenAI(BaseHTTPRequestHandler):
     """Replies with an OpenAI-compatible SSE token stream (COT then content).
 
