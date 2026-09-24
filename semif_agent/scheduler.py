@@ -55,7 +55,7 @@ class Process:
 
 @dataclass
 class DispatchResult:
-    kind: str  # ran | create_skill | error
+    kind: str  # ran | create_category | create_skill | error
     summary: str
     skill: str | None = None
     decisions_logged: int = 0
@@ -219,20 +219,33 @@ class Scheduler:
 
     # ---- dispatch ----
 
-    def _dispatch(self, request: Request, _depth: int = 0) -> DispatchResult:
+    def _dispatch(self, request: Request) -> DispatchResult:
         navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
         if isinstance(navigation, CreateCategory):
-            return self._create_category(request)
+            created = self._create_category(request)
+            if created.kind != "create_category":
+                return created
+            return self._dispatch_skill(request, created.skill)
         if isinstance(navigation, CreateSkill):
-            created = self._create_skill(request, navigation.category)
-            if created.kind == "create_skill" and created.body_written and _depth < self.max_reentries:
-                requeued = _requeue(request, request.text)
-                self.trace.append(
-                    "requeued", request.id, text=request.text, reason="skill created"
-                )
-                return self._dispatch(requeued, _depth=_depth + 1)
-            return created
+            return self._dispatch_skill(request, navigation.category)
         return self._run_skill(navigation, request)
+
+    def _dispatch_skill(self, request: Request, category: str) -> DispatchResult:
+        """create_skill in `category`, then run the new skill so the request is answered.
+
+        The created leaf is executed directly, not via a re-dispatch that would
+        re-run navigation on a tree that just changed.
+        """
+        created = self._create_skill(request, category)
+        if created.kind != "create_skill" or not created.body_written:
+            return created
+        skill = next(
+            (s for s in self.tree.get(category, []) if s.name == created.skill),
+            None,
+        )
+        if skill is None:
+            return created
+        return self._run_skill(skill, request)
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
         outcome = self.runner.run(skill, request)
@@ -300,7 +313,7 @@ class Scheduler:
         compatible model then writes the runnable body against SKILL.md. The
         stub is registered first so the leaf is navigable even if the body
         write fails; a successful write is merged into the tree as a runnable
-        skill and the request re-dispatches to it.
+        skill and executed directly by _dispatch_skill.
         """
         from .engine import EngineUnavailable
 

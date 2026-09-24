@@ -9,7 +9,9 @@ import pytest
 
 from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
+from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
+from semif_agent.scheduler import Scheduler
 from semif_agent.skills import (
     CategoryDraft,
     CategoryRegistry,
@@ -199,3 +201,25 @@ def test_navigate_empty_tree_short_circuits(tmp_path):
     assert isinstance(result, CreateCategory)
     assert log.read() == []
     assert any(e["kind"] == "create_category" for e in trace.read())
+
+
+def test_dispatch_create_category_without_engine_returns_error(tmp_path):
+    """An empty tree short-circuits to CreateCategory; without an engine the
+    category authoring fails gracefully instead of leaving the scheduler wedged."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    scheduler = Scheduler(
+        engine=SemIfEngine(EngineConfig()),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=log,
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+        },
+        trace=trace,
+    )
+    scheduler.tree = {}
+    result = scheduler._dispatch(Request("anything"))
+    assert result.kind == "error"
+    assert "create_category failed" in result.summary

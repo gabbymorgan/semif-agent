@@ -126,9 +126,11 @@ unit tests (24) + box integration tests (2).
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body: a larger OpenAI-compatible model (`codegen`, default
   `qwen38-iq3s`) writes `predict`/`act` code against `SKILL.md`, persisted to
-  `data/skills/` and hot-loaded, then the request re-dispatches to the new
-  skill. Authoring is still a single pass — validating/reusing written bodies
-  across runs is future work.
+  `data/skills/` and hot-loaded, then the newly created leaf is executed
+  directly so the request that prompted creation is answered. A request that
+  prompted a whole new category runs the same chain deterministically:
+  `create_category` → `create_skill` → run. Authoring is still a single pass —
+  validating/reusing written bodies across runs is future work.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
@@ -202,11 +204,13 @@ unit tests (24) + box integration tests (2).
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `predict`/`act` run in-process). The box is the intended
   target; treat the endpoint as trusted.
-- Flow in `scheduler._create_skill`: small model authors title+description →
+- Flow in `scheduler._dispatch_skill`: small model authors title+description →
   trace `skill_writing` (dashboard shows title/description + a "writing skill
   body…" badge) → sync codegen write → `materialize_skill` → hot-merge into the
-  tree → bounded re-dispatch so the request runs the new skill. Codegen failure
-  leaves a navigable stub and returns a graceful `create_skill` result.
+  tree → the new leaf runs directly so the request is answered. `create_category`
+  runs the same chain after authoring the category (`create_category` →
+  `create_skill` → run). Codegen failure leaves a navigable stub and returns a
+  graceful `create_skill` result.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
