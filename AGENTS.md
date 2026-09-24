@@ -251,7 +251,7 @@ ollama OpenAI-compat `/v1/chat/completions` supports `temperature`, `top_p`,
 WARN 100–200K, DUMB>200K), so limits are a total-context budget
 (prompt+output), not a fill %.
 
-- [ ] **1. Fix the total-timeout stream bug** (`semif_agent/codegen.py`)
+- [x] **1. Fix the total-timeout stream bug** (`semif_agent/codegen.py`)
   - Move the `now - start >= self.timeout` check out of the `if not ready:`
     branch to the top of the `_read_stream` loop so it fires while streaming.
   - Test: fake SSE server that streams forever → `CodegenError` "total budget"
