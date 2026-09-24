@@ -84,6 +84,12 @@ def test_generate_category_without_engine_raises():
         generate_category(engine, Request("anything"), {})
 
 
+def test_generate_without_engine_raises():
+    engine = SemIfEngine(EngineConfig())
+    with pytest.raises(EngineUnavailable):
+        engine.generate([{"role": "user", "content": "hi"}])
+
+
 def test_build_tree_includes_registry_stubs(tmp_path):
     registry = CategoryRegistry(str(tmp_path / "categories.json"))
     registry.register("delivery", "Track and manage package deliveries.")
