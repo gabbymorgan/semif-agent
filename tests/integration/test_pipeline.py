@@ -162,7 +162,7 @@ def test_generate_skill_body_codegen(tmp_path):
     client = CodegenClient(
         base_url=codegen_cfg.get("base_url", "http://localhost:11434/v1"),
         model=codegen_cfg.get("model", "qwen38-iq3s"),
-        timeout=float(codegen_cfg.get("timeout", 600.0)),
+        timeout=float(codegen_cfg.get("timeout", 1200.0)),
     )
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(
@@ -196,6 +196,7 @@ def test_create_skill_empty_category_does_not_wedge(tmp_path):
     config["log"] = str(tmp_path / "decisions.jsonl")
     config["trace"] = str(tmp_path / "runs.jsonl")
     scheduler, config = build_scheduler(config)
+    scheduler.codegen = None  # wedge regression only; skip the ~7min codegen body write
     scheduler.tree["travel_planning"] = []
 
     for _ in range(2):

@@ -8,12 +8,14 @@ the CodegenClient itself is real, not mocked.
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from semif_agent.codegen import (
     CodegenClient,
+    CodegenError,
     build_skill_body_prompt,
     generate_skill_body,
     parse_skill_body,
@@ -217,8 +219,37 @@ def test_codegen_client_unreachable_raises(tmp_path):
     client = CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
-    with pytest.raises(Exception):
+    with pytest.raises(CodegenError):
         generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+
+
+class _SilentOpenAI(BaseHTTPRequestHandler):
+    """Accepts the request but never replies; the client must time out."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        time.sleep(5)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def test_chat_timeout_raises_codegen_error():
+    handler = type("Handler", (_SilentOpenAI,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        client = CodegenClient(
+            base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1",
+            model="test",
+            timeout=0.5,
+        )
+        with pytest.raises(CodegenError, match="timed out"):
+            client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_chat_omits_max_tokens_by_default():

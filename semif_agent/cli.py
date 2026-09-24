@@ -52,7 +52,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
             "base_url", config.get("llm", {}).get("base_url", "http://localhost:11434/v1")
         ),
         model=codegen_cfg.get("model", "qwen38-iq3s"),
-        timeout=float(codegen_cfg.get("timeout", 600.0)),
+        timeout=float(codegen_cfg.get("timeout", 1200.0)),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))

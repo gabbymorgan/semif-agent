@@ -209,8 +209,11 @@ unit tests (24) + box integration tests (2).
   body…" badge) → sync codegen write → `materialize_skill` → hot-merge into the
   tree → the new leaf runs directly so the request is answered. `create_category`
   runs the same chain after authoring the category (`create_category` →
-  `create_skill` → run). Codegen failure leaves a navigable stub and returns a
-  graceful `create_skill` result.
+  `create_skill` → run). Codegen failure — including a request timeout — leaves
+  a navigable stub and returns a graceful `create_skill` result; a timeout is
+  raised as `CodegenError` by the client, never a raw `TimeoutError`. The
+  default codegen timeout is 1200s (`cli.build_scheduler`); raise
+  `codegen.timeout` in config for harder prompts.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a

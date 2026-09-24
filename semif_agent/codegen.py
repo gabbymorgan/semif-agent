@@ -72,6 +72,10 @@ class CodegenClient:
             raise CodegenError(
                 f"codegen endpoint unreachable at {url}: {exc}. Is your local server running?"
             ) from exc
+        except TimeoutError as exc:
+            raise CodegenError(
+                f"codegen request timed out after {self.timeout}s at {url}"
+            ) from exc
         return payload["choices"][0]["message"]["content"]
 
 
