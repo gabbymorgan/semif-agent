@@ -163,17 +163,41 @@ def test_merge_skill_bodies_creates_missing_category(tmp_path):
     assert tree["brand_new"][0].name == "ping"
 
 
+def _respond_show(handler, body: dict | None = None) -> bool:
+    """Serve the ollama `/api/show` reply; returns True if handled."""
+    if not handler.path.endswith("/api/show"):
+        return False
+    encoded = json.dumps(
+        body if body is not None else {"parameters": {"num_ctx": 4242}}
+    ).encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(encoded)))
+    handler.end_headers()
+    handler.wfile.write(encoded)
+    return True
+
+
 class _FakeOpenAI(BaseHTTPRequestHandler):
+    """Single-shot SSE server: the reply arrives as one content delta. The
+    `/api/show` window query is answered too (default num_ctx 4242) but never
+    recorded in `received`, so chat-payload assertions stay unambiguous."""
+
     reply: str = GOOD_BODY
     received: list = []
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
         type(self).received.append(json.loads(raw))
-        body = json.dumps({"choices": [{"message": {"content": self.reply}}]}).encode("utf-8")
+        body = (
+            _sse_frame({"choices": [{"delta": {"content": self.reply}}]})
+            + "data: [DONE]\n\n"
+        ).encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -228,7 +252,9 @@ class _SilentOpenAI(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
         time.sleep(5)
 
     def log_message(self, format, *args):
@@ -241,7 +267,9 @@ class _StalledStreamOpenAI(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -331,7 +359,9 @@ class _RunawayStreamOpenAI(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -349,6 +379,40 @@ class _RunawayStreamOpenAI(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+
+class _CapTripOpenAI(BaseHTTPRequestHandler):
+    """Streams forever but reports an empty `/api/show` (no num_ctx), so the
+    client falls back to its `context_window` config — deterministic budget
+    tests at tiny windows."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self, {}):
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.flush()
+        try:
+            while True:
+                frame = _sse_frame({"choices": [{"delta": {"content": "x"}}]})
+                self.wfile.write(frame.encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(0.01)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _cap_trip_server() -> tuple[ThreadingHTTPServer, str]:
+    handler = type("Handler", (_CapTripOpenAI,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
 
 def test_chat_stream_total_budget_fires_while_streaming():
@@ -394,13 +458,97 @@ def test_read_stream_blocking_enforces_total_budget():
     """The blocking fallback must enforce the total budget too — its
     per-read socket timeout bounds individual reads, not the whole stream."""
     client = CodegenClient(
-        base_url="http://unused", model="test", timeout=0.5, stream=True
+        base_url="http://127.0.0.1:1/v1", model="test", timeout=0.5, stream=True
     )
+    budget = client._compute_budget([{"role": "user", "content": "hi"}])
     started = time.monotonic()
     with pytest.raises(CodegenError, match="total budget"):
-        client._read_stream_blocking(_ForeverFrames())
+        client._read_stream_blocking(_ForeverFrames(), budget)
     elapsed = time.monotonic() - started
     assert elapsed < 5.0, f"blocking fallback should fail fast, took {elapsed:.1f}s"
+
+
+def test_output_cap_trips_at_fraction_of_window():
+    """max_output in (0,1) caps at a fraction of the detected window; the cap
+    must abort a runaway stream in real time."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=0.25,
+            idle_timeout=30,
+        )
+        started = time.monotonic()
+        with pytest.raises(CodegenError, match="token budget"):
+            client.chat([{"role": "user", "content": "hi"}])
+        assert time.monotonic() - started < 8.0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_output_cap_trips_at_absolute_tokens():
+    """max_output >= 1 is an absolute token cap, independent of the window."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=8,
+            idle_timeout=30,
+        )
+        with pytest.raises(CodegenError, match="token budget"):
+            client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_budget_warns_near_fill_threshold(capsys):
+    """The one-shot fill warning fires (before the cap aborts) when the total
+    fill estimate crosses warn_point."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=0.5,
+            warn_fill_ratio=0.2,
+            idle_timeout=30,
+        )
+        with pytest.raises(CodegenError, match="token budget"):
+            client.chat([{"role": "user", "content": "hi"}])
+        captured = capsys.readouterr().out
+        assert "total fill" in captured
+        assert "near the" in captured
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_budget_start_line_printed(capsys):
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, stream=True)
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == GOOD_BODY
+        captured = capsys.readouterr().out
+        assert captured.startswith("[codegen] context window")
+        assert "output cap" in captured
+        assert "peak total fill" in captured
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 class _StreamingOpenAI(BaseHTTPRequestHandler):
@@ -418,6 +566,8 @@ class _StreamingOpenAI(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
         type(self).received.append(json.loads(raw))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -475,7 +625,22 @@ def test_chat_stream_verbose_echoes_tokens(reasoning_key, capsys):
         out = client.chat([{"role": "user", "content": "hi"}])
         assert out == GOOD_BODY
         captured = capsys.readouterr().out
-        assert captured == _StreamingOpenAI.reasoning + GOOD_BODY + "\n"
+        assert captured.startswith("[codegen] context window")
+        assert captured.endswith(_StreamingOpenAI.reasoning + GOOD_BODY + "\n")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_stream_false_returns_content_without_echo(capsys):
+    """`stream: false` must still return the full content (transport always
+    streams) but print nothing beyond the request — no token echo."""
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, stream=False)
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == GOOD_BODY
+        assert capsys.readouterr().out == ""
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -500,6 +665,88 @@ def test_chat_includes_max_tokens_when_set():
         client.chat([{"role": "user", "content": "hi"}], max_tokens=512)
         body = httpd.RequestHandlerClass.received[0]
         assert body["max_tokens"] == 512
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _ShowOpenAI(BaseHTTPRequestHandler):
+    """Answers `/api/show` with a configurable body and counts the calls."""
+
+    show: dict = {"parameters": {"num_ctx": 4242}}
+    show_calls: int = 0
+    show_requests: list = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        type(self).show_calls += 1
+        type(self).show_requests.append(json.loads(raw))
+        body = json.dumps(type(self).show).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _show_server(show: dict) -> tuple[ThreadingHTTPServer, str]:
+    handler = type(
+        "Handler",
+        (_ShowOpenAI,),
+        {"show": show, "show_calls": 0, "show_requests": []},
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_context_window_from_num_ctx():
+    httpd, base = _show_server({"parameters": {"num_ctx": 4096}})
+    try:
+        client = CodegenClient(base_url=base, model="test")
+        assert client._context_window() == 4096
+        assert httpd.RequestHandlerClass.show_requests[0] == {"model": "test"}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_context_window_from_model_info():
+    httpd, base = _show_server({"model_info": {"qwen35.context_length": 262144}})
+    try:
+        client = CodegenClient(base_url=base, model="test")
+        assert client._context_window() == 262144
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_context_window_falls_back_to_config():
+    httpd, base = _show_server({})
+    try:
+        client = CodegenClient(base_url=base, model="test", context_window=2048)
+        assert client._context_window() == 2048
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_context_window_falls_back_to_default():
+    client = CodegenClient(base_url="http://127.0.0.1:1/v1", model="test")
+    assert client._context_window() == 100000
+
+
+def test_context_window_is_cached():
+    httpd, base = _show_server({"parameters": {"num_ctx": 4242}})
+    try:
+        client = CodegenClient(base_url=base, model="test")
+        assert client._context_window() == 4242
+        assert client._context_window() == 4242
+        assert httpd.RequestHandlerClass.show_calls == 1
     finally:
         httpd.shutdown()
         httpd.server_close()

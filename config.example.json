@@ -13,13 +13,20 @@
   },
   "llm": {"base_url": "http://localhost:11434/v1", "model": "qwen3.5:4b"},
   "codegen": {
-    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model. No max_tokens cap: qwen38-iq3s reasons extensively (~7 min) before emitting the body; reasoning is filtered automatically. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream in minutes instead of blocking on the total timeout.",
+    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model. The transport always streams so the client-side token budget (output cap / peak total fill) can abort a runaway in real time; stream only toggles console echo of tokens. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream. The context window is auto-detected via ollama /api/show; context_window is the manual fallback (0 = auto/default 100000). smart_limit/warn_limit and max_fill_ratio/warn_fill_ratio bound total fill; max_output caps streamed output (>=1 absolute tokens, 0<x<1 fraction of window); chars_per_token converts chars to the token estimate.",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen38-iq3s",
     "timeout": 1200,
     "stream": false,
     "idle_warn": 60,
-    "idle_timeout": 180
+    "idle_timeout": 180,
+    "context_window": 0,
+    "smart_limit": 100000,
+    "warn_limit": 200000,
+    "max_fill_ratio": 0.8,
+    "warn_fill_ratio": 0.5,
+    "max_output": 0.25,
+    "chars_per_token": 4.0
   },
   "skill_bodies": "data/skills",
   "skills": {

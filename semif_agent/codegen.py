@@ -18,15 +18,33 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 from .decisions import Request
 from .skills import SkillDraft, tree_summary
 
 DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "SKILL.md"
+DEFAULT_CONTEXT_WINDOW = 100000
 
 
 class CodegenError(RuntimeError):
     """The codegen endpoint could not be reached."""
+
+
+class TokenBudget(NamedTuple):
+    """Per-request token limits derived from the detected context window.
+
+    `total_limit` caps prompt + output; `output_limit` caps just the streamed
+    output (the enforced one — it already bakes in the prompt estimate);
+    `warn_point` is the total fill at which a one-shot console warning fires.
+    An `output_limit` of 0 means no cap is configured.
+    """
+
+    window: int
+    total_limit: int
+    output_limit: int
+    warn_point: int | None
+    prompt_est: int
 
 
 def read_skill_contract(path: str | None = None) -> str:
@@ -39,18 +57,24 @@ def read_skill_contract(path: str | None = None) -> str:
 class CodegenClient:
     """Minimal OpenAI-compatible chat client for writing skill bodies.
 
-    No token cap by default: Qwen3-style models reason first and the cap
-    truncates the hidden reasoning, leaving `content` empty. Omit `max_tokens`
-    so the model runs to completion; the reasoning is filtered automatically
-    because only `content` is read.
+    The transport always reads the response as an SSE token stream so the
+    layered token budget, the idle watchdog, and the total wall-clock budget
+    can abort a runaway generation in real time — never via a server-side
+    `max_tokens` cap, because Qwen3-style models reason first and a cap
+    truncates the hidden reasoning, leaving `content` empty.
 
-    With `stream=True` the response is read as an SSE token stream and echoed
-    to stdout as it arrives — including the chain-of-thought — so a long
-    body write shows live progress. Echoing is console-only; the returned
-    content is identical either way. A silent stream (no bytes for
-    `idle_warn` seconds) prints a warning, and one that stays silent for
-    `idle_timeout` seconds raises CodegenError instead of blocking on the
-    total timeout — a wedged generation is surfaced in minutes, not ~20.
+    `stream=True` additionally echoes tokens (including the chain-of-thought)
+    to stdout as they arrive; echo is console-only and the returned content
+    is identical either way. A silent stream (no bytes for `idle_warn`
+    seconds) prints a warning, and one that stays silent for `idle_timeout`
+    seconds raises CodegenError instead of blocking on the total timeout — a
+    wedged generation is surfaced in minutes, not ~20.
+
+    The context window is lazily queried once from ollama's `/api/show`
+    (`parameters.num_ctx`, falling back to `model_info.<arch>.context_length`,
+    then the `context_window` config, then 100000); the per-request budget
+    caps output at `max_output` (absolute tokens if >= 1, else a fraction of
+    the window) and total fill at `smart_limit`/`warn_limit`.
     """
 
     def __init__(
@@ -61,6 +85,13 @@ class CodegenClient:
         stream: bool = False,
         idle_warn: float = 60.0,
         idle_timeout: float = 180.0,
+        context_window: float = 0.0,
+        smart_limit: int = 100000,
+        warn_limit: int = 200000,
+        max_fill_ratio: float = 0.8,
+        warn_fill_ratio: float = 0.5,
+        max_output: float = 0.25,
+        chars_per_token: float = 4.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -68,6 +99,14 @@ class CodegenClient:
         self.stream = stream
         self.idle_warn = idle_warn
         self.idle_timeout = idle_timeout
+        self.context_window = context_window
+        self.smart_limit = smart_limit
+        self.warn_limit = warn_limit
+        self.max_fill_ratio = max_fill_ratio
+        self.warn_fill_ratio = warn_fill_ratio
+        self.max_output = max_output
+        self.chars_per_token = chars_per_token
+        self._window: int | None = None
 
     def chat(
         self,
@@ -75,12 +114,15 @@ class CodegenClient:
         max_tokens: int | None = None,
         temperature: float = 0.0,
     ) -> str:
+        budget = self._compute_budget(messages)
+        if self.stream:
+            self._print_budget(budget)
         url = f"{self.base_url}/chat/completions"
         payload: dict = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "stream": self.stream,
+            "stream": True,
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -90,9 +132,7 @@ class CodegenClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                if self.stream:
-                    return self._read_stream(response)
-                payload = json.loads(response.read().decode("utf-8"))
+                return self._read_stream(response, budget)
         except urllib.error.URLError as exc:
             raise CodegenError(
                 f"codegen endpoint unreachable at {url}: {exc}. Is your local server running?"
@@ -101,10 +141,118 @@ class CodegenClient:
             raise CodegenError(
                 f"codegen request timed out after {self.timeout}s at {url}"
             ) from exc
-        return payload["choices"][0]["message"]["content"]
 
-    def _read_stream(self, response) -> str:
-        """Read an OpenAI-compatible SSE stream, echo tokens to stdout.
+    def _native_base_url(self) -> str:
+        """Ollama's `/api/show` lives on the native API, not the /v1 compat."""
+        if self.base_url.endswith("/v1"):
+            return self.base_url[: -len("/v1")]
+        return self.base_url
+
+    def _query_context_window(self) -> int | None:
+        """POST /api/show {model} for the runtime context window. Any failure
+        (unreachable, non-ollama endpoint, malformed reply) returns None so the
+        caller falls back to config or the default. Uses a short request
+        timeout so a slow show endpoint never wedges the actual generation."""
+        url = f"{self._native_base_url()}/api/show"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"model": self.model}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=min(self.timeout, 10.0)
+            ) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+            return None
+        params = data.get("parameters") or {}
+        num_ctx = params.get("num_ctx")
+        if isinstance(num_ctx, int) and num_ctx > 0:
+            return num_ctx
+        model_info = data.get("model_info") or {}
+        for key, value in model_info.items():
+            if key.endswith(".context_length") and isinstance(value, int) and value > 0:
+                return value
+        return None
+
+    def _context_window(self) -> int:
+        """Detected context window, queried once and cached."""
+        if self._window is not None:
+            return self._window
+        window = self._query_context_window()
+        if window is None:
+            window = (
+                int(self.context_window)
+                if self.context_window > 0
+                else DEFAULT_CONTEXT_WINDOW
+            )
+        self._window = window
+        return window
+
+    def _compute_budget(self, messages: list[dict]) -> TokenBudget:
+        window = self._context_window()
+        max_out = (
+            int(self.max_output)
+            if self.max_output >= 1
+            else int(self.max_output * window)
+        )
+        total_limit = int(min(self.smart_limit, window * self.max_fill_ratio))
+        prompt_est = int(
+            sum(len(str(m.get("content") or "")) for m in messages)
+            / self.chars_per_token
+        )
+        if total_limit > 0 and prompt_est >= total_limit:
+            raise CodegenError(
+                f"codegen prompt (~{prompt_est} tokens) already exceeds the "
+                f"total budget of {total_limit} tokens"
+            )
+        if total_limit > 0 and max_out > 0:
+            output_limit = min(max_out, total_limit - prompt_est)
+        else:
+            output_limit = 0
+        warn_point = None
+        if self.warn_limit > 0 and self.warn_fill_ratio > 0:
+            warn_point = min(self.warn_limit, int(window * self.warn_fill_ratio))
+        return TokenBudget(window, total_limit, output_limit, warn_point, prompt_est)
+
+    def _print_budget(self, budget: TokenBudget) -> None:
+        if budget.window and budget.output_limit > 0:
+            print(
+                f"[codegen] context window {budget.window} tokens · "
+                f"output cap {budget.output_limit} tokens "
+                f"({budget.output_limit / budget.window * 100:.0f}%) · "
+                f"peak total fill ~{budget.total_limit} tokens"
+            )
+        elif budget.window:
+            print(
+                f"[codegen] context window {budget.window} tokens · "
+                f"peak total fill ~{budget.total_limit} tokens"
+            )
+        sys.stdout.flush()
+
+    def _enforce_budget(self, budget: TokenBudget, out_chars: int, warned: bool) -> bool:
+        """Abort when the output cap is exceeded; one-shot warn near the fill
+        threshold. Returns the updated warned state."""
+        output_est = out_chars / self.chars_per_token
+        if budget.output_limit > 0 and output_est >= budget.output_limit:
+            raise CodegenError(
+                f"codegen output exceeded {budget.output_limit} token budget "
+                f"(~{out_chars} chars at {self.chars_per_token:g} chars/token)"
+            )
+        if budget.warn_point is not None and not warned:
+            total = budget.prompt_est + output_est
+            if total >= budget.warn_point:
+                sys.stdout.write(
+                    f"\n[codegen] total fill ~{int(total)} tokens — "
+                    f"near the {budget.output_limit} token output budget\n"
+                )
+                sys.stdout.flush()
+                return True
+        return warned
+
+    def _read_stream(self, response, budget: TokenBudget) -> str:
+        """Read an OpenAI-compatible SSE stream; echo tokens if `stream`.
 
         Only `content` deltas are accumulated into the returned body;
         reasoning (chain-of-thought) is echoed to the console but never part
@@ -117,17 +265,20 @@ class CodegenClient:
         The total wall-clock budget `self.timeout` is enforced against the
         whole stream and checked on every loop iteration, so even a
         continuously-streaming generation that never sends `[DONE]` is cut
-        short. Thresholds <= 0 disable the idle checks. If the underlying
-        socket can't be reached, falls back to a plain blocking read
-        (`_read_stream_blocking`, which enforces the same total budget).
+        short. The token budget aborts as soon as the output cap is reached.
+        Thresholds <= 0 disable the idle checks. If the underlying socket
+        can't be reached, falls back to a plain blocking read
+        (`_read_stream_blocking`, which enforces the same budgets).
         """
         parts: list[str] = []
         sock = self._stream_socket(response)
         if sock is None:
-            return self._read_stream_blocking(response)
+            return self._read_stream_blocking(response, budget)
         start = time.monotonic()
         last_activity = start
         warned = False
+        warned_fill = False
+        out_chars = 0
         while True:
             if time.monotonic() - start >= self.timeout:
                 raise CodegenError(
@@ -157,56 +308,79 @@ class CodegenClient:
             if not raw:
                 break
             last_activity = time.monotonic()
-            if not self._consume_frame(raw.decode("utf-8").strip(), parts):
+            continues, text, reasoning = self._consume_frame(
+                raw.decode("utf-8").strip()
+            )
+            if self.stream and (text or reasoning):
+                sys.stdout.write(text + reasoning)
+                sys.stdout.flush()
+            if text:
+                parts.append(text)
+            out_chars += len(text) + len(reasoning)
+            warned_fill = self._enforce_budget(budget, out_chars, warned_fill)
+            if not continues:
                 break
-        if parts:
+        if parts and self.stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
         return "".join(parts)
 
-    def _read_stream_blocking(self, response) -> str:
+    def _read_stream_blocking(self, response, budget: TokenBudget) -> str:
         """Fallback reader when the response socket can't be located.
 
         A plain blocking read relies on the per-read socket timeout for
         silence, but that bounds individual reads, not the whole stream — so
-        enforce the same total wall-clock budget `self.timeout` in the loop,
-        or a continuously-streaming runaway would never be cut short.
+        enforce the same total wall-clock budget `self.timeout` and the token
+        budget in the loop, or a continuously-streaming runaway would never be
+        cut short.
         """
         parts: list[str] = []
         start = time.monotonic()
+        warned_fill = False
+        out_chars = 0
         for raw in response:
             if time.monotonic() - start >= self.timeout:
                 raise CodegenError(
                     f"codegen request exceeded {self.timeout:.0f}s total budget"
                 )
-            if not self._consume_frame(raw.decode("utf-8").strip(), parts):
+            continues, text, reasoning = self._consume_frame(
+                raw.decode("utf-8").strip()
+            )
+            if self.stream and (text or reasoning):
+                sys.stdout.write(text + reasoning)
+                sys.stdout.flush()
+            if text:
+                parts.append(text)
+            out_chars += len(text) + len(reasoning)
+            warned_fill = self._enforce_budget(budget, out_chars, warned_fill)
+            if not continues:
                 break
-        if parts:
+        if parts and self.stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
         return "".join(parts)
 
     @staticmethod
-    def _consume_frame(line: str, parts: list[str]) -> bool:
-        """Process one SSE line. Returns False on [DONE] (stop reading)."""
+    def _consume_frame(line: str) -> tuple[bool, str, str]:
+        """Process one SSE line.
+
+        Returns (continue, content, reasoning). `content` feeds the returned
+        body; `reasoning` is only ever echoed. (False, "", "") on [DONE].
+        """
         if not line.startswith("data:"):
-            return True
+            return True, "", ""
         data = line[len("data:") :].strip()
         if data == "[DONE]":
-            return False
+            return False, "", ""
         try:
             chunk = json.loads(data)
         except ValueError:
-            return True
+            return True, "", ""
         choice = chunk.get("choices", [{}])[0]
         delta = choice.get("delta", {}) or {}
         text = delta.get("content") or ""
         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-        if text or reasoning:
-            sys.stdout.write(text + reasoning)
-            sys.stdout.flush()
-        parts.append(text)
-        return True
+        return True, text, reasoning
 
     @staticmethod
     def _stream_socket(response):
