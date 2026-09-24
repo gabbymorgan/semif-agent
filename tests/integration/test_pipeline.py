@@ -163,6 +163,7 @@ def test_generate_skill_body_codegen(tmp_path):
         base_url=codegen_cfg.get("base_url", "http://localhost:11434/v1"),
         model=codegen_cfg.get("model", "qwen38-iq3s"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
+        stream=True,
     )
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(
@@ -223,6 +224,7 @@ def test_create_category_chain_runs_new_skill(tmp_path):
     config["trace"] = str(tmp_path / "runs.jsonl")
     config["category_registry"] = str(tmp_path / "categories.json")
     config["skill_bodies"] = str(tmp_path / "skills")
+    config["codegen"] = {**config.get("codegen", {}), "stream": True}
     scheduler, config = build_scheduler(config)
     scheduler.tree = {}
 

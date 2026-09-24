@@ -252,6 +252,79 @@ def test_chat_timeout_raises_codegen_error():
         httpd.server_close()
 
 
+def _sse_frame(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+class _StreamingOpenAI(BaseHTTPRequestHandler):
+    """Replies with an OpenAI-compatible SSE token stream (COT then content)."""
+
+    reasoning: str = "thinking about the body..."
+    content: str = GOOD_BODY
+    received: list = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        type(self).received.append(json.loads(raw))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        reasoning = type(self).reasoning
+        content = type(self).content
+        step = max(len(reasoning) // 4, 1)
+        for i in range(0, len(reasoning), step):
+            frame = _sse_frame(
+                {"choices": [{"delta": {"reasoning_content": reasoning[i : i + step]}}]}
+            )
+            self.wfile.write(frame.encode("utf-8"))
+        step = max(len(content) // 4, 1)
+        for i in range(0, len(content), step):
+            frame = _sse_frame(
+                {"choices": [{"delta": {"content": content[i : i + step]}}]}
+            )
+            self.wfile.write(frame.encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _streaming_server() -> tuple[ThreadingHTTPServer, str]:
+    handler = type("Handler", (_StreamingOpenAI,), {"received": []})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_chat_stream_accumulates_full_content():
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, stream=True)
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == GOOD_BODY, "streamed deltas must reassemble the full body"
+        body = httpd.RequestHandlerClass.received[0]
+        assert body["stream"] is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_stream_verbose_echoes_tokens(capsys):
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, stream=True)
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == GOOD_BODY
+        captured = capsys.readouterr().out
+        assert captured == _StreamingOpenAI.reasoning + GOOD_BODY + "\n"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_chat_omits_max_tokens_by_default():
     httpd, base = _fake_server(GOOD_BODY)
     try:

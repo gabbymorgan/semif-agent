@@ -40,12 +40,24 @@ class CodegenClient:
     truncates the hidden reasoning, leaving `content` empty. Omit `max_tokens`
     so the model runs to completion; the reasoning is filtered automatically
     because only `content` is read.
+
+    With `stream=True` the response is read as an SSE token stream and echoed
+    to stdout as it arrives — including the chain-of-thought — so a long
+    body write shows live progress. Echoing is console-only; the returned
+    content is identical either way.
     """
 
-    def __init__(self, base_url: str, model: str, timeout: float = 1200.0):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 1200.0,
+        stream: bool = False,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.stream = stream
 
     def chat(
         self,
@@ -58,6 +70,7 @@ class CodegenClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "stream": self.stream,
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -67,6 +80,8 @@ class CodegenClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                if self.stream:
+                    return self._read_stream(response)
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.URLError as exc:
             raise CodegenError(
@@ -77,6 +92,40 @@ class CodegenClient:
                 f"codegen request timed out after {self.timeout}s at {url}"
             ) from exc
         return payload["choices"][0]["message"]["content"]
+
+    def _read_stream(self, response) -> str:
+        """Read an OpenAI-compatible SSE stream, echo tokens to stdout.
+
+        Only `content` deltas are accumulated into the returned body;
+        `reasoning_content` (chain-of-thought) is echoed to the console but
+        never part of the result.
+        """
+        import sys
+
+        parts: list[str] = []
+        for raw in response:
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:") :].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            choice = chunk.get("choices", [{}])[0]
+            delta = choice.get("delta", {}) or {}
+            text = delta.get("content") or ""
+            reasoning = delta.get("reasoning_content") or ""
+            if text or reasoning:
+                sys.stdout.write(text + reasoning)
+                sys.stdout.flush()
+            parts.append(text)
+        if parts:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        return "".join(parts)
 
 
 def build_skill_body_prompt(
@@ -165,6 +214,8 @@ def generate_skill_body(
     """Author a skill body with the big model; retries once on invalid output."""
     contract_text = contract if contract is not None else read_skill_contract()
     messages = build_skill_body_prompt(request, category, draft, tree, contract_text)
+    if client.stream:
+        print(f"[codegen] writing body for {category}.{draft.name}...")
     last_error: Exception | None = None
     for attempt in range(2):
         try:

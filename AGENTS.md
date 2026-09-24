@@ -214,6 +214,11 @@ unit tests (24) + box integration tests (2).
   raised as `CodegenError` by the client, never a raw `TimeoutError`. The
   default codegen timeout is 1200s (`cli.build_scheduler`); raise
   `codegen.timeout` in config for harder prompts.
+- Set `codegen.stream: true` to echo the codegen output as an SSE token stream
+  to stdout during body writes — including the chain-of-thought, so a long
+  (~7 min) write shows live progress. Echoing is console-only; the returned
+  content is identical either way. Integration tests already force streaming;
+  see it with `-s` on the box.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
