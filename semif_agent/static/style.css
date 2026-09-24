@@ -283,6 +283,26 @@ select {
 
 .node.event-node .evt-kind { text-transform: uppercase; color: var(--muted); font-size: 10px; }
 
+.node.event-node .skill-title { font-weight: 700; }
+.node.event-node.writing { border-left: 3px solid var(--warn); }
+.node.event-node.stub { border-left: 3px solid var(--muted); }
+
+.writing-badge {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  color: var(--warn);
+  font-size: 10px;
+  animation: writing-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes writing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 /* ---------- inspector / tree / status ---------- */
 
 .right { border-right: none; }

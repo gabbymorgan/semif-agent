@@ -12,6 +12,7 @@ Only the real skills live here; navigation uses the real decision engine.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -95,6 +96,7 @@ class SkillDraft:
 
     name: str
     description: str
+    code: str = ""
 
 
 class CategoryRegistry:
@@ -128,6 +130,113 @@ class CategoryRegistry:
             skills.append({"name": name, "description": description})
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
+
+
+class SkillBodyStore:
+    """Persists runnable skill bodies as one Python file per skill.
+
+    Layout: <base>/<category>/<name>.py. Bodies are written by the codegen step
+    and loaded back at startup so skills stay runnable across restarts.
+    """
+
+    def __init__(self, path: str = "data/skills"):
+        self.path = Path(path)
+
+    def write(self, category: str, name: str, code: str) -> Path:
+        directory = self.path / category
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{name}.py"
+        target.write_text(code.rstrip() + "\n")
+        return target
+
+    def body_path(self, category: str, name: str) -> Path:
+        return self.path / category / f"{name}.py"
+
+    def list_bodies(self) -> list[tuple[str, str]]:
+        if not self.path.is_dir():
+            return []
+        bodies = []
+        for directory in sorted(self.path.iterdir()):
+            if not directory.is_dir():
+                continue
+            for module in sorted(directory.glob("*.py")):
+                bodies.append((directory.name, module.stem))
+        return bodies
+
+
+def load_skill_module(category: str, name: str, base: str = "data/skills"):
+    """Import a persisted skill body and return its module."""
+    path = Path(base) / category / f"{name}.py"
+    module_name = f"_skill_{category}_{name}".replace("-", "_")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load skill module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def materialize_skill(
+    draft: SkillDraft, category: str, store: SkillBodyStore
+) -> Skill:
+    """Persist the draft's code body and build a runnable Skill from it."""
+    if not draft.code:
+        raise ValueError(f"skill {draft.name} has no code body to materialize")
+    store.write(category, draft.name, draft.code)
+    try:
+        module = load_skill_module(category, draft.name, store.path)
+    except Exception as exc:
+        raise ValueError(f"skill {category}.{draft.name} body failed to import: {exc}") from exc
+    if not callable(getattr(module, "predict", None)) or not callable(
+        getattr(module, "act", None)
+    ):
+        raise ValueError(f"skill {category}.{draft.name} body must define predict and act")
+    return Skill(
+        name=draft.name,
+        category=category,
+        description=draft.description,
+        predict=module.predict,
+        act=module.act,
+    )
+
+
+def merge_skill_bodies(
+    tree: dict[str, list[Skill]], store: SkillBodyStore, registry: dict[str, dict]
+) -> int:
+    """Upgrade persisted skill bodies in the tree to runnable skills.
+
+    A body file makes a stub leaf executable; where the registry entry was lost
+    (or never written), the category is created and the description falls back
+    to the skill name. Returns the number of skills made runnable.
+    """
+    upgraded = 0
+    for category, name in store.list_bodies():
+        description = ""
+        entry = registry.get(category, {})
+        for skill in entry.get("skills", []):
+            if skill.get("name") == name:
+                description = skill.get("description", "")
+        try:
+            module = load_skill_module(category, name, store.path)
+        except Exception:
+            continue
+        skill = Skill(
+            name=name,
+            category=category,
+            description=description or name,
+            predict=module.predict,
+            act=module.act,
+        )
+        skills = tree.setdefault(category, [])
+        for index, existing in enumerate(skills):
+            if existing.name == name:
+                skills[index] = skill
+                break
+        else:
+            skills.append(skill)
+            skills.sort(key=lambda s: s.name)
+        upgraded += 1
+    return upgraded
 
 
 def compose_state(request: Request, current: str | None = None) -> str:

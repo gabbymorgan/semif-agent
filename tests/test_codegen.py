@@ -1,0 +1,219 @@
+"""Pure-stdlib tests for skill code-body generation.
+
+Prompt building, draft parsing/validation, body persistence + import, and
+tree hot-merge all run without SemIf or a real LLM. The only network usage is a
+throwaway stdlib HTTP server that stands in for an OpenAI-compatible endpoint —
+the CodegenClient itself is real, not mocked.
+"""
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from semif_agent.codegen import (
+    CodegenClient,
+    build_skill_body_prompt,
+    generate_skill_body,
+    parse_skill_body,
+    read_skill_contract,
+)
+from semif_agent.decisions import Request
+from semif_agent.skills import (
+    SkillBodyStore,
+    SkillDraft,
+    build_skills,
+    build_tree,
+    load_skill_module,
+    materialize_skill,
+    merge_skill_bodies,
+    merge_registry,
+)
+
+GOOD_BODY = """\
+from semif_agent.decisions import DecisionRequest, Option
+from semif_agent.skills import ActionResult, Prediction
+
+def predict(ctx, request):
+    return Prediction(text="ok", decisions=[])
+
+def act(ctx, request, prediction):
+    return ActionResult(action_log="probe ran", new_state=request.text)
+"""
+
+
+def test_read_skill_contract_loads_contract():
+    text = read_skill_contract()
+    assert "predict" in text and "act" in text
+    assert "data/skills" in text
+
+
+def test_build_skill_body_prompt_includes_contract_request_and_draft():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = build_skill_body_prompt(
+        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
+    )
+    assert messages[0]["role"] == "system"
+    assert "THE CONTRACT" in messages[0]["content"]
+    joined = messages[1]["content"]
+    assert "check if the service is up" in joined
+    assert "probe" in joined
+    assert "tracking.check" in joined
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        GOOD_BODY,
+        "```python\n" + GOOD_BODY + "\n```",
+        json.dumps({"code": GOOD_BODY}),
+        "Here you go:\n```python\n" + GOOD_BODY + "\n```\nHope that helps.",
+        'Sure: ' + json.dumps({"code": GOOD_BODY}) + ' (that was it)',
+    ],
+)
+def test_parse_skill_body_accepts_forms(raw):
+    code = parse_skill_body(raw)
+    assert "def predict" in code and "def act" in code
+
+
+def test_parse_skill_body_rejects_empty():
+    with pytest.raises(ValueError):
+        parse_skill_body("")
+
+
+def test_parse_skill_body_rejects_invalid_python():
+    with pytest.raises(ValueError):
+        parse_skill_body("def predict(:\n  pass")
+
+
+def test_parse_skill_body_rejects_missing_functions():
+    with pytest.raises(ValueError):
+        parse_skill_body("def predict(ctx, request):\n    return None")
+
+
+def test_parse_skill_body_rejects_missing_act():
+    with pytest.raises(ValueError):
+        parse_skill_body("def predict(ctx, request):\n    return None\nx = 1")
+
+
+def test_body_store_roundtrip(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    assert store.list_bodies() == []
+    store.write("tracking", "probe", GOOD_BODY)
+    assert store.list_bodies() == [("tracking", "probe")]
+    target = store.body_path("tracking", "probe")
+    assert target.is_file()
+    assert "def predict" in target.read_text()
+
+
+def test_load_skill_module_exposes_predict_act(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    store.write("tracking", "probe", GOOD_BODY)
+    module = load_skill_module("tracking", "probe", store.path)
+    assert callable(module.predict) and callable(module.act)
+
+
+def test_materialize_skill_builds_runnable_skill(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    draft = SkillDraft(name="probe", description="Probe the service.", code=GOOD_BODY)
+    skill = materialize_skill(draft, "tracking", store)
+    assert skill.name == "probe"
+    assert skill.category == "tracking"
+    assert callable(skill.predict) and callable(skill.act)
+
+
+def test_materialize_skill_requires_code(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    with pytest.raises(ValueError):
+        materialize_skill(draft, "tracking", store)
+
+
+def test_materialize_skill_rejects_import_failure(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    bad = "def predict(ctx, request):\n    return None\n"
+    draft = SkillDraft(name="probe", description="Probe.", code=bad)
+    with pytest.raises(ValueError):
+        materialize_skill(draft, "tracking", store)
+
+
+def test_merge_skill_bodies_upgrades_stub(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    store.write("tracking", "probe", GOOD_BODY)
+    tree = build_tree(build_skills({"skills": {}}))
+    registry = {"tracking": {"description": "", "skills": [{"name": "probe", "description": "Probe."}]}}
+    merge_registry(tree, registry)
+    upgraded = merge_skill_bodies(tree, store, registry)
+    assert upgraded == 1
+    skill = next(s for s in tree["tracking"] if s.name == "probe")
+    assert callable(skill.predict) and callable(skill.act)
+    assert skill.description == "Probe."
+
+
+def test_merge_skill_bodies_creates_missing_category(tmp_path):
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    store.write("brand_new", "ping", GOOD_BODY)
+    tree = build_tree(build_skills({"skills": {}}))
+    upgraded = merge_skill_bodies(tree, store, {})
+    assert upgraded == 1
+    assert tree["brand_new"][0].name == "ping"
+
+
+class _FakeOpenAI(BaseHTTPRequestHandler):
+    reply: str = GOOD_BODY
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        body = json.dumps({"choices": [{"message": {"content": self.reply}}]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _fake_server(reply: str) -> tuple[ThreadingHTTPServer, str]:
+    handler = type("Handler", (_FakeOpenAI,), {"reply": reply})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_generate_skill_body_end_to_end(tmp_path):
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        code = generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+        assert "def predict" in code and "def act" in code
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_skill_body_retries_then_fails(tmp_path):
+    httpd, base = _fake_server("this is not python at all")
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        with pytest.raises(ValueError):
+            generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_codegen_client_unreachable_raises(tmp_path):
+    client = CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    with pytest.raises(Exception):
+        generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)

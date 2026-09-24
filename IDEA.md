@@ -41,7 +41,7 @@ All decisions are SemIf calls: `{state, question, options[]}`. State is the curr
 
 - Structure: categories → skills → actions. Top level listed at each level.
 - Navigation is a chain of SemIf choices, one per level, descending until a leaf skill matches.
-- Navigation offers a `create_category` suggestion at the category level and a `create_skill` suggestion at the leaf level. Both are live: the decision model, driven in normal generation mode, authors a title + description (broad bucket for a category, single specific action for a skill), and the stub is persisted to the category registry and merged into the running tree. The new skill becomes a leaf immediately; a real skill body (opencode authoring a skill manifest) remains deferred to v2.
+- Navigation offers a `create_category` suggestion at the category level and a `create_skill` suggestion at the leaf level. Both are live: the decision model, driven in normal generation mode, authors a title + description (broad bucket for a category, single specific action for a skill), and the stub is persisted to the category registry and merged into the running tree. For a new skill the stub is then promoted to a runnable body: a separate, larger OpenAI-compatible model writes the `predict`/`act` code against the `SKILL.md` contract, persisted under `data/skills/` and hot-loaded, and the request re-dispatches to the new leaf.
 
 ### Skill manifest
 - name, category, description, allowed inputs, action list, cost budget, decision log reference.
@@ -97,7 +97,7 @@ Every skill run follows the same loop:
 - contains_request: yes
 - interrupt_current: yes
 - skill_selection: tracking => (no leaf) => create_skill
-- opencode authors `tracking.check_delivery` from the input + registry conventions → manifest registered → requeue → skill_selection: tracking => check_delivery(input)
+- the codegen model authors `tracking.check_delivery` (title+description from the decision model; `predict`/`act` body from a larger OpenAI-compatible model per `SKILL.md`) → body persisted + registered → requeue → skill_selection: tracking => check_delivery(input)
 
 ### Example 5 (self-assessment + dream)
 - current_process: email compose

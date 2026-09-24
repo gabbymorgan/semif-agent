@@ -4,6 +4,7 @@ __pycache__/
 data/decisions.jsonl
 data/runs.jsonl
 data/categories.json
+data/skills/
 data/drafts/
 .pytest_cache/
 config.json

@@ -12,10 +12,20 @@ from pathlib import Path
 import pytest
 
 from semif_agent.cli import build_scheduler, load_config
+from semif_agent.codegen import CodegenClient, generate_skill_body
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
-from semif_agent.skills import CategoryDraft, SkillDraft, generate_category, generate_skill
+from semif_agent.skills import (
+    CategoryDraft,
+    SkillBodyStore,
+    SkillDraft,
+    build_skills,
+    build_tree,
+    generate_category,
+    generate_skill,
+    materialize_skill,
+)
 
 
 def require_real(config: dict):
@@ -138,6 +148,38 @@ def test_generate_skill(tmp_path):
     print(f"draft: {draft.name!r} — {draft.description!r}")
     assert isinstance(draft, SkillDraft)
     assert draft.name and draft.description
+
+
+def test_generate_skill_body_codegen(tmp_path):
+    """A real OpenAI-compatible model writes a runnable skill body.
+
+    Slow: uses the big codegen model (qwen38-iq3s by default). Run this one in
+    the background and poll — long-lived ssh sessions get SIGHUP'd.
+    """
+    config = load_config()
+    require_real(config)
+    codegen_cfg = config.get("codegen", {})
+    client = CodegenClient(
+        base_url=codegen_cfg.get("base_url", "http://localhost:11434/v1"),
+        model=codegen_cfg.get("model", "qwen38-iq3s"),
+        timeout=float(codegen_cfg.get("timeout", 600.0)),
+    )
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(
+        name="check_service",
+        description="Check whether a service is reachable.",
+    )
+    code = generate_skill_body(
+        client,
+        Request("is my home server reachable right now?"),
+        "tracking",
+        draft,
+        tree,
+    )
+    print(f"generated {len(code)} bytes of skill body")
+    store = SkillBodyStore(str(tmp_path / "skills"))
+    skill = materialize_skill(draft, "tracking", store)
+    assert callable(skill.predict) and callable(skill.act)
 
 
 def test_create_skill_empty_category_does_not_wedge(tmp_path):

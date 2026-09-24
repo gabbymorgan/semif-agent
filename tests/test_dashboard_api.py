@@ -146,3 +146,41 @@ def test_submit_trace_event_recorded_even_when_engine_missing(tmp_path):
         assert "submit" in kinds
     finally:
         server.close()
+
+
+def test_skill_writing_and_created_events_in_payload(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.trace.append("submit", "run-9", text="track my package")
+    scheduler.trace.append(
+        "skill_writing",
+        "run-9",
+        category="tracking",
+        skill="track_live",
+        description="Follow a package in real time.",
+        model="qwen38-iq3s",
+    )
+    scheduler.trace.append(
+        "skill_created",
+        "run-9",
+        category="tracking",
+        skill="track_live",
+        description="Follow a package in real time.",
+        body="data/skills/tracking/track_live.py",
+        written=True,
+    )
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/trace")
+        assert status == 200
+        run = next(r for r in payload["runs"] if r["run_id"] == "run-9")
+        kinds = [e["kind"] for e in run["events"]]
+        assert "skill_writing" in kinds and "skill_created" in kinds
+        writing = next(e for e in run["events"] if e["kind"] == "skill_writing")
+        assert writing["skill"] == "track_live"
+        assert "real time" in writing["description"]
+        assert writing["model"] == "qwen38-iq3s"
+        created = next(e for e in run["events"] if e["kind"] == "skill_created")
+        assert created["written"] is True
+        assert created["body"] == "data/skills/tracking/track_live.py"
+    finally:
+        server.close()

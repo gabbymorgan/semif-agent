@@ -24,9 +24,12 @@ queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 navigation = SemIf choices per level (logged), create_category
                 and create_skill author + register stubs via the decision model
-                in generation mode
+                in generation mode; SkillBodyStore + materialize_skill persist
+                and hot-load runnable skill bodies from data/skills/
 skill.py        loop: observe -> predict -> act -> observe -> assess (LLM)
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
+codegen.py      CodegenClient (OpenAI-compatible) writes runnable skill bodies
+                against SKILL.md; parse/validate (compile + predict/act)
 llm.py          OpenAI-compatible client for self-assessment (stdlib urllib)
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
@@ -116,12 +119,16 @@ unit tests (24) + box integration tests (2).
   validate (accuracy/ECE on a held-out slice, prompt-hash regression), swap the
   pinned model revision. GPU offload: train on a beefier GPU; the running agent
   keeps a frozen inference revision until a swap validates.
-- `create_skill` branch: now live, mirroring `create_category`. The decision
+- `create_skill` branch: live, mirroring `create_category`. The decision
   model, driven in normal generation mode via `SemIfEngine.generate`, proposes a
   specific skill title + description for the chosen category; the stub is
   persisted to `data/categories.json` (under that category's `skills` list) and
-  merged into the running tree as a leaf. Still deferred: a real skill body —
-  opencode authoring at a tree leaf remains future work.
+  merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
+  real runnable body: a larger OpenAI-compatible model (`codegen`, default
+  `qwen38-iq3s`) writes `predict`/`act` code against `SKILL.md`, persisted to
+  `data/skills/` and hot-loaded, then the request re-dispatches to the new
+  skill. Authoring is still a single pass — validating/reusing written bodies
+  across runs is future work.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
@@ -175,6 +182,25 @@ unit tests (24) + box integration tests (2).
 - If generation hangs with no log output, restart the service
   (`sudo systemctl restart ollama`) — the ROCm runner can wedge.
 
+### codegen (skill bodies, box)
+- Skill **bodies** are written by a separate OpenAI-compatible model, configured
+  under `codegen` in config.json (default model `qwen38-iq3s`, the 12G 27B
+  IQ3_S GGUF — huge/slow; a 3-bit 27B write can take 30-120s). Title +
+  description for new skills still come from the **small** decision model
+  (`engine.generate`); only the runnable code body uses codegen.
+- Bodies are persisted to `data/skills/<category>/<name>.py` (gitignored) and
+  loaded back at startup via `importlib`, so skills stay runnable across
+  restarts. `SKILL.md` at the repo root is the contract the codegen model is
+  prompted with — change it only with intent, it shapes every generated body.
+- **Trust boundary**: generated skill code is executed locally (it is imported
+  as a module and its `predict`/`act` run in-process). The box is the intended
+  target; treat the endpoint as trusted.
+- Flow in `scheduler._create_skill`: small model authors title+description →
+  trace `skill_writing` (dashboard shows title/description + a "writing skill
+  body…" badge) → sync codegen write → `materialize_skill` → hot-merge into the
+  tree → bounded re-dispatch so the request runs the new skill. Codegen failure
+  leaves a navigable stub and returns a graceful `create_skill` result.
+
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
   real endpoint. Pure unit tests touch data-structure math only (queue ordering,
@@ -199,7 +225,8 @@ unit tests (24) + box integration tests (2).
 
 - `python3 -m pytest tests/ -q --ignore=tests/integration` — anywhere, fast.
   Includes the dashboard API tests (`tests/test_dashboard_api.py`), which spin
-  up the stdlib HTTP server on an ephemeral port with the engine never loaded.
+  up the stdlib HTTP server on an ephemeral port with the engine never loaded,
+  and `tests/test_codegen.py` for prompt/parse/validate + body store round-trips.
 - `tests/integration/` — box only; requires real SemIf + real ollama.
-- After touching scheduler/skills/engine, re-run both; the integration tests are
-  the only end-to-end verification.
+- After touching scheduler/skills/codegen/engine, re-run both; the integration
+  tests are the only end-to-end verification.

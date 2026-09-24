@@ -121,6 +121,11 @@ function eventRow(evt) {
     div.textContent = `queued (${evt.label})`;
   } else if (evt.kind === "preempted") {
     div.textContent = `preempted ${evt.preempted}`;
+  } else if (evt.kind === "skill_writing") {
+    div.textContent = `writing skill ${evt.skill} — ${evt.description} (${evt.model || "codegen"})`;
+  } else if (evt.kind === "skill_created") {
+    div.textContent = `created ${evt.skill}${evt.written ? " (body written)" : " (stub)"}`;
+    div.title = evt.body || evt.description || "";
   }
   return div;
 }
@@ -327,6 +332,36 @@ function eventNode(evt) {
     body.textContent = `interrupted ${evt.preempted}, requeued with state`;
   } else if (evt.kind === "dropped") {
     body.textContent = evt.reason || "";
+  } else if (evt.kind === "skill_writing") {
+    node.classList.add("writing");
+    const title = document.createElement("div");
+    title.className = "skill-title";
+    title.textContent = evt.skill;
+    body.appendChild(title);
+    const desc = document.createElement("div");
+    desc.className = "muted";
+    desc.textContent = evt.description || "";
+    body.appendChild(desc);
+    const badge = document.createElement("span");
+    badge.className = "writing-badge";
+    badge.textContent = "writing skill body…";
+    node.appendChild(badge);
+  } else if (evt.kind === "skill_created") {
+    const title = document.createElement("div");
+    title.className = "skill-title";
+    title.textContent = evt.skill;
+    body.appendChild(title);
+    const desc = document.createElement("div");
+    desc.className = "muted";
+    desc.textContent = evt.description || "";
+    body.appendChild(desc);
+    if (evt.body) {
+      const p = document.createElement("div");
+      p.className = "muted";
+      p.textContent = `body: ${evt.body}`;
+      node.appendChild(p);
+    }
+    node.classList.add(evt.written ? "ok" : "stub");
   } else {
     body.textContent = evt.summary || evt.text || "";
   }

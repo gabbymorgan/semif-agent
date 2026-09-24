@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .codegen import CodegenClient, CodegenError, generate_skill_body
 from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
 from .llm import LLMClient
@@ -21,12 +22,15 @@ from .skills import (
     CreateCategory,
     CreateSkill,
     Skill,
+    SkillBodyStore,
     build_skills,
     build_tree,
     compose_state,
     generate_category,
     generate_skill,
+    materialize_skill,
     merge_registry,
+    merge_skill_bodies,
     navigate,
 )
 from .trace import TraceLog
@@ -55,6 +59,7 @@ class DispatchResult:
     summary: str
     skill: str | None = None
     decisions_logged: int = 0
+    body_written: bool = False
 
 
 class Scheduler:
@@ -67,6 +72,7 @@ class Scheduler:
         tau: float = 0.6,
         max_reentries: int = 3,
         trace: TraceLog | None = None,
+        codegen: CodegenClient | None = None,
     ):
         self.engine = engine
         self.llm = llm
@@ -75,6 +81,7 @@ class Scheduler:
         self.config = config
         self.tau = tau
         self.max_reentries = max_reentries
+        self.codegen = codegen
         self.queue = UrgencyQueue(
             max_size=int(config.get("queue", {}).get("max_size", 100)),
             age_rate=float(config.get("queue", {}).get("age_rate", 0.0)),
@@ -82,7 +89,9 @@ class Scheduler:
         self.skills = build_skills(config)
         self.tree = build_tree(self.skills)
         self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
+        self.body_store = SkillBodyStore(config.get("skill_bodies", "data/skills"))
         merge_registry(self.tree, self.registry.read())
+        merge_skill_bodies(self.tree, self.body_store, self.registry.read())
         self.ctx = ActionContext(engine=self.engine, config=config)
         self.runner = SkillRunner(self.ctx, self.llm, self.log)
         self.current: Process | None = None
@@ -210,22 +219,32 @@ class Scheduler:
 
     # ---- dispatch ----
 
-    def _dispatch(self, request: Request) -> DispatchResult:
+    def _dispatch(self, request: Request, _depth: int = 0) -> DispatchResult:
         navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
         if isinstance(navigation, CreateCategory):
             return self._create_category(request)
         if isinstance(navigation, CreateSkill):
-            return self._create_skill(request, navigation.category)
-        outcome = self.runner.run(navigation, request)
+            created = self._create_skill(request, navigation.category)
+            if created.kind == "create_skill" and created.body_written and _depth < self.max_reentries:
+                requeued = _requeue(request, request.text)
+                self.trace.append(
+                    "requeued", request.id, text=request.text, reason="skill created"
+                )
+                return self._dispatch(requeued, _depth=_depth + 1)
+            return created
+        return self._run_skill(navigation, request)
+
+    def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
+        outcome = self.runner.run(skill, request)
         if outcome.error:
             self.trace.append(
-                "error", request.id, skill=navigation.name, message=outcome.error
+                "error", request.id, skill=skill.name, message=outcome.error
             )
             return DispatchResult(kind="error", summary=f"skill error: {outcome.error}")
         self.trace.append(
             "assessed",
             request.id,
-            skill=navigation.name,
+            skill=skill.name,
             success=outcome.success,
             summary=outcome.summary,
             updated_request=outcome.updated_request,
@@ -235,8 +254,8 @@ class Scheduler:
             self.trace.append("requeued", request.id, text=outcome.updated_request)
         return DispatchResult(
             kind="ran",
-            summary=f"{navigation.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
-            skill=navigation.name,
+            summary=f"{skill.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
+            skill=skill.name,
             decisions_logged=outcome.decisions_logged,
         )
 
@@ -275,7 +294,14 @@ class Scheduler:
         )
 
     def _create_skill(self, request: Request, category: str) -> DispatchResult:
-        """Author a new skill leaf stub with the decision model in generation mode."""
+        """Author a new skill leaf with the decision model in generation mode.
+
+        The small model writes the title + description; a larger OpenAI-
+        compatible model then writes the runnable body against SKILL.md. The
+        stub is registered first so the leaf is navigable even if the body
+        write fails; a successful write is merged into the tree as a runnable
+        skill and the request re-dispatches to it.
+        """
         from .engine import EngineUnavailable
 
         try:
@@ -296,21 +322,78 @@ class Scheduler:
                 kind="error",
                 summary=f"create_skill failed: {draft.name} already exists",
             )
+
         self.registry.register_skill(category, draft.name, draft.description)
         self.tree.setdefault(category, []).append(
             Skill(name=draft.name, category=category, description=draft.description)
         )
+        self.trace.append(
+            "skill_writing",
+            request.id,
+            category=category,
+            skill=draft.name,
+            description=draft.description,
+            model=self.codegen.model if self.codegen else None,
+        )
+
+        if self.codegen is None:
+            self.trace.append(
+                "skill_created",
+                request.id,
+                category=category,
+                skill=draft.name,
+                description=draft.description,
+                body=None,
+                written=False,
+            )
+            return DispatchResult(
+                kind="create_skill",
+                summary=f"created stub {category}.{draft.name}: {draft.description} (no codegen configured)",
+                skill=draft.name,
+            )
+
+        try:
+            draft.code = generate_skill_body(
+                self.codegen, request, category, draft, self.tree
+            )
+            skill = materialize_skill(draft, category, self.body_store)
+        except (CodegenError, ValueError) as exc:
+            self.trace.append(
+                "error",
+                request.id,
+                phase="create_skill",
+                category=category,
+                message=f"skill body write failed: {exc}",
+            )
+            return DispatchResult(
+                kind="create_skill",
+                summary=f"created stub {category}.{draft.name}: {draft.description} (body write failed: {exc})",
+                skill=draft.name,
+            )
+
+        skills = self.tree.setdefault(category, [])
+        for index, existing in enumerate(skills):
+            if existing.name == draft.name:
+                skills[index] = skill
+                break
+        else:
+            skills.append(skill)
+        skills.sort(key=lambda s: s.name)
+        body_path = self.body_store.body_path(category, draft.name).as_posix()
         self.trace.append(
             "skill_created",
             request.id,
             category=category,
             skill=draft.name,
             description=draft.description,
+            body=body_path,
+            written=True,
         )
         return DispatchResult(
             kind="create_skill",
             summary=f"created skill {category}.{draft.name}: {draft.description}",
             skill=draft.name,
+            body_written=True,
         )
 
     def status(self) -> str:

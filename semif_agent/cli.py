@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .dream import dream as run_dream
+from .codegen import CodegenClient
 from .engine import EngineConfig, EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
@@ -45,6 +46,14 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         base_url=config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
         model=config.get("llm", {}).get("model", "qwen2.5:3b"),
     )
+    codegen_cfg = config.get("codegen", {})
+    codegen = CodegenClient(
+        base_url=codegen_cfg.get(
+            "base_url", config.get("llm", {}).get("base_url", "http://localhost:11434/v1")
+        ),
+        model=codegen_cfg.get("model", "qwen38-iq3s"),
+        timeout=float(codegen_cfg.get("timeout", 600.0)),
+    )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     scheduler = Scheduler(
@@ -55,6 +64,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         tau=float(config.get("tau", 0.6)),
         max_reentries=int(config.get("max_reentries", 3)),
         trace=trace,
+        codegen=codegen,
     )
     return scheduler, config
 
