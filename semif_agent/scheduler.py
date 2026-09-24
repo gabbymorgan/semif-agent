@@ -152,8 +152,10 @@ class Scheduler:
         if self.current is None:
             weight, label = self._score(request)
             self.current = Process(request=request, skill="(scheduling)", weight=weight)
-            outcome = self._dispatch(request)
-            self.current = None
+            try:
+                outcome = self._dispatch(request)
+            finally:
+                self.current = None
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "running", f"[{label}] {outcome.summary}"
 
@@ -197,7 +199,11 @@ class Scheduler:
                 outcome = self._dispatch(request)
             except EngineUnavailable as exc:
                 outcome = DispatchResult(kind="error", summary=f"engine unavailable: {exc}")
-            self.current = None
+            except Exception as exc:
+                self.trace.append("error", request.id, phase="dispatch", message=str(exc))
+                outcome = DispatchResult(kind="error", summary=f"dispatch failed: {exc}")
+            finally:
+                self.current = None
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             results.append(("ran", f"[{request.id}] {outcome.summary}"))
         return results

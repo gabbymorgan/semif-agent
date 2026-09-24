@@ -9,9 +9,11 @@ import pytest
 
 from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
+from semif_agent.log import DecisionLog
 from semif_agent.skills import (
     CategoryDraft,
     CategoryRegistry,
+    CreateCategory,
     SkillDraft,
     build_category_prompt,
     build_skill_prompt,
@@ -20,9 +22,11 @@ from semif_agent.skills import (
     generate_category,
     generate_skill,
     merge_registry,
+    navigate,
     parse_category_draft,
     parse_skill_draft,
 )
+from semif_agent.trace import TraceLog
 
 
 def test_build_category_prompt_contains_request_and_tree():
@@ -178,3 +182,13 @@ def test_merge_registry_loads_categories_and_skills(tmp_path):
     names = [s.name for s in tree["delivery"]]
     assert names == ["track_live"]
     assert tree["delivery"][0].category == "delivery"
+
+
+def test_navigate_empty_tree_short_circuits(tmp_path):
+    """An empty tree goes straight to CreateCategory without a SemIf call."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    result = navigate(None, log, trace, Request("anything"), {})
+    assert isinstance(result, CreateCategory)
+    assert log.read() == []
+    assert any(e["kind"] == "create_category" for e in trace.read())

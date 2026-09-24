@@ -262,7 +262,10 @@ def navigate(
 
     The category level offers a "create_category" branch and the leaf level a
     "create_skill" branch; both are handled live by dispatch and log a
-    suggestion event to the trace.
+    suggestion event to the trace. A level with nothing to choose from
+    (an empty tree, or a category with no skills yet) short-circuits straight to
+    the create branch: SemIf decisions need at least two options, and asking
+    "which of one?" is meaningless.
     """
     categories = sorted(tree.keys())
     create_category = Option("create_category", "Suggest a new category for this.")
@@ -271,6 +274,17 @@ def navigate(
         question="Which top-level category handles this request?",
         options=[Option(c, c) for c in categories] + [create_category],
     )
+    if not categories:
+        trace.append(
+            "create_category",
+            request.id,
+            state=top.state,
+            question=top.question,
+            options=[o.id for o in top.options],
+            selected="create_category",
+            probs={},
+        )
+        return CreateCategory()
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
@@ -292,6 +306,18 @@ def navigate(
         question=f"Within {category}, which skill?",
         options=[Option(s.name, s.description) for s in skills] + [create_skill],
     )
+    if not skills:
+        trace.append(
+            "skill_needed",
+            request.id,
+            category=category,
+            state=leaf.state,
+            question=leaf.question,
+            options=[o.id for o in leaf.options],
+            selected="create_skill",
+            probs={},
+        )
+        return CreateSkill(category=category)
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
@@ -362,7 +388,7 @@ def generate_category(
     engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]
 ) -> CategoryDraft:
     """Author a new category stub with the decision model in generation mode."""
-    raw = engine.generate(build_category_prompt(request, tree))
+    raw = engine.generate(build_category_prompt(request, tree), max_tokens=128)
     return parse_category_draft(raw)
 
 
@@ -413,5 +439,5 @@ def generate_skill(
     engine: SemIfEngine, request: Request, category: str, tree: dict[str, list[Skill]]
 ) -> SkillDraft:
     """Author a new skill leaf stub with the decision model in generation mode."""
-    raw = engine.generate(build_skill_prompt(request, category, tree))
+    raw = engine.generate(build_skill_prompt(request, category, tree), max_tokens=128)
     return parse_skill_draft(raw)

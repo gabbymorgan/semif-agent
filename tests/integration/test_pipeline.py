@@ -138,3 +138,29 @@ def test_generate_skill(tmp_path):
     print(f"draft: {draft.name!r} — {draft.description!r}")
     assert isinstance(draft, SkillDraft)
     assert draft.name and draft.description
+
+
+def test_create_skill_empty_category_does_not_wedge(tmp_path):
+    """A dispatch that lands on an empty category must not leave the scheduler wedged.
+
+    Regression: navigation on a category with no skills produced a single-option
+    SemIf decision, which the backend rejects; the exception unwound past the
+    current-process reset, so every later request queued forever behind a phantom
+    current. The empty category must now short-circuit straight to create_skill.
+    """
+    config = load_config()
+    require_real(config)
+    config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
+    scheduler, config = build_scheduler(config)
+    scheduler.tree["travel_planning"] = []
+
+    for _ in range(2):
+        status, detail = scheduler.submit("look up flights to japan for february")
+        print(f"[{status}] {detail}")
+        assert status in ("running", "preempted", "queued", "rejected", "error")
+        assert scheduler.current is None, "scheduler must never stay wedged after a submit"
+
+    status, detail = scheduler.submit("tell me if my package was delivered")
+    print(f"[{status}] {detail}")
+    assert scheduler.current is None
