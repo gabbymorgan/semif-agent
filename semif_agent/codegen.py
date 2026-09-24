@@ -97,8 +97,9 @@ class CodegenClient:
         """Read an OpenAI-compatible SSE stream, echo tokens to stdout.
 
         Only `content` deltas are accumulated into the returned body;
-        `reasoning_content` (chain-of-thought) is echoed to the console but
-        never part of the result.
+        reasoning (chain-of-thought) is echoed to the console but never part
+        of the result. Backends disagree on the field name: ollama streams it
+        as `reasoning`, DeepSeek/vllm-style as `reasoning_content`, so read both.
         """
         import sys
 
@@ -117,7 +118,7 @@ class CodegenClient:
             choice = chunk.get("choices", [{}])[0]
             delta = choice.get("delta", {}) or {}
             text = delta.get("content") or ""
-            reasoning = delta.get("reasoning_content") or ""
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
             if text or reasoning:
                 sys.stdout.write(text + reasoning)
                 sys.stdout.flush()

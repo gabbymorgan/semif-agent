@@ -216,9 +216,11 @@ unit tests (24) + box integration tests (2).
   `codegen.timeout` in config for harder prompts.
 - Set `codegen.stream: true` to echo the codegen output as an SSE token stream
   to stdout during body writes — including the chain-of-thought, so a long
-  (~7 min) write shows live progress. Echoing is console-only; the returned
-  content is identical either way. Integration tests already force streaming;
-  see it with `-s` on the box.
+  (~7 min) write shows live progress. The client reads reasoning from either
+  `reasoning` (ollama) or `reasoning_content` (other OpenAI-compatible
+  backends) — do not drop one for the other. Echoing is console-only; the
+  returned content is identical either way. Integration tests already force
+  streaming; see it with `-s` on the box.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a

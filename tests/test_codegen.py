@@ -257,9 +257,14 @@ def _sse_frame(payload: dict) -> str:
 
 
 class _StreamingOpenAI(BaseHTTPRequestHandler):
-    """Replies with an OpenAI-compatible SSE token stream (COT then content)."""
+    """Replies with an OpenAI-compatible SSE token stream (COT then content).
+
+    Reasoning field name matches the backend: ollama emits `reasoning`,
+    DeepSeek/vllm-style `reasoning_content`. Defaults to ollama's.
+    """
 
     reasoning: str = "thinking about the body..."
+    reasoning_key: str = "reasoning"
     content: str = GOOD_BODY
     received: list = []
 
@@ -271,11 +276,12 @@ class _StreamingOpenAI(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         reasoning = type(self).reasoning
+        reasoning_key = type(self).reasoning_key
         content = type(self).content
         step = max(len(reasoning) // 4, 1)
         for i in range(0, len(reasoning), step):
             frame = _sse_frame(
-                {"choices": [{"delta": {"reasoning_content": reasoning[i : i + step]}}]}
+                {"choices": [{"delta": {reasoning_key: reasoning[i : i + step]}}]}
             )
             self.wfile.write(frame.encode("utf-8"))
         step = max(len(content) // 4, 1)
@@ -292,8 +298,10 @@ class _StreamingOpenAI(BaseHTTPRequestHandler):
         pass
 
 
-def _streaming_server() -> tuple[ThreadingHTTPServer, str]:
-    handler = type("Handler", (_StreamingOpenAI,), {"received": []})
+def _streaming_server(reasoning_key: str = "reasoning") -> tuple[ThreadingHTTPServer, str]:
+    handler = type(
+        "Handler", (_StreamingOpenAI,), {"reasoning_key": reasoning_key, "received": []}
+    )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
@@ -312,8 +320,9 @@ def test_chat_stream_accumulates_full_content():
         httpd.server_close()
 
 
-def test_chat_stream_verbose_echoes_tokens(capsys):
-    httpd, base = _streaming_server()
+@pytest.mark.parametrize("reasoning_key", ["reasoning", "reasoning_content"])
+def test_chat_stream_verbose_echoes_tokens(reasoning_key, capsys):
+    httpd, base = _streaming_server(reasoning_key=reasoning_key)
     try:
         client = CodegenClient(base_url=base, model="test", timeout=10, stream=True)
         out = client.chat([{"role": "user", "content": "hi"}])
