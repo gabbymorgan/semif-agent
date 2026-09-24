@@ -13,10 +13,13 @@
   },
   "llm": {"base_url": "http://localhost:11434/v1", "model": "qwen3.5:4b"},
   "codegen": {
-    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model. No max_tokens cap: qwen38-iq3s reasons extensively (~7 min) before emitting the body; reasoning is filtered automatically. timeout is seconds.",
+    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Larger/slower than the decision or self-assessment model. No max_tokens cap: qwen38-iq3s reasons extensively (~7 min) before emitting the body; reasoning is filtered automatically. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream in minutes instead of blocking on the total timeout.",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen38-iq3s",
-    "timeout": 1200
+    "timeout": 1200,
+    "stream": false,
+    "idle_warn": 60,
+    "idle_timeout": 180
   },
   "skill_bodies": "data/skills",
   "skills": {

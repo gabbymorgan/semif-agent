@@ -235,6 +235,23 @@ class _SilentOpenAI(BaseHTTPRequestHandler):
         pass
 
 
+class _StalledStreamOpenAI(BaseHTTPRequestHandler):
+    """Sends response headers then holds the connection with zero body bytes;
+    the streaming client must hit its idle/stall watchdog."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.flush()
+        time.sleep(5)
+
+    def log_message(self, format, *args):
+        pass
+
+
 def test_chat_timeout_raises_codegen_error():
     handler = type("Handler", (_SilentOpenAI,), {})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -247,6 +264,53 @@ def test_chat_timeout_raises_codegen_error():
         )
         with pytest.raises(CodegenError, match="timed out"):
             client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_stream_stall_fails_fast():
+    """A silent stream must fail at idle_timeout, not the total budget."""
+    handler = type("Handler", (_StalledStreamOpenAI,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        client = CodegenClient(
+            base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1",
+            model="test",
+            timeout=10,
+            stream=True,
+            idle_warn=1.0,
+            idle_timeout=2.0,
+        )
+        started = time.monotonic()
+        with pytest.raises(CodegenError, match="stalled"):
+            client.chat([{"role": "user", "content": "hi"}])
+        elapsed = time.monotonic() - started
+        assert elapsed < 8.0, f"stall should fail fast, took {elapsed:.1f}s"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_stream_stall_warns_before_failing(capsys):
+    handler = type("Handler", (_StalledStreamOpenAI,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        client = CodegenClient(
+            base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1",
+            model="test",
+            timeout=10,
+            stream=True,
+            idle_warn=1.0,
+            idle_timeout=3.0,
+        )
+        with pytest.raises(CodegenError, match="stalled"):
+            client.chat([{"role": "user", "content": "hi"}])
+        captured = capsys.readouterr().out
+        assert "no tokens for" in captured
+        assert "will fail after" in captured
     finally:
         httpd.shutdown()
         httpd.server_close()

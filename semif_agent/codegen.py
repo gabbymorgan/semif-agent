@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import ast
 import json
+import select
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -44,7 +47,10 @@ class CodegenClient:
     With `stream=True` the response is read as an SSE token stream and echoed
     to stdout as it arrives — including the chain-of-thought — so a long
     body write shows live progress. Echoing is console-only; the returned
-    content is identical either way.
+    content is identical either way. A silent stream (no bytes for
+    `idle_warn` seconds) prints a warning, and one that stays silent for
+    `idle_timeout` seconds raises CodegenError instead of blocking on the
+    total timeout — a wedged generation is surfaced in minutes, not ~20.
     """
 
     def __init__(
@@ -53,11 +59,15 @@ class CodegenClient:
         model: str,
         timeout: float = 1200.0,
         stream: bool = False,
+        idle_warn: float = 60.0,
+        idle_timeout: float = 180.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.stream = stream
+        self.idle_warn = idle_warn
+        self.idle_timeout = idle_timeout
 
     def chat(
         self,
@@ -100,33 +110,102 @@ class CodegenClient:
         reasoning (chain-of-thought) is echoed to the console but never part
         of the result. Backends disagree on the field name: ollama streams it
         as `reasoning`, DeepSeek/vllm-style as `reasoning_content`, so read both.
-        """
-        import sys
 
+        Reads are gated by `select` so the socket never blocks-and-times-out:
+        a socket that delivers no bytes for `idle_warn` seconds prints a
+        warning, and `idle_timeout` seconds of silence raises CodegenError.
+        The total wall-clock budget is `self.timeout`, so a slow-but-streaming
+        generation is never cut short. Thresholds <= 0 disable that check. If
+        the underlying socket can't be reached, falls back to a plain blocking
+        read (relying on the outer TimeoutError handling).
+        """
         parts: list[str] = []
-        for raw in response:
-            line = raw.decode("utf-8").strip()
-            if not line.startswith("data:"):
+        sock = self._stream_socket(response)
+        if sock is None:
+            return self._read_stream_blocking(response)
+        start = time.monotonic()
+        last_activity = start
+        warned = False
+        while True:
+            ready, _, _ = select.select([sock], [], [], 1.0)
+            now = time.monotonic()
+            if not ready:
+                idle = now - last_activity
+                if self.idle_warn > 0 and not warned and idle >= self.idle_warn:
+                    sys.stdout.write(
+                        f"\n[codegen] no tokens for {idle:.0f}s — still waiting, "
+                        f"will fail after {self.idle_timeout:.0f}s of silence\n"
+                    )
+                    sys.stdout.flush()
+                    warned = True
+                if self.idle_timeout > 0 and idle >= self.idle_timeout:
+                    raise CodegenError(
+                        f"codegen stream stalled: no tokens for {idle:.0f}s "
+                        f"(idle_timeout={self.idle_timeout:.0f}s)"
+                    )
+                if now - start >= self.timeout:
+                    raise CodegenError(
+                        f"codegen request exceeded {self.timeout:.0f}s total budget"
+                    )
                 continue
-            data = line[len("data:") :].strip()
-            if data == "[DONE]":
-                break
             try:
-                chunk = json.loads(data)
-            except ValueError:
-                continue
-            choice = chunk.get("choices", [{}])[0]
-            delta = choice.get("delta", {}) or {}
-            text = delta.get("content") or ""
-            reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-            if text or reasoning:
-                sys.stdout.write(text + reasoning)
-                sys.stdout.flush()
-            parts.append(text)
+                raw = response.readline()
+            except OSError as exc:
+                raise CodegenError(f"codegen stream read failed: {exc}") from exc
+            if not raw:
+                break
+            last_activity = time.monotonic()
+            if not self._consume_frame(raw.decode("utf-8").strip(), parts):
+                break
         if parts:
             sys.stdout.write("\n")
             sys.stdout.flush()
         return "".join(parts)
+
+    def _read_stream_blocking(self, response) -> str:
+        """Fallback reader when the response socket can't be located."""
+        parts: list[str] = []
+        for raw in response:
+            if not self._consume_frame(raw.decode("utf-8").strip(), parts):
+                break
+        if parts:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        return "".join(parts)
+
+    @staticmethod
+    def _consume_frame(line: str, parts: list[str]) -> bool:
+        """Process one SSE line. Returns False on [DONE] (stop reading)."""
+        if not line.startswith("data:"):
+            return True
+        data = line[len("data:") :].strip()
+        if data == "[DONE]":
+            return False
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            return True
+        choice = chunk.get("choices", [{}])[0]
+        delta = choice.get("delta", {}) or {}
+        text = delta.get("content") or ""
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+        if text or reasoning:
+            sys.stdout.write(text + reasoning)
+            sys.stdout.flush()
+        parts.append(text)
+        return True
+
+    @staticmethod
+    def _stream_socket(response):
+        """Reach the underlying socket across Python-version response shapes."""
+        fp = getattr(response, "fp", response)
+        raw = getattr(fp, "raw", None)
+        sock = getattr(raw, "_sock", None) if raw is not None else None
+        if sock is None:
+            sock = getattr(fp, "sock", None)
+        if sock is None:
+            sock = getattr(response, "sock", None)
+        return sock
 
 
 def build_skill_body_prompt(

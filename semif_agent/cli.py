@@ -54,6 +54,8 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         model=codegen_cfg.get("model", "qwen38-iq3s"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=bool(codegen_cfg.get("stream", False)),
+        idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
+        idle_timeout=float(codegen_cfg.get("idle_timeout", 180.0)),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))

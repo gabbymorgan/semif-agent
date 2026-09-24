@@ -221,6 +221,12 @@ unit tests (24) + box integration tests (2).
   backends) — do not drop one for the other. Echoing is console-only; the
   returned content is identical either way. Integration tests already force
   streaming; see it with `-s` on the box.
+- `codegen.idle_warn` (default 60s) / `codegen.idle_timeout` (default 180s)
+  surface a silent stream: a wedged generation prints a warning at `idle_warn`
+  seconds with no tokens, then raises `CodegenError` (→ graceful stub) at
+  `idle_timeout` — instead of blocking on the 1200s total budget. A streaming
+  stall with zero output usually means the ollama ROCm runner wedged;
+  `sudo systemctl restart ollama` is the recovery.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
