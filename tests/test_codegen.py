@@ -715,6 +715,34 @@ def test_context_window_from_num_ctx():
         httpd.server_close()
 
 
+def test_context_window_parses_parameters_string():
+    """Real ollama serves `parameters` as modelfile text, not a dict."""
+    httpd, base = _show_server(
+        {"parameters": 'num_ctx 100000\nstop "<|end_of_text|>"\ntemperature 0.0'}
+    )
+    try:
+        client = CodegenClient(base_url=base, model="test")
+        assert client._context_window() == 100000
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_context_window_string_parameters_falls_back_to_model_info():
+    httpd, base = _show_server(
+        {
+            "parameters": 'stop "<|end_of_text|>"',
+            "model_info": {"qwen35.context_length": 262144},
+        }
+    )
+    try:
+        client = CodegenClient(base_url=base, model="test")
+        assert client._context_window() == 262144
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_context_window_from_model_info():
     httpd, base = _show_server({"model_info": {"qwen35.context_length": 262144}})
     try:

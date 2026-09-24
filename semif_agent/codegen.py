@@ -166,10 +166,23 @@ class CodegenClient:
                 data = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
             return None
-        params = data.get("parameters") or {}
-        num_ctx = params.get("num_ctx")
-        if isinstance(num_ctx, int) and num_ctx > 0:
-            return num_ctx
+        params = data.get("parameters")
+        if isinstance(params, dict):
+            num_ctx = params.get("num_ctx")
+            if isinstance(num_ctx, int) and num_ctx > 0:
+                return num_ctx
+        elif isinstance(params, str):
+            # ollama serves parameters as modelfile text, not a dict:
+            # "num_ctx 100000\n..." — pull the num_ctx line if present.
+            for line in params.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "num_ctx":
+                    try:
+                        num_ctx = int(parts[1])
+                    except ValueError:
+                        break
+                    if num_ctx > 0:
+                        return num_ctx
         model_info = data.get("model_info") or {}
         for key, value in model_info.items():
             if key.endswith(".context_length") and isinstance(value, int) and value > 0:
