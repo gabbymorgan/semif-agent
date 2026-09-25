@@ -70,6 +70,11 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         degeneration_interval=int(deg_cfg.get("interval", 8000)),
         degeneration_window=int(deg_cfg.get("window", 2000)),
         degeneration_min_chars=int(deg_cfg.get("min_chars", 4000)),
+        temperature=float(codegen_cfg.get("temperature", 0.7)),
+        top_p=float(codegen_cfg.get("top_p", 0.85)),
+        presence_penalty=float(codegen_cfg.get("presence_penalty", 1.5)),
+        frequency_penalty=float(codegen_cfg.get("frequency_penalty", 0.2)),
+        max_attempts=int(codegen_cfg.get("max_attempts", 3)),
     )
 
     def make_degeneration_check(run_id: str):

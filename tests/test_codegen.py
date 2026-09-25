@@ -16,6 +16,7 @@ import pytest
 from semif_agent.codegen import (
     CodegenClient,
     CodegenError,
+    DegenerationError,
     build_skill_body_prompt,
     generate_skill_body,
     parse_skill_body,
@@ -891,6 +892,211 @@ def test_degeneration_disabled_no_callback_no_abort():
         )
         out = client.chat([{"role": "user", "content": "hi"}])
         assert out == GOOD_BODY
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _SequencedOpenAI(BaseHTTPRequestHandler):
+    """Returns one reply per chat request, in order; counts chat calls.
+
+    `/api/show` is answered (default num_ctx 4242) and never counted, so chat
+    payload and retry-count assertions stay unambiguous.
+    """
+
+    replies: list = []
+    received: list = []
+    chat_calls: int = 0
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
+        type(self).chat_calls += 1
+        type(self).received.append(json.loads(raw))
+        index = min(type(self).chat_calls - 1, len(type(self).replies) - 1)
+        reply = type(self).replies[index]
+        body = (
+            _sse_frame({"choices": [{"delta": {"content": reply}}]})
+            + "data: [DONE]\n\n"
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _sequenced_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
+    handler = type(
+        "Handler",
+        (_SequencedOpenAI,),
+        {"replies": replies, "received": [], "chat_calls": 0},
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_chat_payload_carries_sampler_defaults():
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        client.chat([{"role": "user", "content": "hi"}])
+        body = httpd.RequestHandlerClass.received[0]
+        assert body["temperature"] == 0.7
+        assert body["top_p"] == 0.85
+        assert body["presence_penalty"] == 1.5
+        assert body["frequency_penalty"] == 0.2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_skill_body_escalates_sampler_on_retry(tmp_path):
+    """An invalid first parse must retry with the escalated sampler and a fresh
+    corrective prompt (context resets to SMART, no growing conversation)."""
+    httpd, base = _sequenced_server(["this is not python at all", GOOD_BODY])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        code = generate_skill_body(
+            client, Request("is the service up?"), "tracking", draft, tree
+        )
+        assert "def predict" in code and "def act" in code
+        reqs = httpd.RequestHandlerClass.received
+        assert len(reqs) == 2, "one retry after the rejected first attempt"
+        first, second = reqs
+        assert first["temperature"] == 0.7
+        assert first["presence_penalty"] == 1.5
+        assert second["temperature"] == 0.5
+        assert second["top_p"] == 0.85
+        assert second["presence_penalty"] == 2.0
+        assert second["frequency_penalty"] == 0.3
+        retry_user = second["messages"][1]["content"]
+        assert "You are looping" in retry_user
+        assert "probe" in retry_user
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_skill_body_exhausts_max_attempts(tmp_path):
+    httpd, base = _sequenced_server(["this is not python at all"])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, max_attempts=3)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        with pytest.raises(ValueError, match="rejected 3 times"):
+            generate_skill_body(
+                client, Request("is the service up?"), "tracking", draft, tree
+            )
+        assert httpd.RequestHandlerClass.chat_calls == 3
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _DegeneratingOpenAI(BaseHTTPRequestHandler):
+    """Streams forever (degeneration bait) and counts chat requests; answers
+    `/api/show` with {} so the client falls back to its `context_window` config."""
+
+    chat_calls: int = 0
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self, {}):
+            return
+        type(self).chat_calls += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.flush()
+        try:
+            while True:
+                frame = _sse_frame({"choices": [{"delta": {"content": "x"}}]})
+                self.wfile.write(frame.encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(0.01)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _degenerating_server() -> tuple[ThreadingHTTPServer, str]:
+    handler = type("Handler", (_DegeneratingOpenAI,), {"chat_calls": 0})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_degeneration_error_propagates_without_retry():
+    """A degeneration abort is a DegenerationError (CodegenError subclass) and
+    must NOT retry — retry is reserved for invalid parses, leaving degeneration
+    handling as an explicit choice."""
+    assert issubclass(DegenerationError, CodegenError)
+    httpd, base = _degenerating_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100000,
+            max_output=0.5,
+            idle_timeout=30,
+            degeneration_interval=1,
+            degeneration_window=20,
+            degeneration_min_chars=1,
+            max_attempts=3,
+        )
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        with pytest.raises(DegenerationError, match="degeneration detected"):
+            generate_skill_body(
+                client,
+                Request("is the service up?"),
+                "tracking",
+                draft,
+                tree,
+                degeneration_check=lambda recent: "looping",
+            )
+        assert httpd.RequestHandlerClass.chat_calls == 1, "degeneration must not retry"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_other_codegen_error_does_not_retry():
+    """A non-degeneration CodegenError (token budget) must propagate without
+    retrying either."""
+    httpd, base = _degenerating_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=3000,
+            max_output=0.01,
+            idle_timeout=30,
+            max_attempts=3,
+        )
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        with pytest.raises(CodegenError, match="token budget"):
+            generate_skill_body(
+                client, Request("is the service up?"), "tracking", draft, tree
+            )
+        assert httpd.RequestHandlerClass.chat_calls == 1
     finally:
         httpd.shutdown()
         httpd.server_close()

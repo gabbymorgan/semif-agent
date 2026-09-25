@@ -238,10 +238,12 @@ unit tests (24) + box integration tests (2).
 
 Context learned 2026-09-24 on the box: qwen38-iq3s looped ~40 min on one skill
 body (1.5 MB streamed) with no guard firing. Root causes: (1) `CodegenClient`
-sends `temperature 0.0` (greedy) and no penalties while the Modelfile has
-`repeat_penalty 1` (off) + `presence_penalty 0`; (2) the total `timeout` check
-only runs inside the `if not ready:` branch of `_read_stream`, so a
-continuously-streaming runaway never trips it. Known model facts: qwen38-iq3s
+sent `temperature 0.0` (greedy) and no penalties while the Modelfile has
+`repeat_penalty 1` (off) + `presence_penalty 0` (now fixed: item 5 ships the
+card-endorsed high `presence_penalty` per-request); (2) the total `timeout`
+check only runs inside the `if not ready:` branch of `_read_stream`, so a
+continuously-streaming runaway never trips it (fixed in item 1). Known model
+facts: qwen38-iq3s
 runtime window `num_ctx=100000` (native `qwen35.context_length=262144`);
 ollama OpenAI-compat `/v1/chat/completions` supports `temperature`, `top_p`,
 `presence_penalty`, `frequency_penalty`, `max_tokens`, `reasoning_effort`, and
@@ -334,22 +336,41 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     verification pending**: run the codegen integration tests and watch the
     `codegen` trace events + an abort fire on a real degenerating stream.
 
-- [ ] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
-  - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`
-    (defaults `0.15`/`0.95`/`0.1`/`0.2`).
-  - `generate_skill_body` escalates on degeneration or invalid parse:
-    attempts 2–3 use `temp 0.3 / presence 0.3 / freq 0.5` + a corrective
-    message ("You are looping; emit the final Python now."). Max 3 attempts
-    (config `max_attempts`), then graceful stub. Retry = fresh short prompt,
-    i.e. context resets to SMART.
+- [x] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
+  - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`.
+  - `generate_skill_body` escalates on invalid parse: attempts 2–3 use the
+    escalated sampler + a corrective message ("You are looping; emit the final
+    Python now."). Max 3 attempts (config `max_attempts`), then graceful stub.
+    Retry = fresh short prompt, i.e. context resets to SMART.
   - Tests: payload carries the params; retry uses escalated params.
+  - **Revised values after reading the Qwen3.8-27B model card
+    (unsloth/Qwen3.8-27B-GGUF, 2026-09-24):** the original spec (`temp 0.15 /
+    presence 0.1 / freq 0.2`) kept the model nearly greedy with a near-zero
+    presence penalty — the exact loop recipe already documented on the box.
+    The card's anti-repetition guidance is a HIGH `presence_penalty` ("adjust
+    between 0 and 2 to reduce endless repetition"), recommended
+    `temp 0.7 / top_p 0.80 / presence 1.5` in instruct mode. Implemented
+    defaults: `temperature 0.7, top_p 0.85, presence_penalty 1.5,
+    frequency_penalty 0.2`; escalated (attempts 2+): `temp 0.5, top_p 0.85,
+    presence_penalty 2.0, frequency_penalty 0.3`. `top_k`/`min_p`/`repeat_penalty`
+    from the card are NOT reachable via ollama OpenAI-compat, so they stay
+    unset. **Degeneration does NOT retry**: the item-4 watchdog raises a new
+    `DegenerationError(CodegenError)` subclass that propagates straight to the
+    scheduler's graceful-stub path — retry-on-degeneration is left as an open
+    decision. Unit-tested on the dev machine (payload defaults, escalated retry
+    payload + corrective prompt, max_attempts exhaustion, degeneration and
+    token-budget errors propagate without retry). **Box verification pending**:
+    confirm qwen38-iq3s converges faster / aborts via `codegen` trace events.
 
 - [ ] **6. Box Modelfile anti-loop levers** (guppy; infra, not a code change)
-  - `repeat_penalty`/`min_p` are not reachable via OpenAI-compat, so set them
-    server-side: edit the qwen38-iq3s Modelfile to `PARAMETER repeat_penalty 1.2`
-    and `PARAMETER min_p 0.05`, then `ollama create qwen38-iq3s -f ...`.
-  - Verify: `ollama show --modelfile qwen38-iq3s` shows the params; re-run
-    `test_generate_skill_body_codegen` and
+  - **Superseded by item 5.** The model card calls for `repetition_penalty 1.0`
+    (off) and `min_p 0.0` — the original `repeat_penalty 1.2 / min_p 0.05`
+    plan contradicts it. The card-endorsed cure (high `presence_penalty`,
+    reachable per-request via OpenAI-compat) is already shipped in item 5, so
+    no Modelfile edit is needed. Left as `[ ]` only for a box sanity check:
+    `ollama show --modelfile qwen38-iq3s` still shows `repeat_penalty 1` /
+    `presence_penalty 0`; confirm the per-request values override them, then
+    re-run `test_generate_skill_body_codegen` and
     `test_create_category_chain_runs_new_skill`; confirm no long loop.
 
 - [ ] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)

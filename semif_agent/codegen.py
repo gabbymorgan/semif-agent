@@ -31,6 +31,15 @@ class CodegenError(RuntimeError):
     """The codegen endpoint could not be reached."""
 
 
+class DegenerationError(CodegenError):
+    """A SemIf degeneration watchdog aborted the stream mid-generation.
+
+    Subclass of CodegenError so the scheduler's graceful-stub path catches it;
+    distinct so callers can choose to retry a degenerated stream later without
+    retrying genuine endpoint failures.
+    """
+
+
 class TokenBudget(NamedTuple):
     """Per-request token limits derived from the detected context window.
 
@@ -79,9 +88,17 @@ class CodegenClient:
     An optional `degeneration_check` callback (passed per `chat` call) is fed
     the last `degeneration_window` chars of content+reasoning every
     `degeneration_interval` chars once `degeneration_min_chars` have
-    accumulated; a non-None return aborts the stream. It lets a SemIf
-    continue/stop decision cut off a generation that is looping instead of
-    converging, before it fills the context window.
+    accumulated; a non-None return aborts the stream with DegenerationError.
+    It lets a SemIf continue/stop decision cut off a generation that is
+    looping instead of converging, before it fills the context window.
+
+    Sampler defaults follow the Qwen3.8 model card's instruct-mode guidance
+    (unsloth/Qwen3.8-27B-GGUF): the anti-repetition cure is a high
+    `presence_penalty`, not greedy temperature. `temperature`/`top_p`/
+    `presence_penalty`/`frequency_penalty` are per-`chat` overridable; the
+    `generate_skill_body` escalation ladder bumps presence toward the card's
+    max (2.0) and lowers temperature on retries. `max_attempts` bounds that
+    ladder (default 3).
     """
 
     def __init__(
@@ -102,6 +119,11 @@ class CodegenClient:
         degeneration_interval: int = 8000,
         degeneration_window: int = 2000,
         degeneration_min_chars: int = 4000,
+        temperature: float = 0.7,
+        top_p: float = 0.85,
+        presence_penalty: float = 1.5,
+        frequency_penalty: float = 0.2,
+        max_attempts: int = 3,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -119,13 +141,21 @@ class CodegenClient:
         self.degeneration_interval = degeneration_interval
         self.degeneration_window = degeneration_window
         self.degeneration_min_chars = degeneration_min_chars
+        self.temperature = temperature
+        self.top_p = top_p
+        self.presence_penalty = presence_penalty
+        self.frequency_penalty = frequency_penalty
+        self.max_attempts = max_attempts
         self._window: int | None = None
 
     def chat(
         self,
         messages: list[dict],
         max_tokens: int | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
         degeneration_check: Callable[[str], str | None] | None = None,
     ) -> str:
         budget = self._compute_budget(messages)
@@ -135,7 +165,14 @@ class CodegenClient:
         payload: dict = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
+            "temperature": self.temperature if temperature is None else temperature,
+            "top_p": self.top_p if top_p is None else top_p,
+            "presence_penalty": (
+                self.presence_penalty if presence_penalty is None else presence_penalty
+            ),
+            "frequency_penalty": (
+                self.frequency_penalty if frequency_penalty is None else frequency_penalty
+            ),
             "stream": True,
         }
         if max_tokens is not None:
@@ -365,7 +402,7 @@ class CodegenClient:
                 degeneration_check, recent, out_chars, last_check
             )
             if reason:
-                raise CodegenError(f"codegen degeneration detected: {reason}")
+                raise DegenerationError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
         if parts and self.stream:
@@ -416,7 +453,7 @@ class CodegenClient:
                 degeneration_check, recent, out_chars, last_check
             )
             if reason:
-                raise CodegenError(f"codegen degeneration detected: {reason}")
+                raise DegenerationError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
         if parts and self.stream:
@@ -564,6 +601,48 @@ def parse_skill_body(raw: str) -> str:
     return text
 
 
+ESCALATED_SAMPLER = {
+    "temperature": 0.5,
+    "top_p": 0.85,
+    "presence_penalty": 2.0,
+    "frequency_penalty": 0.3,
+}
+
+
+def _retry_prompt(
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    contract: str,
+    error: Exception,
+) -> list[dict]:
+    """Fresh short prompt for an escalated retry.
+
+    Not a growing conversation: the context resets to SMART (new request, tiny
+    prompt) and the model is told in one line to stop looping and emit the
+    final Python.
+    """
+    system = (
+        "You write runnable skill bodies for a local agent. The contract below "
+        "is authoritative: follow it exactly.\n\n"
+        f"{contract}"
+    )
+    user = (
+        f"The previous attempt to write the skill body for {category}.{draft.name} "
+        f"was rejected: {error}. You are looping; emit the final Python now.\n"
+        f"Request: {request.text}\n"
+        f"Category: {category}\n"
+        f"Skill name: {draft.name}\n"
+        f"Skill description: {draft.description}\n"
+        "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
+        "no markdown fences, no JSON."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def generate_skill_body(
     client: CodegenClient,
     request: Request,
@@ -574,29 +653,38 @@ def generate_skill_body(
     max_tokens: int | None = None,
     degeneration_check: Callable[[str], str | None] | None = None,
 ) -> str:
-    """Author a skill body with the big model; retries once on invalid output."""
+    """Author a skill body with the big model; escalate up to `max_attempts`.
+
+    Attempt 1 uses the client's sampler defaults. Attempts >= 2 use the
+    escalated sampler (higher presence_penalty to suppress repeated thinking,
+    lower temperature for a decisive final answer) plus a fresh short prompt
+    that resets the context to SMART and tells the model to emit the final
+    Python now. Only an invalid parse (ValueError) escalates; a
+    DegenerationError or other CodegenError propagates immediately so the
+    scheduler can stub out gracefully.
+    """
     contract_text = contract if contract is not None else read_skill_contract()
-    messages = build_skill_body_prompt(request, category, draft, tree, contract_text)
     if client.stream:
         print(f"[codegen] writing body for {category}.{draft.name}...")
     last_error: Exception | None = None
-    for attempt in range(2):
+    attempts = max(client.max_attempts, 1)
+    for attempt in range(1, attempts + 1):
+        if attempt == 1:
+            messages = build_skill_body_prompt(
+                request, category, draft, tree, contract_text
+            )
+        else:
+            messages = _retry_prompt(
+                request, category, draft, contract_text, last_error
+            )
         try:
             raw = client.chat(
                 messages,
                 max_tokens=max_tokens,
                 degeneration_check=degeneration_check,
+                **(ESCALATED_SAMPLER if attempt > 1 else {}),
             )
             return parse_skill_body(raw)
         except ValueError as exc:
             last_error = exc
-            messages = messages + [
-                {
-                    "role": "user",
-                    "content": (
-                        f"That was rejected: {exc}. Reply with ONLY the Python code "
-                        "now — no prose, no fences, no JSON."
-                    ),
-                }
-            ]
-    raise ValueError(f"skill body rejected twice: {last_error}")
+    raise ValueError(f"skill body rejected {attempts} times: {last_error}")
