@@ -17,6 +17,7 @@ from semif_agent.codegen import (
     CodegenClient,
     CodegenError,
     DegenerationError,
+    _retry_prompt,
     build_skill_body_prompt,
     generate_skill_body,
     parse_skill_body,
@@ -52,6 +53,15 @@ def test_read_skill_contract_loads_contract():
     assert "data/skills" in text
 
 
+def test_contract_directs_reusable_self_mocked_skills():
+    """SKILL.md must tell the model that a body is a reusable module owning its
+    own source of truth, not a one-shot that leans on the human for data."""
+    text = read_skill_contract()
+    assert "Reusable module with its own data model" in text
+    assert "internal/mock data model" in text
+    assert "for clarifying questions only" in text
+
+
 def test_build_skill_body_prompt_includes_contract_request_and_draft():
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
@@ -64,6 +74,32 @@ def test_build_skill_body_prompt_includes_contract_request_and_draft():
     assert "check if the service is up" in joined
     assert "probe" in joined
     assert "tracking.check" in joined
+
+
+def test_build_skill_body_prompt_directs_reuse_and_self_mock_data():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = build_skill_body_prompt(
+        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
+    )
+    joined = messages[1]["content"]
+    assert "reused across many requests" in joined
+    assert "internal/mock data model" in joined
+    assert "ask only to clarify intent" in joined
+
+
+def test_retry_prompt_directs_reuse_and_self_mock_data():
+    messages = _retry_prompt(
+        Request("check if the service is up"),
+        "tracking",
+        SkillDraft(name="probe", description="Probe the service."),
+        "THE CONTRACT",
+        ValueError("skill body is empty"),
+    )
+    joined = messages[1]["content"]
+    assert "reused across many requests" in joined
+    assert "internal/mock data model" in joined
+    assert "ask only to clarify intent" in joined
 
 
 @pytest.mark.parametrize(

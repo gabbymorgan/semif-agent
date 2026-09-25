@@ -72,13 +72,20 @@ def act(ctx, request, prediction) -> ActionResult:
 - **Never swallow the request.** If the skill cannot act, return an
   `ActionResult` with a short `action_log` explaining why and set `new_state`
   back to `request.text`.
-- **Request input when data is missing.** If a required piece of data is not
-  in the request or in local files, do not fail silently: return an
+- **Reusable module with its own data model.** A skill body is executed across
+  many requests — it is a reusable module, never a one-shot exchange. It must
+  not rely on the human to supply its working data at predict/act time. The
+  skill owns its source of truth: a self-contained internal/mock data model
+  (module-level fixtures or config-file-backed state). The REPL input path is
+  for clarifying questions only — never the primary data source.
+- **Request input for clarification when requirements are unclear from the
+  prompt.** If the human's intent is ambiguous, do not guess: return an
   `ActionResult(action_log="...", new_state=request.text, needs_input="<question>")`.
-  The run pauses and the human is asked. The answer arrives on
-  `request.user_input` and `act` is called again with the *same* prediction —
-  check `request.user_input` on the resume pass to finish the run (or ask again
-  if it is still insufficient).
+  The run pauses and the human answers on `request.user_input`; `act` is then
+  called again with the *same* prediction — check `request.user_input` on the
+  resume pass to finish the run. This disambiguates intent only, never
+  operational data — a skill asking for data it should own (tracking IDs,
+  coordinates, statuses) is missing its data model.
 - **Write files under configured data dirs only** (e.g. `ctx.config["drafts"]`),
   never anywhere else on disk.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.

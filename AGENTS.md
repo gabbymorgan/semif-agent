@@ -422,7 +422,7 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
   - Update `config.example.json` codegen block and the AGENTS.md codegen
     section with every new key from items 2, 4, 5.
 
-- [ ] **9. Codegen prompt: code-for-reuse + self-generated mock data**
+- [x] **9. Codegen prompt: code-for-reuse + self-generated mock data**
     (`codegen.py`, `SKILL.md`)
   - The generated body is meant to be REUSED across requests, so the prompt
     must tell the model to generate its own mock data (its own source of
@@ -436,6 +436,15 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     internal/mock data model; ask the human only to disambiguate intent.
   - Test: prompt/`SKILL.md` contains the reuse + self-mock-data directives;
     a generated-body parse is unaffected.
+  - Implemented on the dev machine (2026-09-24): SKILL.md gained a hard rule
+    "Reusable module with its own data model" and the old "Request input when
+    data is missing" rule was reworded to "Request input for clarification
+    when requirements are unclear from the prompt" (intent only, never
+    operational data). Both codegen prompt builders (`build_skill_body_prompt`
+    and `_retry_prompt`) now add an explicit user-message line: the body is
+    reused across many requests; give the skill its own internal/mock data
+    model and ask only to clarify intent. Unit-tested (contract + both prompt
+    builders carry the directives; existing body-parse tests unaffected).
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a

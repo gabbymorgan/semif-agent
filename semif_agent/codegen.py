@@ -599,6 +599,9 @@ def build_skill_body_prompt(
         f"Skill description: {draft.description}\n"
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
+        "This body will be reused across many requests: give the skill its own "
+        "internal/mock data model and never ask the human for operational data — "
+        "ask only to clarify intent.\n"
         "Write the Python module body now. Reply with ONLY valid Python code "
         "defining `predict` and `act`. No prose, no markdown fences, no JSON."
     )
@@ -680,6 +683,9 @@ def _retry_prompt(
         f"Category: {category}\n"
         f"Skill name: {draft.name}\n"
         f"Skill description: {draft.description}\n"
+        "This body will be reused across many requests: give the skill its own "
+        "internal/mock data model and never ask the human for operational data — "
+        "ask only to clarify intent.\n"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
         "no markdown fences, no JSON."
     )
