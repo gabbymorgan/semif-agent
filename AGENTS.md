@@ -316,12 +316,20 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     both confirmed live on the box (`context window 100000 tokens` start
     line; abort at the configured cap).
 
-- [ ] **3. Exact token accounting via include_usage** (`codegen.py`)
+- [x] **3. Exact token accounting via include_usage** (`codegen.py`)
   - Send `stream_options: {"include_usage": true}`; capture the `usage` chunk
     in `_consume_frame`; after the stream log real `prompt/completion/total`
     tokens, % of window, and zone `SMART|WARN|DUMB` (absolute thresholds
     `smart_limit`/`warn_limit`).
   - Test: fake server emits a usage chunk; assert it's captured and logged.
+  - Implemented on the dev machine (2026-09-24): `_consume_frame` now also
+    tolerates a usage chunk with an empty `choices` list (OpenAI's shape —
+    previously an `IndexError`) and returns the `usage` dict; both stream
+    readers capture it and `_log_usage` prints real `prompt/completion/total`
+    tokens, % of the detected window, and the zone once the stream ends.
+    `chat` always sends `stream_options: {"include_usage": true}`. Unit-tested
+    (payload carries include_usage; usage captured + zone parametrized
+    SMART/WARN/DUMB; a stream without a usage chunk logs nothing extra).
 
 - [x] **4. SemIf degeneration watchdog** (`codegen.py`, `cli.py`, `scheduler.py`)
   - Add optional `degeneration_check: Callable[[str], str|None]` to

@@ -174,6 +174,7 @@ class CodegenClient:
                 self.frequency_penalty if frequency_penalty is None else frequency_penalty
             ),
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -295,6 +296,35 @@ class CodegenClient:
             )
         sys.stdout.flush()
 
+    def _log_usage(self, budget: TokenBudget, usage: dict) -> None:
+        """Report exact token usage once `include_usage` yields a usage chunk.
+
+        Logs real prompt/completion/total tokens, % of the detected window, and
+        the zone (SMART < smart_limit, WARN < warn_limit, else DUMB) measured
+        against absolute total-token thresholds.
+        """
+        prompt = usage.get("prompt_tokens")
+        completion = usage.get("completion_tokens")
+        total = usage.get("total_tokens")
+        if not isinstance(total, int):
+            return
+        if not isinstance(prompt, int):
+            prompt = total - (completion if isinstance(completion, int) else 0)
+        if not isinstance(completion, int):
+            completion = total - prompt
+        pct = total / budget.window * 100 if budget.window else 0.0
+        if self.smart_limit > 0 and total < self.smart_limit:
+            zone = "SMART"
+        elif self.warn_limit > 0 and total < self.warn_limit:
+            zone = "WARN"
+        else:
+            zone = "DUMB"
+        print(
+            f"[codegen] usage: prompt {prompt} · completion {completion} · "
+            f"total {total} tokens · {pct:.0f}% of window · {zone}"
+        )
+        sys.stdout.flush()
+
     def _enforce_budget(self, budget: TokenBudget, out_chars: int, warned: bool) -> bool:
         """Abort when the output cap is exceeded; one-shot warn near the fill
         threshold. Returns the updated warned state."""
@@ -353,6 +383,7 @@ class CodegenClient:
         warned = False
         warned_fill = False
         out_chars = 0
+        usage: dict | None = None
         recent: list[str] = []
         recent_len = 0
         last_check: int | None = None
@@ -385,9 +416,11 @@ class CodegenClient:
             if not raw:
                 break
             last_activity = time.monotonic()
-            continues, text, reasoning = self._consume_frame(
+            continues, text, reasoning, frame_usage = self._consume_frame(
                 raw.decode("utf-8").strip()
             )
+            if frame_usage is not None:
+                usage = frame_usage
             if self.stream and (text or reasoning):
                 sys.stdout.write(text + reasoning)
                 sys.stdout.flush()
@@ -405,6 +438,8 @@ class CodegenClient:
                 raise DegenerationError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
+        if usage is not None:
+            self._log_usage(budget, usage)
         if parts and self.stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
@@ -428,6 +463,7 @@ class CodegenClient:
         start = time.monotonic()
         warned_fill = False
         out_chars = 0
+        usage: dict | None = None
         recent: list[str] = []
         recent_len = 0
         last_check: int | None = None
@@ -436,9 +472,11 @@ class CodegenClient:
                 raise CodegenError(
                     f"codegen request exceeded {self.timeout:.0f}s total budget"
                 )
-            continues, text, reasoning = self._consume_frame(
+            continues, text, reasoning, frame_usage = self._consume_frame(
                 raw.decode("utf-8").strip()
             )
+            if frame_usage is not None:
+                usage = frame_usage
             if self.stream and (text or reasoning):
                 sys.stdout.write(text + reasoning)
                 sys.stdout.flush()
@@ -456,6 +494,8 @@ class CodegenClient:
                 raise DegenerationError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
+        if usage is not None:
+            self._log_usage(budget, usage)
         if parts and self.stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
@@ -493,26 +533,32 @@ class CodegenClient:
         return None, last_check
 
     @staticmethod
-    def _consume_frame(line: str) -> tuple[bool, str, str]:
+    def _consume_frame(line: str) -> tuple[bool, str, str, dict | None]:
         """Process one SSE line.
 
-        Returns (continue, content, reasoning). `content` feeds the returned
-        body; `reasoning` is only ever echoed. (False, "", "") on [DONE].
+        Returns (continue, content, reasoning, usage). `content` feeds the
+        returned body; `reasoning` is only ever echoed; `usage` is the exact
+        token usage carried on the final chunk when `include_usage` was
+        requested (None otherwise). (False, "", "", None) on [DONE].
         """
         if not line.startswith("data:"):
-            return True, "", ""
+            return True, "", "", None
         data = line[len("data:") :].strip()
         if data == "[DONE]":
-            return False, "", ""
+            return False, "", "", None
         try:
             chunk = json.loads(data)
         except ValueError:
-            return True, "", ""
-        choice = chunk.get("choices", [{}])[0]
+            return True, "", "", None
+        usage = chunk.get("usage")
+        if not isinstance(usage, dict):
+            usage = None
+        choices = chunk.get("choices") or []
+        choice = choices[0] if choices else {}
         delta = choice.get("delta", {}) or {}
         text = delta.get("content") or ""
         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-        return True, text, reasoning
+        return True, text, reasoning, usage
 
     @staticmethod
     def _stream_socket(response):

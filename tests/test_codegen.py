@@ -613,6 +613,7 @@ def test_chat_stream_accumulates_full_content():
         assert out == GOOD_BODY, "streamed deltas must reassemble the full body"
         body = httpd.RequestHandlerClass.received[0]
         assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -642,6 +643,106 @@ def test_chat_stream_false_returns_content_without_echo(capsys):
         out = client.chat([{"role": "user", "content": "hi"}])
         assert out == GOOD_BODY
         assert capsys.readouterr().out == ""
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _UsageOpenAI(BaseHTTPRequestHandler):
+    """Streams a small content delta, then the exact-token usage chunk
+    (`choices: []` — OpenAI's shape when include_usage is set) before
+    [DONE]. The `/api/show` window query is answered (default num_ctx 4242)
+    and never recorded."""
+
+    usage: dict = {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15}
+    content: str = "ok\n"
+    received: list = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8")
+        if _respond_show(self):
+            return
+        type(self).received.append(json.loads(raw))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(
+            _sse_frame({"choices": [{"delta": {"content": self.content}}]}).encode("utf-8")
+        )
+        self.wfile.write(
+            _sse_frame({"choices": [], "usage": self.usage}).encode("utf-8")
+        )
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _usage_server() -> tuple[ThreadingHTTPServer, str]:
+    handler = type("Handler", (_UsageOpenAI,), {"received": []})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def test_chat_captures_usage_chunk():
+    """A usage chunk (empty choices) must be consumed without crashing and
+    the real token counts logged after the stream — the include_usage path."""
+    httpd, base = _usage_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == "ok\n"
+        assert httpd.RequestHandlerClass.received[0]["stream_options"] == {
+            "include_usage": True
+        }
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize(
+    ("smart_limit", "warn_limit", "zone"),
+    [
+        (250000, 500000, "SMART"),
+        (10, 500, "WARN"),
+        (10, 14, "DUMB"),
+    ],
+)
+def test_chat_logs_real_usage_with_zone(smart_limit, warn_limit, zone, capsys):
+    """Real usage is logged with prompt/completion/total tokens, % of window,
+    and the zone by absolute total-token thresholds."""
+    httpd, base = _usage_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            smart_limit=smart_limit,
+            warn_limit=warn_limit,
+        )
+        client.chat([{"role": "user", "content": "hi"}])
+        captured = capsys.readouterr().out
+        assert "prompt 5 · completion 10 · total 15 tokens" in captured
+        assert "0% of window" in captured
+        assert zone in captured
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_no_usage_chunk_logs_nothing(capsys):
+    """Without an include_usage chunk nothing extra is logged — old servers
+    keep working and the budget line is the only output."""
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, stream=True)
+        client.chat([{"role": "user", "content": "hi"}])
+        captured = capsys.readouterr().out
+        assert "usage: prompt" not in captured
     finally:
         httpd.shutdown()
         httpd.server_close()
