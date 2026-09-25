@@ -48,6 +48,7 @@ html, body {
 
 .inputbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 10px 16px;
   background: var(--panel-2);
@@ -55,6 +56,19 @@ html, body {
 }
 
 .inputbar form { display: flex; flex: 1; gap: 8px; }
+
+#answer-feedback {
+  flex: 1 1 100%;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--ok);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#answer-feedback.feedback-error { color: var(--fail); border-color: var(--fail); }
+#answer-feedback.feedback-awaiting { color: var(--warn); border-color: var(--warn); }
 
 #query-input {
   flex: 1;
@@ -345,6 +359,17 @@ pre.json {
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .stat-grid .stat { background: var(--panel-2); border-radius: 4px; padding: 4px 6px; }
 .stat-grid .stat .v { font-weight: 700; }
+
+.pending-line {
+  margin: 8px 0 4px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  border-left: 3px solid var(--warn);
+  color: var(--warn);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* ---------- scrubber ---------- */
 

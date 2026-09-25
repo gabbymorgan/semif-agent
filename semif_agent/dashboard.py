@@ -100,7 +100,11 @@ def build_status(scheduler: Scheduler) -> dict:
             else None
         )
         pending = (
-            {"skill": scheduler.pending.skill.name, "question": scheduler.pending.question}
+            {
+                "skill": scheduler.pending.skill.name,
+                "question": scheduler.pending.question,
+                "run_id": scheduler.pending.request.id,
+            }
             if scheduler.pending
             else None
         )

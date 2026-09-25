@@ -12,6 +12,7 @@ const state = {
   phaseFilter: "",
   scrub: 0,
   flowSteps: [],
+  answerFeedback: null,
 };
 
 async function getJSON(url, opts) {
@@ -553,7 +554,41 @@ function renderStatus() {
   $("#answer-form").classList.toggle("hidden", !pending);
   if (pending) {
     $("#answer-input").placeholder = `${pending.skill}: ${pending.question}`;
+    const p = document.createElement("div");
+    p.className = "pending-line";
+    p.textContent = `awaiting input (${pending.run_id || pending.skill}): ${pending.question}`;
+    el.appendChild(p);
   }
+  renderAnswerFeedback();
+}
+
+function renderAnswerFeedback() {
+  const el = $("#answer-feedback");
+  const fb = state.answerFeedback;
+  el.className = "hidden";
+  if (!fb) return;
+  if (fb.inflight) {
+    el.className = "";
+    el.textContent = "answering…";
+    return;
+  }
+  if (fb.status === "error") {
+    el.className = "feedback-error";
+    el.textContent = `✗ ${fb.detail}`;
+    return;
+  }
+  let line = `✓ consumed "${fb.text}"`;
+  if (fb.status === "needs_input") {
+    el.className = "feedback-awaiting";
+    line += ` → awaiting: ${fb.detail}`;
+    if (fb.askedQuestion && fb.detail === fb.askedQuestion) {
+      line += " (answer received; the skill asked again)";
+    }
+  } else {
+    el.className = "";
+    line += ` → ${fb.detail}`;
+  }
+  el.textContent = line;
 }
 
 function stat(k, v) {
@@ -632,6 +667,14 @@ $("#answer-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("#answer-input").value.trim();
   if (!text) return;
+  const btn = $("#answer-btn");
+  const pending = state.status.pending || {};
+  const runId = pending.run_id || null;
+  const askedQuestion = pending.question || null;
+  $("#answer-input").value = "";
+  btn.disabled = true;
+  state.answerFeedback = { inflight: true };
+  renderAnswerFeedback();
   try {
     const res = await getJSON("/api/answer", {
       method: "POST",
@@ -639,11 +682,25 @@ $("#answer-form").addEventListener("submit", async (e) => {
       body: JSON.stringify({ text }),
     });
     flash(`[${res.status}] ${res.detail}`);
+    state.answerFeedback = { status: res.status, detail: res.detail, text, askedQuestion };
   } catch (err) {
     flash(`answer failed: ${err.message}`);
+    state.answerFeedback = {
+      status: "error",
+      detail: `answer failed: ${err.message}`,
+      text,
+      askedQuestion,
+    };
+  } finally {
+    btn.disabled = false;
   }
-  $("#answer-input").value = "";
   await refreshAll();
+  if (runId && state.runs.some((r) => r.run_id === runId)) {
+    state.selectedRunId = runId;
+    state.selectedDecisionId = null;
+    state.scrub = 0;
+    render();
+  }
 });
 
 $("#refresh-btn").addEventListener("click", async () => {

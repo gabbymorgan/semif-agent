@@ -273,13 +273,15 @@ def test_answer_without_pending_returns_error_json(tmp_path):
 
 def test_status_includes_pending(tmp_path):
     scheduler = build_scheduler(tmp_path)
-    scheduler._run_skill(need_input_skill([]), Request("track my package"))
+    request = Request("track my package")
+    scheduler._run_skill(need_input_skill([]), request)
     server = Server(scheduler)
     try:
         status, payload = server.get("/api/status")
         assert status == 200
         assert payload["pending"]["skill"] == "track.manual"
         assert payload["pending"]["question"] == "What's the tracking number?"
+        assert payload["pending"]["run_id"] == request.id
     finally:
         server.close()
 
