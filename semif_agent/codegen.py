@@ -86,11 +86,11 @@ class CodegenClient:
         idle_warn: float = 60.0,
         idle_timeout: float = 180.0,
         context_window: float = 0.0,
-        smart_limit: int = 100000,
-        warn_limit: int = 200000,
-        max_fill_ratio: float = 0.8,
-        warn_fill_ratio: float = 0.5,
-        max_output: float = 0.25,
+        smart_limit: int = 250000,
+        warn_limit: int = 500000,
+        max_fill_ratio: float = 0.9,
+        warn_fill_ratio: float = 0.7,
+        max_output: float = 0.85,
         chars_per_token: float = 4.0,
     ):
         self.base_url = base_url.rstrip("/")

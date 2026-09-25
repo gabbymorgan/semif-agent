@@ -57,11 +57,11 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
         idle_timeout=float(codegen_cfg.get("idle_timeout", 180.0)),
         context_window=float(codegen_cfg.get("context_window", 0.0)),
-        smart_limit=int(codegen_cfg.get("smart_limit", 100000)),
-        warn_limit=int(codegen_cfg.get("warn_limit", 200000)),
-        max_fill_ratio=float(codegen_cfg.get("max_fill_ratio", 0.8)),
-        warn_fill_ratio=float(codegen_cfg.get("warn_fill_ratio", 0.5)),
-        max_output=float(codegen_cfg.get("max_output", 0.25)),
+        smart_limit=int(codegen_cfg.get("smart_limit", 250000)),
+        warn_limit=int(codegen_cfg.get("warn_limit", 500000)),
+        max_fill_ratio=float(codegen_cfg.get("max_fill_ratio", 0.9)),
+        warn_fill_ratio=float(codegen_cfg.get("warn_fill_ratio", 0.7)),
+        max_output=float(codegen_cfg.get("max_output", 0.85)),
         chars_per_token=float(codegen_cfg.get("chars_per_token", 4.0)),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
