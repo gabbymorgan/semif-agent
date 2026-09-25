@@ -93,35 +93,48 @@ def build_dream_report(scheduler: Scheduler) -> dict:
 
 
 def build_status(scheduler: Scheduler) -> dict:
-    current = (
-        {"skill": scheduler.current.skill, "request_id": scheduler.current.request.id}
-        if scheduler.current
-        else None
-    )
-    pending = (
-        {"skill": scheduler.pending.skill.name, "question": scheduler.pending.question}
-        if scheduler.pending
-        else None
-    )
-    queue = [
-        {"id": request.id, "weight": weight, "text": request.text[:80]}
-        for weight, request in scheduler.queue.items()
-    ]
+    with scheduler._lock:
+        current = (
+            {"skill": scheduler.current.skill, "request_id": scheduler.current.request.id}
+            if scheduler.current
+            else None
+        )
+        pending = (
+            {"skill": scheduler.pending.skill.name, "question": scheduler.pending.question}
+            if scheduler.pending
+            else None
+        )
+        queue = [
+            {"id": request.id, "weight": weight, "text": request.text[:80]}
+            for weight, request in scheduler.queue.items()
+        ]
+        tau = scheduler.tau
+        queue_max = scheduler.queue.max_size
     return {
         "current": current,
         "pending": pending,
         "queue": queue,
-        "tau": scheduler.tau,
-        "queue_max": scheduler.queue.max_size,
+        "tau": tau,
+        "queue_max": queue_max,
     }
 
 
 def build_tree_payload(scheduler: Scheduler) -> dict:
-    tree = scheduler.tree
+    with scheduler._lock:
+        snapshot = {
+            category: list(skills) for category, skills in scheduler.tree.items()
+        }
     return {
         "categories": {
-            category: [{"name": skill.name, "description": skill.description} for skill in skills]
-            for category, skills in sorted(tree.items())
+            category: [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "status": skill.status,
+                }
+                for skill in skills
+            ]
+            for category, skills in sorted(snapshot.items())
         }
     }
 
@@ -228,6 +241,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 try:
                     body = self._read_json()
                     status, detail = self.scheduler.answer(str(body.get("text", "")))
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
+            return
+        if path == "/api/restart":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    status, detail = self.scheduler.restart_skill(
+                        str(body.get("category", "")), str(body.get("skill", ""))
+                    )
                 except Exception as exc:
                     self._send_error(500, str(exc))
                     return

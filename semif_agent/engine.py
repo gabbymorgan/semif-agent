@@ -10,6 +10,7 @@ pinned GGUF available; elsewhere calls raise EngineUnavailable.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,7 @@ class SemIfEngine:
         self._model = None
         self._tokenizer = None
         self._metadata = None
+        self._lock = threading.Lock()
 
     def _ensure_loaded(self) -> tuple:
         if self._model is not None:
@@ -75,22 +77,23 @@ class SemIfEngine:
         return self._model is not None
 
     def call(self, request: DecisionRequest) -> DecisionResult:
-        model, tokenizer, metadata = self._ensure_loaded()
-        from semif_phase1 import llamacpp_backend as backend
+        with self._lock:
+            model, tokenizer, metadata = self._ensure_loaded()
+            from semif_phase1 import llamacpp_backend as backend
 
-        row = request.to_semif_row()
-        result = backend.score(model, tokenizer, row, metadata)
-        return DecisionResult(
-            request=request,
-            option_ids=list(result["option_ids"]),
-            probabilities=list(result["probabilities"]),
-            extra={
-                "prompt_sha256": result.get("prompt_sha256"),
-                "input_tokens": result.get("input_tokens"),
-                "forward_seconds": result.get("forward_seconds"),
-                "total_seconds": result.get("total_seconds"),
-            },
-        )
+            row = request.to_semif_row()
+            result = backend.score(model, tokenizer, row, metadata)
+            return DecisionResult(
+                request=request,
+                option_ids=list(result["option_ids"]),
+                probabilities=list(result["probabilities"]),
+                extra={
+                    "prompt_sha256": result.get("prompt_sha256"),
+                    "input_tokens": result.get("input_tokens"),
+                    "forward_seconds": result.get("forward_seconds"),
+                    "total_seconds": result.get("total_seconds"),
+                },
+            )
 
     def generate(
         self,
@@ -107,33 +110,34 @@ class SemIfEngine:
         backend), stopping at the tokenizer's eos token. The KV cache is cleared
         at the start, so interleaving scoring and generation on one model is safe.
         """
-        model, tokenizer, metadata = self._ensure_loaded()
-        try:
-            import numpy
+        with self._lock:
+            model, tokenizer, metadata = self._ensure_loaded()
+            try:
+                import numpy
 
-            engine = model.engine
-            prompt_text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-            engine.clear()
-            logits = engine._decode(prompt_ids, 0, 0, True)
-            generated: list[int] = []
-            rng = numpy.random.default_rng()
-            for position in range(max_tokens):
-                token = _sample_token(logits, temperature, rng)
-                if token == tokenizer.eos_token_id:
-                    break
-                generated.append(token)
-                logits = engine._decode([token], len(prompt_ids) + position, 0, True)
-            return tokenizer.decode(generated).strip()
-        except EngineUnavailable:
-            raise
-        except Exception as exc:
-            raise EngineUnavailable(f"generation failed: {exc}") from exc
+                engine = model.engine
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+                engine.clear()
+                logits = engine._decode(prompt_ids, 0, 0, True)
+                generated: list[int] = []
+                rng = numpy.random.default_rng()
+                for position in range(max_tokens):
+                    token = _sample_token(logits, temperature, rng)
+                    if token == tokenizer.eos_token_id:
+                        break
+                    generated.append(token)
+                    logits = engine._decode([token], len(prompt_ids) + position, 0, True)
+                return tokenizer.decode(generated).strip()
+            except EngineUnavailable:
+                raise
+            except Exception as exc:
+                raise EngineUnavailable(f"generation failed: {exc}") from exc
 
 
 def _sample_token(logits, temperature: float, rng) -> int:

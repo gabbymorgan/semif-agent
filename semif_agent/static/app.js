@@ -129,6 +129,11 @@ function eventRow(evt) {
   } else if (evt.kind === "skill_created") {
     div.textContent = `created ${evt.skill}${evt.written ? " (body written)" : " (stub)"}`;
     div.title = evt.body || evt.description || "";
+  } else if (evt.kind === "skill_write_failed") {
+    div.textContent = `body write failed: ${evt.skill}`;
+    div.title = evt.message || "";
+  } else if (evt.kind === "skill_restarted") {
+    div.textContent = `restarted body write: ${evt.skill}`;
   } else if (evt.kind === "needs_input") {
     div.textContent = "needs input";
     div.title = evt.question || "";
@@ -378,6 +383,23 @@ function eventNode(evt) {
       node.appendChild(p);
     }
     node.classList.add(evt.written ? "ok" : "stub");
+  } else if (evt.kind === "skill_write_failed") {
+    node.classList.add("stub");
+    const title = document.createElement("div");
+    title.className = "skill-title";
+    title.textContent = `${evt.skill} — body write failed`;
+    body.appendChild(title);
+    const msg = document.createElement("div");
+    msg.className = "muted";
+    msg.textContent = evt.message || "";
+    body.appendChild(msg);
+    const btn = document.createElement("button");
+    btn.className = "restart-btn";
+    btn.textContent = "restart";
+    btn.addEventListener("click", () => restartSkill(evt.category, evt.skill));
+    node.appendChild(btn);
+  } else if (evt.kind === "skill_restarted") {
+    body.textContent = `restarted body write for ${evt.skill}`;
   } else if (evt.kind === "needs_input") {
     node.classList.add("needs-input");
     body.textContent = `awaiting input: ${evt.question || ""}`;
@@ -434,6 +456,38 @@ function kv(k, v) {
 
 /* ---------------- skill tree ---------------- */
 
+async function restartSkill(category, name) {
+  try {
+    const res = await getJSON("/api/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category, skill: name }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`restart failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
+function skillStatusBadge(status, category, name) {
+  const span = document.createElement("span");
+  if (status === "writing") {
+    span.className = "sbadge writing";
+    span.textContent = "writing…";
+  } else if (status === "stub") {
+    span.className = "sbadge stub";
+    span.textContent = "stub";
+    const btn = document.createElement("button");
+    btn.className = "restart-btn";
+    btn.textContent = "restart";
+    btn.title = `write the body for ${category}.${name}`;
+    btn.addEventListener("click", () => restartSkill(category, name));
+    span.appendChild(btn);
+  }
+  return span;
+}
+
 function renderTree() {
   const el = $("#skill-tree");
   el.innerHTML = "";
@@ -455,6 +509,7 @@ function renderTree() {
       desc.textContent = skill.description;
       row.appendChild(nm);
       row.appendChild(desc);
+      row.appendChild(skillStatusBadge(skill.status, cat, skill.name));
       div.appendChild(row);
     }
     el.appendChild(div);

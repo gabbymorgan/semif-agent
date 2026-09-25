@@ -142,7 +142,7 @@ def try_warm(scheduler: Scheduler) -> str:
 
 def repl(scheduler: Scheduler, config: dict) -> None:
     print(try_warm(scheduler))
-    print("type a request, or one of: busy <text> | idle | status | skills | dream | relabel <id> <outcome> | quit")
+    print("type a request, or one of: busy <text> | idle | status | skills | dream | relabel <id> <outcome> | restart <category> <skill> | quit")
     while True:
         try:
             line = input("> ").strip()
@@ -171,6 +171,14 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             ok = scheduler.log.relabel(parts[1], parts[2])
             print("relabeled." if ok else f"no row with id {parts[1]}")
             continue
+        if lower.startswith(("restart ", "/restart ")):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3:
+                print("usage: restart <category> <skill>")
+                continue
+            status, detail = scheduler.restart_skill(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
         if lower == "idle":
             scheduler.idle()
             print("current process cleared.")
@@ -185,6 +193,8 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             answer = input(f"{scheduler.pending.question} ")
             status, detail = scheduler.answer(answer)
             print(f"[{status}] {detail}")
+        for result_status, result_detail in scheduler.run_queue():
+            print(f"[{result_status}] {result_detail}")
 
 
 def scripted(scheduler: Scheduler, path: str) -> None:

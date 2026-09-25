@@ -1,12 +1,21 @@
 """Pure-stdlib tests for skill-tree authoring: category and skill prompts, draft
-parsing, the category registry, and the error path when the engine is unavailable.
+parsing, the category registry, the async codegen-body workflow, and the error
+path when the engine is unavailable.
 
-No mocking: engine-dependent success paths are exercised only by the box
-integration tests against the real decision model.
+No mocking: the async write test uses a real CodegenClient against a throwaway
+stdlib HTTP server (real endpoint, per the repo rule); engine-dependent success
+paths are exercised only by the box integration tests against the real decision
+model.
 """
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from semif_agent.codegen import CodegenClient
 from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
 from semif_agent.llm import LLMClient
@@ -17,6 +26,7 @@ from semif_agent.skills import (
     CategoryDraft,
     CategoryRegistry,
     CreateCategory,
+    Skill,
     SkillDraft,
     build_category_prompt,
     build_skill_prompt,
@@ -30,6 +40,67 @@ from semif_agent.skills import (
     parse_skill_draft,
 )
 from semif_agent.trace import TraceLog
+
+
+GOOD_BODY = """\
+from semif_agent.decisions import DecisionRequest, Option
+from semif_agent.skills import ActionResult, Prediction
+
+def predict(ctx, request):
+    return Prediction(text="ok", decisions=[])
+
+def act(ctx, request, prediction):
+    return ActionResult(action_log="probe ran", new_state=request.text)
+"""
+
+
+def _fake_codegen_server() -> tuple[ThreadingHTTPServer, str]:
+    """Single-shot OpenAI-compatible SSE server standing in for ollama. Also
+    answers `/api/show` so the client's context-window probe succeeds."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            if self.path.endswith("/api/show"):
+                body = json.dumps({"parameters": {"num_ctx": 4242}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            frame = "data: " + json.dumps(
+                {"choices": [{"delta": {"content": GOOD_BODY}}]}
+            ) + "\n\n"
+            body = (frame + "data: [DONE]\n\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+
+
+def _scheduler(tmp_path, codegen=None):
+    return Scheduler(
+        engine=SemIfEngine(EngineConfig()),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+        codegen=codegen,
+    )
 
 
 def test_action_result_needs_input_defaults_none():
@@ -180,12 +251,30 @@ def test_category_registry_register_skill(tmp_path):
     registry.register_skill("brand_new", "ping", "Probe the service.")
     loaded = registry.read()
     assert loaded["delivery"]["skills"] == [
-        {"name": "track_live", "description": "Follow a package in real time."}
+        {
+            "name": "track_live",
+            "description": "Follow a package in real time.",
+            "request_text": "",
+        }
     ]
     assert loaded["brand_new"] == {
         "description": "",
-        "skills": [{"name": "ping", "description": "Probe the service."}],
+        "skills": [{"name": "ping", "description": "Probe the service.", "request_text": ""}],
     }
+
+
+def test_category_registry_register_skill_keeps_request_text(tmp_path):
+    registry = CategoryRegistry(str(tmp_path / "categories.json"))
+    registry.register_skill(
+        "delivery",
+        "track_live",
+        "Follow a package in real time.",
+        request_text="track my drone delivery in real time",
+    )
+    loaded = registry.read()
+    assert loaded["delivery"]["skills"][0]["request_text"] == (
+        "track my drone delivery in real time"
+    )
 
 
 def test_merge_registry_loads_categories_and_skills(tmp_path):
@@ -228,3 +317,111 @@ def test_dispatch_create_category_without_engine_returns_error(tmp_path):
     result = scheduler._dispatch(Request("anything"))
     assert result.kind == "error"
     assert "create_category failed" in result.summary
+
+
+def test_skill_status_reflects_writing_and_noop():
+    """A fresh Skill is a stub; marking it writing shows `writing`; a real body
+    shows `ready`."""
+    stub = Skill(name="probe", category="tracking", description="Probe.")
+    assert stub.is_noop()
+    assert stub.status == "stub"
+    stub.writing = True
+    assert stub.status == "writing"
+    stub.writing = False
+
+    def predict(ctx, request):
+        return None
+
+    def act(ctx, request, prediction):
+        return None
+
+    ready = Skill(name="probe", category="tracking", description="Probe.", predict=predict, act=act)
+    assert not ready.is_noop()
+    assert ready.status == "ready"
+
+
+def test_restart_skill_without_codegen_returns_error(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["tracking"] = [
+        Skill(name="track_live", category="tracking", description="Follow a package.")
+    ]
+    status, detail = scheduler.restart_skill("tracking", "track_live")
+    assert status == "error"
+    assert "no codegen" in detail
+
+
+def test_restart_skill_unknown_leaf_returns_error(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    status, detail = scheduler.restart_skill("tracking", "missing")
+    assert status == "error"
+    assert "no skill" in detail
+
+
+def test_dispatch_skill_awaiting_body_does_not_reauthor(tmp_path):
+    """A re-dispatched request whose skill body is still pending must report the
+    pending write instead of authoring a second skill."""
+    scheduler = _scheduler(tmp_path)
+    request = Request("track my package")
+    request.meta["awaiting_skill_body"] = ["tracking", "track_live"]
+    result = scheduler._dispatch_skill(request, "tracking", 0.5)
+    assert result.kind == "create_skill"
+    assert "track_live" in result.summary
+    assert "restart" in result.summary
+
+
+def test_run_skill_guards_stub_and_writing_leaves(tmp_path):
+    """Running a writing leaf or a body-less stub must not silently no-op."""
+    scheduler = _scheduler(tmp_path)
+    writing = Skill(name="w", category="tracking", description="writing")
+    writing.writing = True
+    result = scheduler._run_skill(writing, Request("x"))
+    assert result.kind == "error"
+    assert "still being written" in result.summary
+
+    stub = Skill(name="s", category="tracking", description="stub")
+    result = scheduler._run_skill(stub, Request("x"))
+    assert result.kind == "error"
+    assert "no body" in result.summary
+
+
+def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
+    """The full async path: _start_skill_write flags the leaf in-progress and
+    the single-slot worker materializes the body, hot-merges it into the tree,
+    and re-queues the original request for re-dispatch."""
+    httpd, base = _fake_codegen_server()
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.tree["tracking"] = [
+            Skill(name="track_live", category="tracking", description="Follow a package.")
+        ]
+        leaf = scheduler.tree["tracking"][0]
+
+        request = Request("track my drone delivery in real time")
+        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5)
+
+        assert leaf.writing is True
+        deadline = time.monotonic() + 10
+        created = None
+        while time.monotonic() < deadline:
+            created = next(
+                (e for e in scheduler.trace.read() if e["kind"] == "skill_created"),
+                None,
+            )
+            if created:
+                break
+            time.sleep(0.05)
+        assert created is not None, "worker must complete the body write"
+        assert created["written"] is True
+
+        upgraded = scheduler.tree["tracking"][0]
+        assert upgraded is not leaf
+        assert not upgraded.is_noop()
+        assert callable(upgraded.predict) and callable(upgraded.act)
+
+        # The worker drains the queue when idle (run_queue), so an empty queue
+        # is a valid end state; the requeue trace proves the push happened.
+        events = [e["kind"] for e in scheduler.trace.read()]
+        assert "skill_requeued" in events
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

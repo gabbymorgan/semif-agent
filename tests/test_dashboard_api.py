@@ -87,6 +87,51 @@ def test_tree_endpoint(tmp_path):
         server.close()
 
 
+def test_tree_endpoint_carries_skill_status(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        return ActionResult(action_log="ok", new_state=request.text)
+
+    scheduler.tree["tracking"] = [
+        Skill(name="ready", category="tracking", description="r", predict=predict, act=act),
+        Skill(name="stub", category="tracking", description="s"),
+    ]
+    stub = next(s for s in scheduler.tree["tracking"] if s.name == "stub")
+    stub.writing = True
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/tree")
+        assert status == 200
+        by_name = {s["name"]: s["status"] for s in payload["categories"]["tracking"]}
+        assert by_name["ready"] == "ready"
+        assert by_name["stub"] == "writing"
+    finally:
+        server.close()
+
+
+def test_restart_without_codegen_returns_error_json(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.tree["tracking"] = [
+        Skill(name="track_live", category="tracking", description="Follow a package.")
+    ]
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/restart", {"category": "tracking", "skill": "track_live"})
+        assert status == 200
+        assert payload["status"] == "error"
+        assert "codegen" in payload["detail"]
+
+        status, payload = server.post("/api/restart", {"category": "tracking", "skill": "missing"})
+        assert payload["status"] == "error"
+        assert "no skill" in payload["detail"]
+    finally:
+        server.close()
+
+
 def test_trace_endpoint_empty(tmp_path):
     server = Server(build_scheduler(tmp_path))
     try:

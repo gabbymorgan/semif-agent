@@ -7,6 +7,7 @@ local LLM endpoint. If either is unavailable this fails loudly — no mocking.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -218,8 +219,10 @@ def test_create_category_chain_runs_new_skill(tmp_path):
     """A request that needs a brand-new category must end with a skill run.
 
     Deterministic chain: create_category -> create_skill in the new category ->
-    run that skill (the leaf answers the request, not the category stub). Slow:
-    uses real codegen (~7 min). Run in the background.
+    async codegen body write -> re-dispatch of the original request -> run that
+    skill (the leaf answers the request, not the category stub). Slow: uses real
+    codegen (~25-45 min) and the worker runs in the background, so the test
+    polls the trace for the completion + assessed events. Run in the background.
     """
     config = load_config()
     require_real(config)
@@ -233,13 +236,30 @@ def test_create_category_chain_runs_new_skill(tmp_path):
 
     status, detail = scheduler.submit("track my drone delivery in real time")
     print(f"[{status}] {detail}")
+    assert status in ("running", "preempted", "queued", "rejected")
+    assert scheduler.current is None, "gate must be free again right after the stub is created"
 
-    rows = scheduler.trace.read()
-    kinds = [e["kind"] for e in rows]
+    kinds = [e["kind"] for e in scheduler.trace.read()]
     assert "category_created" in kinds, "category stub must be authored first"
-    created = next(e for e in rows if e["kind"] == "skill_created")
-    assert created["written"] is True, "codegen must produce a runnable body"
-    assessed = next(e for e in rows if e["kind"] == "assessed")
+    assert "skill_writing" in kinds, "the async body write must be launched"
+
+    deadline = time.monotonic() + 55 * 60
+    created = assessed = None
+    while time.monotonic() < deadline:
+        rows = scheduler.trace.read()
+        created = next((e for e in rows if e["kind"] == "skill_created"), None)
+        if created and created.get("written"):
+            assessed = next(
+                (e for e in rows if e["kind"] == "assessed" and e.get("skill") == created["skill"]),
+                None,
+            )
+            if assessed:
+                break
+        time.sleep(10)
+    assert created is not None and created.get("written"), (
+        "codegen must produce a runnable body"
+    )
+    assert assessed is not None, "the created skill must run after the body lands"
     assert assessed["skill"] == created["skill"], "the created skill must run"
 
 

@@ -7,6 +7,8 @@ state preserved; a deferred input is scored and queued by urgency.
 
 from __future__ import annotations
 
+import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -30,6 +32,7 @@ from .skills import (
     Prediction,
     Skill,
     SkillBodyStore,
+    SkillDraft,
     build_skills,
     build_tree,
     compose_state,
@@ -76,6 +79,16 @@ class PendingRun:
 
 
 @dataclass
+class SkillWrite:
+    """One queued async skill-body write (single-slot codegen worker)."""
+
+    request: Request
+    category: str
+    draft: SkillDraft
+    weight: float
+
+
+@dataclass
 class DispatchResult:
     kind: str  # ran | create_category | create_skill | needs_input | error
     summary: str
@@ -83,6 +96,7 @@ class DispatchResult:
     decisions_logged: int = 0
     body_written: bool = False
     needs_input: str | None = None
+    draft: SkillDraft | None = None
 
 
 class Scheduler:
@@ -122,6 +136,10 @@ class Scheduler:
         self.runner = SkillRunner(self.ctx, self.llm, self.log)
         self.current: Process | None = None
         self.pending: PendingRun | None = None
+        self._lock = threading.RLock()
+        self._writes: deque[SkillWrite] = deque()
+        self._write_notify = threading.Condition(self._lock)
+        self._write_thread: threading.Thread | None = None
 
     # ---- decision templates (all real SemIf, all logged) ----
 
@@ -179,6 +197,10 @@ class Scheduler:
             return "error", f"decision engine unavailable: {exc}"
 
     def _submit(self, text: str, source: str = "typed") -> tuple[str, str]:
+        with self._lock:
+            return self._submit_locked(text, source)
+
+    def _submit_locked(self, text: str, source: str = "typed") -> tuple[str, str]:
         request = Request(text, source=source)
         self.trace.append("submit", request.id, text=text, source=source)
         if not self._contains_request(request):
@@ -189,7 +211,7 @@ class Scheduler:
             weight, label = self._score(request)
             self.current = Process(request=request, skill="(scheduling)", weight=weight)
             try:
-                outcome = self._dispatch(request)
+                outcome = self._dispatch(request, weight=weight)
             finally:
                 if self.pending is None:
                     self.current = None
@@ -208,7 +230,7 @@ class Scheduler:
             self.queue.push(previous.request, previous.weight)
             self.current = Process(request=request, skill="(scheduling)", weight=1.0)
             self.trace.append("preempted", request.id, preempted=previous.skill)
-            outcome = self._dispatch(request)
+            outcome = self._dispatch(request, weight=1.0)
             if outcome.kind == "needs_input":
                 return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
             self.current = None
@@ -225,19 +247,29 @@ class Scheduler:
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
         """Set a fake in-progress process so the choice/score path is exercised."""
-        if self.pending is not None:
-            self.trace.append("pending_abandoned", self.pending.request.id)
-            self.pending = None
-        self.current = Process(request=Request(text, source="busy"), skill=skill, weight=1.0)
+        with self._lock:
+            if self.pending is not None:
+                self.trace.append("pending_abandoned", self.pending.request.id)
+                self.pending = None
+            self.current = Process(request=Request(text, source="busy"), skill=skill, weight=1.0)
 
     def idle(self) -> None:
-        if self.pending is not None:
-            self.trace.append("pending_abandoned", self.pending.request.id)
-            self.pending = None
-        self.current = None
+        with self._lock:
+            if self.pending is not None:
+                self.trace.append("pending_abandoned", self.pending.request.id)
+                self.pending = None
+            self.current = None
 
     def run_queue(self) -> list[tuple[str, str]]:
-        """Process the queue while idle. Returns the outcomes."""
+        """Process the queue while idle. Returns the outcomes.
+
+        Safe to call from any thread: guarded by the scheduler lock (RLock, so
+        the async codegen worker can drain the queue from its completion path).
+        """
+        with self._lock:
+            return self._run_queue_locked()
+
+    def _run_queue_locked(self) -> list[tuple[str, str]]:
         from .engine import EngineUnavailable
 
         results = []
@@ -246,7 +278,7 @@ class Scheduler:
             self.trace.append("dequeued", request.id)
             self.current = Process(request=request, skill="(scheduling)", weight=0.0)
             try:
-                outcome = self._dispatch(request)
+                outcome = self._dispatch(request, weight=0.0)
             except EngineUnavailable as exc:
                 outcome = DispatchResult(kind="error", summary=f"engine unavailable: {exc}")
             except Exception as exc:
@@ -264,35 +296,65 @@ class Scheduler:
 
     # ---- dispatch ----
 
-    def _dispatch(self, request: Request) -> DispatchResult:
+    def _dispatch(self, request: Request, weight: float = 0.0) -> DispatchResult:
         navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
         if isinstance(navigation, CreateCategory):
             created = self._create_category(request)
             if created.kind != "create_category":
                 return created
-            return self._dispatch_skill(request, created.skill)
+            return self._dispatch_skill(request, created.skill, weight)
         if isinstance(navigation, CreateSkill):
-            return self._dispatch_skill(request, navigation.category)
+            return self._dispatch_skill(request, navigation.category, weight)
         return self._run_skill(navigation, request)
 
-    def _dispatch_skill(self, request: Request, category: str) -> DispatchResult:
-        """create_skill in `category`, then run the new skill so the request is answered.
+    def _dispatch_skill(
+        self, request: Request, category: str, weight: float = 0.0
+    ) -> DispatchResult:
+        """create_skill in `category`, then launch an async body write.
 
-        The created leaf is executed directly, not via a re-dispatch that would
-        re-run navigation on a tree that just changed.
+        The stub is authored and registered synchronously so the leaf is
+        navigable immediately; the runnable body is written in the background
+        by the single-slot codegen worker. When the body lands, the original
+        request is re-queued and re-runs navigation onto the new leaf. A
+        re-dispatched request whose skill is still unwritten must not author a
+        second skill — it reports the pending write instead.
         """
+        pending = request.meta.get("awaiting_skill_body")
+        if pending is not None:
+            category_pending, name = pending
+            return DispatchResult(
+                kind="create_skill",
+                summary=(
+                    f"skill {category_pending}.{name} body still being written "
+                    f"or failed; restart it with `restart {category_pending} {name}`."
+                ),
+                skill=name,
+            )
         created = self._create_skill(request, category)
-        if created.kind != "create_skill" or not created.body_written:
+        if created.kind != "create_skill" or created.draft is None:
             return created
-        skill = next(
-            (s for s in self.tree.get(category, []) if s.name == created.skill),
-            None,
-        )
-        if skill is None:
-            return created
-        return self._run_skill(skill, request)
+        self._start_skill_write(request, category, created.draft, weight)
+        return created
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
+        if skill.writing:
+            return DispatchResult(
+                kind="error",
+                summary=(
+                    f"skill {skill.name} body is still being written; "
+                    "it will run when ready."
+                ),
+                skill=skill.name,
+            )
+        if skill.is_noop():
+            return DispatchResult(
+                kind="error",
+                summary=(
+                    f"skill {skill.name} has no body yet; restart it with "
+                    f"`restart {skill.category} {skill.name}`."
+                ),
+                skill=skill.name,
+            )
         outcome = self.runner.run(skill, request)
         return self._finish_run(skill, request, outcome)
 
@@ -302,19 +364,20 @@ class Scheduler:
         Routed directly to the pending run — no gate, score, or navigation —
         and the run resumes by re-invoking only `act` with the same prediction.
         """
-        if self.pending is None:
-            return "error", "no run is waiting for input"
-        pending = self.pending
-        self.pending = None
-        pending.request.user_input = text
-        self.trace.append("answered", pending.request.id, text=text)
-        outcome = self.runner.resume(pending.skill, pending.request, pending.prediction)
-        result = self._finish_run(pending.skill, pending.request, outcome)
-        if result.kind == "needs_input":
-            return "needs_input", result.summary
-        self.current = None
-        self.trace.append("ran", pending.request.id, skill=result.skill, summary=result.summary)
-        return "ran", f"[resumed] {result.summary}"
+        with self._lock:
+            if self.pending is None:
+                return "error", "no run is waiting for input"
+            pending = self.pending
+            self.pending = None
+            pending.request.user_input = text
+            self.trace.append("answered", pending.request.id, text=text)
+            outcome = self.runner.resume(pending.skill, pending.request, pending.prediction)
+            result = self._finish_run(pending.skill, pending.request, outcome)
+            if result.kind == "needs_input":
+                return "needs_input", result.summary
+            self.current = None
+            self.trace.append("ran", pending.request.id, skill=result.skill, summary=result.summary)
+            return "ran", f"[resumed] {result.summary}"
 
     def _finish_run(self, skill: Skill, request: Request, outcome) -> DispatchResult:
         if outcome.error:
@@ -394,11 +457,12 @@ class Scheduler:
     def _create_skill(self, request: Request, category: str) -> DispatchResult:
         """Author a new skill leaf with the decision model in generation mode.
 
-        The small model writes the title + description; a larger OpenAI-
-        compatible model then writes the runnable body against SKILL.md. The
-        stub is registered first so the leaf is navigable even if the body
-        write fails; a successful write is merged into the tree as a runnable
-        skill and executed directly by _dispatch_skill.
+        The small model writes the title + description; the stub is registered
+        and merged into the tree so the leaf is navigable immediately. If
+        codegen is configured, the runnable body is written asynchronously (see
+        _start_skill_write) and the request is re-dispatched once the body
+        lands; the returned result carries the draft so _dispatch_skill can
+        launch that write. Without codegen the stub is final.
         """
         from .engine import EngineUnavailable
 
@@ -421,22 +485,12 @@ class Scheduler:
                 summary=f"create_skill failed: {draft.name} already exists",
             )
 
-        self.registry.register_skill(category, draft.name, draft.description)
+        self.registry.register_skill(
+            category, draft.name, draft.description, request_text=request.text
+        )
         self.tree.setdefault(category, []).append(
             Skill(name=draft.name, category=category, description=draft.description)
         )
-        contract = skill_contract_ref()
-        self.trace.append(
-            "skill_writing",
-            request.id,
-            category=category,
-            skill=draft.name,
-            description=draft.description,
-            model=self.codegen.model if self.codegen else None,
-            contract_ref=contract["ref"],
-            contract_dirty=contract["dirty"],
-        )
-
         if self.codegen is None:
             self.trace.append(
                 "skill_created",
@@ -452,70 +506,205 @@ class Scheduler:
                 summary=f"created stub {category}.{draft.name}: {draft.description} (no codegen configured)",
                 skill=draft.name,
             )
+        return DispatchResult(
+            kind="create_skill",
+            summary=(
+                f"created stub {category}.{draft.name}: {draft.description} — "
+                "body writing in background; request will re-run when ready"
+            ),
+            skill=draft.name,
+            draft=draft,
+        )
 
+    # ---- async skill-body writes (single-slot codegen worker) ----
+
+    def _start_skill_write(
+        self, request: Request, category: str, draft: SkillDraft, weight: float
+    ) -> None:
+        """Mark the leaf in-progress and queue the body write for the worker.
+
+        The gate stays free: this returns immediately and the worker (one write
+        at a time, the 12G codegen model can't run twice) writes the body in the
+        background. On completion the original request is re-queued and re-runs
+        navigation onto the new leaf; on failure the leaf stays a restartable
+        stub and only the user is notified.
+        """
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == draft.name),
+                None,
+            )
+            if leaf is None:
+                return
+            leaf.writing = True
+            contract = skill_contract_ref()
+            self.trace.append(
+                "skill_writing",
+                request.id,
+                category=category,
+                skill=draft.name,
+                description=draft.description,
+                model=self.codegen.model if self.codegen else None,
+                contract_ref=contract["ref"],
+                contract_dirty=contract["dirty"],
+            )
+            self._writes.append(
+                SkillWrite(request=request, category=category, draft=draft, weight=weight)
+            )
+            if self._write_thread is None or not self._write_thread.is_alive():
+                self._write_thread = threading.Thread(
+                    target=self._write_worker, name="skill-writer", daemon=True
+                )
+                self._write_thread.start()
+            self._write_notify.notify()
+        print(
+            f"[codegen] queued body write for {category}.{draft.name}; "
+            "it will run in the background and the request will re-run when ready."
+        )
+
+    def _write_worker(self) -> None:
+        """Drain the skill-write queue one body at a time."""
+        while True:
+            with self._write_notify:
+                while not self._writes:
+                    self._write_notify.wait()
+                job = self._writes.popleft()
+            self._write_skill_body(job)
+
+    def _write_skill_body(self, job: SkillWrite) -> None:
+        """Run codegen for one queued write (no scheduler lock held here).
+
+        The tree is snapshotted under the lock so the prompt build reads a
+        stable view even if the main thread merges another skill meanwhile.
+        """
+        with self._lock:
+            tree_snapshot = {category: list(skills) for category, skills in self.tree.items()}
         try:
-            draft.code = generate_skill_body(
+            code = generate_skill_body(
                 self.codegen,
-                request,
-                category,
-                draft,
-                self.tree,
+                job.request,
+                job.category,
+                job.draft,
+                tree_snapshot,
                 degeneration_check=(
-                    self.degeneration_check_factory(request.id)
+                    self.degeneration_check_factory(job.request.id)
                     if self.degeneration_check_factory is not None
                     else None
                 ),
             )
-            skill = materialize_skill(draft, category, self.body_store)
         except (CodegenError, ValueError) as exc:
-            self.trace.append(
-                "error",
-                request.id,
-                phase="create_skill",
-                category=category,
-                message=f"skill body write failed: {exc}",
-            )
-            return DispatchResult(
-                kind="create_skill",
-                summary=f"created stub {category}.{draft.name}: {draft.description} (body write failed: {exc})",
-                skill=draft.name,
-            )
+            self._fail_skill_write(job, exc)
+            return
+        self._complete_skill_write(job, code)
 
-        skills = self.tree.setdefault(category, [])
-        for index, existing in enumerate(skills):
-            if existing.name == draft.name:
-                skills[index] = skill
-                break
-        else:
-            skills.append(skill)
-        skills.sort(key=lambda s: s.name)
-        body_path = self.body_store.body_path(category, draft.name).as_posix()
-        self.trace.append(
-            "skill_created",
-            request.id,
-            category=category,
-            skill=draft.name,
-            description=draft.description,
-            body=body_path,
-            written=True,
+    def _complete_skill_write(self, job: SkillWrite, code: str) -> None:
+        """Materialize the body, hot-merge it into the tree, and re-dispatch the
+        original request so it is answered by the new leaf."""
+        job.draft.code = code
+        try:
+            skill = materialize_skill(job.draft, job.category, self.body_store)
+        except ValueError as exc:
+            self._fail_skill_write(job, exc)
+            return
+        with self._lock:
+            skills = self.tree.setdefault(job.category, [])
+            for index, existing in enumerate(skills):
+                if existing.name == job.draft.name:
+                    skills[index] = skill
+                    break
+            else:
+                skills.append(skill)
+            skills.sort(key=lambda s: s.name)
+            body_path = self.body_store.body_path(job.category, job.draft.name).as_posix()
+            self.trace.append(
+                "skill_created",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                description=job.draft.description,
+                body=body_path,
+                written=True,
+            )
+            requeued = job.request.copy_for_requeue()
+            requeued.meta["awaiting_skill_body"] = [job.category, job.draft.name]
+            requeued.meta["parent_run"] = job.request.id
+            self.queue.push(requeued, job.weight)
+            self.trace.append(
+                "skill_requeued",
+                job.request.id,
+                text=requeued.text,
+                weight=job.weight,
+            )
+        print(
+            f"[codegen] body ready for {job.category}.{job.draft.name}; "
+            "original request re-queued."
         )
-        return DispatchResult(
-            kind="create_skill",
-            summary=f"created skill {category}.{draft.name}: {draft.description}",
-            skill=draft.name,
-            body_written=True,
+        self.run_queue()
+
+    def _fail_skill_write(self, job: SkillWrite, exc: Exception) -> None:
+        """Clear the in-progress flag and notify; the leaf stays a restartable stub."""
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(job.category, []) if s.name == job.draft.name),
+                None,
+            )
+            if leaf is not None:
+                leaf.writing = False
+            self.trace.append(
+                "skill_write_failed",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                message=str(exc),
+            )
+        print(
+            f"[codegen] body write for {job.category}.{job.draft.name} FAILED: {exc}. "
+            f"The leaf is a stub — restart it with `restart {job.category} {job.draft.name}`."
         )
+
+    def restart_skill(self, category: str, name: str) -> tuple[str, str]:
+        """Kick off (or re-kick) the body write for an empty not-in-progress leaf."""
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name),
+                None,
+            )
+            if leaf is None:
+                return "error", f"no skill {category}.{name}"
+            if leaf.writing:
+                return "error", f"skill {category}.{name} is already being written"
+            if self.codegen is None:
+                return "error", "no codegen configured"
+            entry = self.registry.read().get(category, {})
+            row = next(
+                (s for s in entry.get("skills", []) if s.get("name") == name),
+                {},
+            )
+            request_text = row.get("request_text")
+            draft = SkillDraft(
+                name=name,
+                description=leaf.description or row.get("description") or name,
+            )
+            origin = (
+                Request(request_text, source="restart")
+                if request_text
+                else Request(f"write the body for {category}.{name}: {draft.description}", source="restart")
+            )
+        self._start_skill_write(origin, category, draft, 0.5)
+        self.trace.append("skill_restarted", origin.id, category=category, skill=name)
+        return "running", f"restarting body write for {category}.{name}"
 
     def status(self) -> str:
-        lines = []
-        current = f"{self.current.skill} ({self.current.request.id})" if self.current else "idle"
-        lines.append(f"current: {current}")
-        if self.pending is not None:
-            lines.append(f"awaiting input: {self.pending.question}")
-        lines.append(f"queue: {len(self.queue)} pending")
-        for weight, request in self.queue.items():
-            lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")
-        return "\n".join(lines)
+        with self._lock:
+            lines = []
+            current = f"{self.current.skill} ({self.current.request.id})" if self.current else "idle"
+            lines.append(f"current: {current}")
+            if self.pending is not None:
+                lines.append(f"awaiting input: {self.pending.question}")
+            lines.append(f"queue: {len(self.queue)} pending")
+            for weight, request in self.queue.items():
+                lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")
+            return "\n".join(lines)
 
 
 def _requeue(request: Request, updated_text: str) -> Request:

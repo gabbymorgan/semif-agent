@@ -22,7 +22,10 @@ cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
 scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue;
                 a skill run paused for input (needs_input) keeps `current`
                 busy; `answer` routes straight to the pending run, bypassing
-                gate/score/navigation
+                gate/score/navigation; skill-body codegen is an ASYNC single-slot
+                worker (stub authored sync, write queued, gate stays free, the
+                original request is re-queued and re-runs the new leaf when the
+                body lands)
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 navigation = SemIf choices per level (logged), create_category
@@ -133,11 +136,15 @@ unit tests (24) + box integration tests (2).
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body: a larger OpenAI-compatible model (`codegen`, default
   `qwen38-iq3s`) writes `predict`/`act` code against `SKILL.md`, persisted to
-  `data/skills/` and hot-loaded, then the newly created leaf is executed
-  directly so the request that prompted creation is answered. A request that
-  prompted a whole new category runs the same chain deterministically:
-  `create_category` → `create_skill` → run. Authoring is still a single pass —
-  validating/reusing written bodies across runs is future work.
+  `data/skills/` and hot-loaded. Authoring is **asynchronous**: the stub is
+  created and the gate freed immediately, the body write runs on a single-slot
+  background worker, and once the body lands the request that prompted creation
+  is re-queued and re-runs navigation onto the new leaf (an empty/in-progress
+  leaf can be restarted via `restart <category> <skill>` or the dashboard). A
+  request that prompted a whole new category runs the same chain
+  deterministically: `create_category` → `create_skill` → async body →
+  re-dispatch. Authoring is still a single pass — validating/reusing written
+  bodies across runs is future work.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
@@ -278,17 +285,30 @@ unit tests (24) + box integration tests (2).
   as a module and its `predict`/`act` run in-process). The box is the intended
   target; treat the endpoint as trusted.
 - Flow in `scheduler._dispatch_skill`: small model authors title+description →
-  trace `skill_writing` (dashboard shows title/description + a "writing skill
-  body…" badge) → sync codegen write → `materialize_skill` → hot-merge into the
-  tree → the new leaf runs directly so the request is answered. `create_category`
+  stub registered + hot-merged into the tree (navigable immediately) → trace
+  `skill_writing` (dashboard shows title/description + a "writing skill body…"
+  badge) → the body write is queued to a **single-slot background worker** (the
+  12G codegen model can't run twice), the gate stays free for new input → on
+  success the body is materialized (`materialize_skill`), hot-merged, the
+  leaf's `writing` flag clears, and the **original request is re-queued** at its
+  scored weight and re-runs navigation onto the new leaf (`skill_requeued`). On
+  failure (`CodegenError`/`ValueError`) the user is notified, the leaf stays a
+  restartable stub, and the request is NOT re-dispatched. A re-dispatched
+  request whose skill is still unwritten reports the pending write instead of
+  authoring a second skill (`awaiting_skill_body` meta guard). `create_category`
   runs the same chain after authoring the category (`create_category` →
-  `create_skill` → run). Codegen failure — including a request timeout — leaves
-  a navigable stub and returns a graceful `create_skill` result; a timeout is
-  raised as `CodegenError` by the client, never a raw `TimeoutError`. The
-  default codegen timeout is 1200s (`cli.build_scheduler`); the box
-  `config.json` sets `codegen.timeout: 3600` because qwen38-iq3s's card
-  sampler writes routinely run 25–45 min. Raise `codegen.timeout` in config
-  for harder prompts.
+  `create_skill` → async body → re-dispatch). An empty (stub) or in-progress
+  leaf picked by navigation is reported gracefully — no silent no-op; restart it
+  with the `restart <category> <skill>` REPL command or the dashboard button on
+  the skill row / `skill_write_failed` flow node. Codegen failure — including a
+  request timeout — is raised as `CodegenError` by the client, never a raw
+  `TimeoutError`. The default codegen timeout is 1200s
+  (`cli.build_scheduler`); the box `config.json` sets `codegen.timeout: 3600`
+  because qwen38-iq3s's card sampler writes routinely run 25–45 min. Raise
+  `codegen.timeout` in config for harder prompts.
+- Engine calls are serialized with a `threading.Lock` inside `SemIfEngine` so
+  the codegen worker's degeneration SemIf checks never race main-thread
+  navigation/scoring on one llama.cpp context.
 - Set `codegen.stream: true` to echo the codegen output as an SSE token stream
   to stdout during body writes — including the chain-of-thought, so a long
   (~30 min) write shows live progress. The client reads reasoning from either

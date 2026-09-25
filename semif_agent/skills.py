@@ -48,6 +48,14 @@ class ActionContext:
     config: dict
 
 
+def _noop_predict(ctx: ActionContext, request: Request) -> Prediction:
+    return Prediction(text="")
+
+
+def _noop_act(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
+    return ActionResult("", "")
+
+
 @dataclass
 class Skill:
     name: str
@@ -55,11 +63,25 @@ class Skill:
     description: str
     cost_budget: float = 1.0
     predict: Callable[[ActionContext, Request], Prediction] = field(
-        default=lambda ctx, req: Prediction(text="")
+        default=_noop_predict
     )
     act: Callable[[ActionContext, Request, Prediction], ActionResult] = field(
-        default=lambda ctx, req, pred: ActionResult("", "")
+        default=_noop_act
     )
+    writing: bool = False
+
+    def is_noop(self) -> bool:
+        """A stub leaf: authored (title + description) but no runnable body yet."""
+        return self.predict is _noop_predict or self.act is _noop_act
+
+    @property
+    def status(self) -> str:
+        """Leaf readiness: `writing` (codegen in flight), `stub` (no body), `ready`."""
+        if self.writing:
+            return "writing"
+        if self.is_noop():
+            return "stub"
+        return "ready"
 
 
 @dataclass
@@ -122,13 +144,22 @@ class CategoryRegistry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
-    def register_skill(self, category: str, name: str, description: str) -> None:
-        """Add a skill leaf to a category, creating the category entry if needed."""
+    def register_skill(
+        self, category: str, name: str, description: str, request_text: str = ""
+    ) -> None:
+        """Add a skill leaf to a category, creating the category entry if needed.
+
+        `request_text` is the originating request, kept so a later restart of the
+        stub can re-drive codegen with the same context.
+        """
         categories = self.read()
         entry = categories.setdefault(category, {"description": "", "skills": []})
         skills = entry.setdefault("skills", [])
-        if not any(s.get("name") == name for s in skills):
-            skills.append({"name": name, "description": description})
+        entry_row = next((s for s in skills if s.get("name") == name), None)
+        if entry_row is None:
+            skills.append({"name": name, "description": description, "request_text": request_text})
+        else:
+            entry_row["request_text"] = request_text
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 

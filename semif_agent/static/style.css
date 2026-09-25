@@ -324,6 +324,24 @@ pre.json {
 .skill-row { display: flex; gap: 6px; align-items: baseline; padding-left: 8px; font-size: 11px; }
 .skill-row .sdesc { color: var(--muted); }
 
+.sbadge {
+  margin-left: auto;
+  font-size: 10px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sbadge.writing { color: var(--warn); }
+.sbadge.stub { color: var(--muted); }
+
+.restart-btn {
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .stat-grid .stat { background: var(--panel-2); border-radius: 4px; padding: 4px 6px; }
 .stat-grid .stat .v { font-weight: 700; }
