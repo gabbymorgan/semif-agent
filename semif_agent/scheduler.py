@@ -10,7 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .codegen import CodegenClient, CodegenError, generate_skill_body
+from .codegen import (
+    CodegenClient,
+    CodegenError,
+    generate_skill_body,
+    skill_contract_ref,
+)
 from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
 from .llm import LLMClient
@@ -420,6 +425,7 @@ class Scheduler:
         self.tree.setdefault(category, []).append(
             Skill(name=draft.name, category=category, description=draft.description)
         )
+        contract = skill_contract_ref()
         self.trace.append(
             "skill_writing",
             request.id,
@@ -427,6 +433,8 @@ class Scheduler:
             skill=draft.name,
             description=draft.description,
             model=self.codegen.model if self.codegen else None,
+            contract_ref=contract["ref"],
+            contract_dirty=contract["dirty"],
         )
 
         if self.codegen is None:

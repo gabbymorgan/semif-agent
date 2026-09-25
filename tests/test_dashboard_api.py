@@ -159,6 +159,8 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
         skill="track_live",
         description="Follow a package in real time.",
         model="qwen38-iq3s",
+        contract_ref="a1b2c3d",
+        contract_dirty=True,
     )
     scheduler.trace.append(
         "skill_created",
@@ -180,6 +182,8 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
         assert writing["skill"] == "track_live"
         assert "real time" in writing["description"]
         assert writing["model"] == "qwen38-iq3s"
+        assert writing["contract_ref"] == "a1b2c3d"
+        assert writing["contract_dirty"] is True
         created = next(e for e in run["events"] if e["kind"] == "skill_created")
         assert created["written"] is True
         assert created["body"] == "data/skills/tracking/track_live.py"

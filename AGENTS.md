@@ -439,11 +439,26 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     values (presence 1.5 etc.) override them at request time and the writes
     converged — no long loop.
 
-- [ ] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)
+- [x] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)
   - `read_skill_contract` also yields sha256 of SKILL.md; record
     `contract_sha256` on the `skill_writing` trace event (+ dashboard display).
   - Test: the actually-sent HTTP payload's system message contains a SKILL.md
     phrase (harness already records request bodies).
+  - **Reshaped on the dev machine (2026-09-24): commit-ref provenance, not a
+    content hash.** A bare sha256 flags stale bodies but can't revive the old
+    contract; the ref is the revivable pointer. `skill_contract_ref()`
+    (`codegen.py`) returns `{"ref", "dirty"}`: `ref` is the short git commit
+    sha the contract was read under — revive with
+    `git show <ref>:SKILL.md` — and `dirty` records whether the working-tree
+    contract differed from that commit. Both degrade to `None` (never a
+    non-revivable hash) outside a git checkout; only a missing contract
+    raises, mirroring `read_skill_contract`. Recorded as `contract_ref` /
+    `contract_dirty` on the `skill_writing` trace event
+    (`scheduler._create_skill`); the dashboard shows `SKILL.md @ <ref>` with a
+    `*` when dirty. Unit-tested: ref matches the real `git rev-parse --short
+    HEAD` in the repo, degrades off-repo, the sent HTTP payload's system
+    message contains the real SKILL.md text, and the ref fields round-trip
+    through `/api/trace`.
 
 - [x] **8. Config + AGENTS.md docs**
   - Update `config.example.json` codegen block and the AGENTS.md codegen

@@ -7,9 +7,11 @@ the CodegenClient itself is real, not mocked.
 """
 
 import json
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +24,7 @@ from semif_agent.codegen import (
     generate_skill_body,
     parse_skill_body,
     read_skill_contract,
+    skill_contract_ref,
 )
 from semif_agent.decisions import Request
 from semif_agent.skills import (
@@ -51,6 +54,34 @@ def test_read_skill_contract_loads_contract():
     text = read_skill_contract()
     assert "predict" in text and "act" in text
     assert "data/skills" in text
+
+
+def test_skill_contract_ref_returns_git_commit_in_repo():
+    """In a git checkout the ref is the real short HEAD sha (revivable with
+    `git show <ref>:SKILL.md`), and dirty is a bool. Real subprocess, no
+    mocking."""
+    repo = Path(__file__).resolve().parent.parent
+    git = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True
+    )
+    info = skill_contract_ref()
+    if git.returncode != 0:
+        assert info["ref"] is None
+        assert info["dirty"] is None
+    else:
+        assert info["ref"] == git.stdout.strip()
+        assert info["dirty"] in (True, False)
+
+
+def test_skill_contract_ref_degrades_off_repo(tmp_path):
+    """Outside a git checkout the pointer degrades to None rather than a
+    non-revivable hash; a missing contract still raises like read_skill_contract."""
+    contract = tmp_path / "SKILL.md"
+    contract.write_text("contract\n")
+    info = skill_contract_ref(str(contract))
+    assert info == {"ref": None, "dirty": None}
+    with pytest.raises(CodegenError):
+        skill_contract_ref(str(tmp_path / "missing.md"))
 
 
 def test_contract_directs_reusable_self_mocked_skills():
@@ -258,6 +289,25 @@ def test_generate_skill_body_end_to_end(tmp_path):
         draft = SkillDraft(name="probe", description="Probe the service.")
         code = generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
         assert "def predict" in code and "def act" in code
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_sent_payload_system_message_contains_contract_phrase():
+    """The real SKILL.md contract must actually reach the model: the recorded
+    HTTP payload's system message carries a SKILL.md phrase (no mocking — the
+    fake server records the real request body)."""
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+        sent = httpd.RequestHandlerClass.received[0]
+        system = sent["messages"][0]["content"]
+        assert "data/skills" in system
+        assert read_skill_contract() in system
     finally:
         httpd.shutdown()
         httpd.server_close()

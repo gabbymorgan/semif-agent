@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import json
 import select
+import subprocess
 import sys
 import time
 import urllib.error
@@ -61,6 +62,45 @@ def read_skill_contract(path: str | None = None) -> str:
     if not contract.is_file():
         raise CodegenError(f"skill contract not found: {contract}")
     return contract.read_text()
+
+
+def skill_contract_ref(path: str | None = None) -> dict:
+    """Provenance pointer for the SKILL.md revision at authoring time.
+
+    Returns {"ref": str | None, "dirty": bool | None}. `ref` is the short git
+    commit sha the contract was read under — revivable with
+    `git show <ref>:SKILL.md` — and `dirty` records whether the working-tree
+    contract differed from that commit. Both are None when the contract is not
+    inside a git checkout (the pointer degrades to nothing rather than a
+    non-revivable hash). Any subprocess failure degrades the same way; only a
+    missing contract file raises, mirroring `read_skill_contract`.
+    """
+    contract = Path(path) if path else DEFAULT_CONTRACT
+    if not contract.is_file():
+        raise CodegenError(f"skill contract not found: {contract}")
+    directory = str(contract.parent)
+    try:
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        if rev.returncode != 0:
+            return {"ref": None, "dirty": None}
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--", contract.name],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"ref": None, "dirty": None}
+    ref = rev.stdout.strip() or None
+    dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+    return {"ref": ref, "dirty": dirty}
 
 
 class CodegenClient:
