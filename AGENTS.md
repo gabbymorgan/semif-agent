@@ -58,9 +58,10 @@ Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)
 
 - Canonical repo lives on Gitea: `git.manyworlds.fit`, **SSH on port 222**
   (`ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git`). Key
-  `~/.ssh/id_ed25519` is registered there. The staging machine `jarvis` clones
-  to `~/semif-agent` (via `scripts/bootstrap.sh`); the old box working copy is
-  at `~/repos/semif-agent` (its editable install still points at the moved
+  `~/.ssh/id_ed25519` is registered there. The staging machine `jarvis` runs
+  from a manual clone at `~/semif-agent` (`scripts/bootstrap.sh` provisions
+  everything else and never re-clones the agent repo); the old box working copy
+  is at `~/repos/semif-agent` (its editable install still points at the moved
   `~/semif-agent`, so `import semif_agent` is broken there — moot, guppy runs
   ollama only now); the dev machine at `~/Repos/semif-agent`. Push/pull from
   Gitea — never rsync/tar the code.
@@ -211,11 +212,14 @@ unit tests (24) + box integration tests (2).
 
 ### jarvis (staging)
 
-- Provision a fresh Ubuntu machine into a running staging box:
+- Provision a fresh Ubuntu machine into a running staging box: clone
+  `semif-agent` to `~/semif-agent` first (register its SSH key on Gitea), then
   `scripts/bootstrap.sh --peer-ollama http://192.168.8.181:11434`.
-  Idempotent and rerunnable; every stage no-ops on existing state, so it also
-  boots an unknown-state machine. It installs **no ollama** — llm + codegen
-  both point at guppy.
+  The script must be run from a checkout — it reads pins from that checkout's
+  `config.example.json` and never re-clones the agent repo (only the SemIf
+  engine). Idempotent and rerunnable; every stage no-ops on existing state, so
+  it also boots an unknown-state machine. It installs **no ollama** — llm +
+  codegen both point at guppy.
 - All pins are read from `config.example.json`'s `engine` block: `semif_repo`
   (public GitHub `TheoLeeCJ/SemIf`), `semif_ref` (pinned commit the box runs),
   `gguf_url`/`gguf_sha256` (verified after download), and the HF tokenizer

@@ -5,6 +5,11 @@
 # so it can also bootstrap a machine of unknown state. All LLM traffic points
 # at a peer ollama endpoint (default: guppy) — this script installs NO ollama.
 #
+# Must be run from a semif-agent checkout (it reads pins from this checkout's
+# config.example.json); the checkout is used as-is and never re-cloned — only
+# the SemIf engine is fetched. Clone the agent repo to ~/semif-agent first
+# (its SSH key must be registered on Gitea).
+#
 # Pins (SemIf git commit, GGUF url+sha256, python deps) are read from
 # config.example.json's engine block, which is the single source of truth;
 # bump those there and rerun to upgrade.
@@ -102,23 +107,16 @@ if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) els
 fi
 echo "== python: $("$PY" --version)"
 
-# --- stage 2: ssh key + clones -------------------------------------------------
+# --- stage 2: ssh key + SemIf engine clone ------------------------------------
 mkdir -p ~/.ssh
 if [[ ! -f ~/.ssh/id_ed25519 ]]; then
-  echo "== generating ~/.ssh/id_ed25519"
+  echo "== generating ~/.ssh/id_ed25519 (register this key on Gitea for the agent repo)"
   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+  cat ~/.ssh/id_ed25519.pub
 fi
 
-if [[ ! -d ~/semif-agent/.git ]]; then
-  echo "== cloning semif-agent from Gitea"
-  if ! git clone ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git ~/semif-agent; then
-    echo "clone failed — register this key on Gitea, then rerun:" >&2
-    cat ~/.ssh/id_ed25519.pub >&2
-    exit 1
-  fi
-else
-  git -C ~/semif-agent pull --ff-only || true
-fi
+AGENT_DIR="$REPO_ROOT"
+git -C "$AGENT_DIR" pull --ff-only || true
 
 if [[ ! -d ~/semif/.git ]]; then
   echo "== cloning SemIf engine from $SEMIF_REPO"
@@ -141,7 +139,7 @@ echo "== installing engine deps into venv"
 "$PIP" install -e ~/semif --no-deps
 "$PIP" install numpy==2.3.5 transformers==5.17.0 tokenizers==0.23.2 huggingface-hub
 CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install llama-cpp-python==0.3.35
-"$PIP" install -e ~/semif-agent --no-deps
+"$PIP" install -e "$AGENT_DIR" --no-deps
 "$PIP" install pytest
 
 # --- stage 4: GGUF --------------------------------------------------------------
@@ -193,8 +191,8 @@ PY
 # --- stage 7: optional data copy -----------------------------------------------------
 if [[ -n "$COPY_DATA" ]]; then
   echo "== rsync data from $COPY_DATA"
-  mkdir -p ~/semif-agent/data
-  rsync -a "$COPY_DATA/" ~/semif-agent/data/
+  mkdir -p "$AGENT_DIR/data"
+  rsync -a "$COPY_DATA/" "$AGENT_DIR/data/"
 fi
 
 # --- stage 8: verify --------------------------------------------------------------------
