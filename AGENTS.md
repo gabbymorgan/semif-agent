@@ -183,9 +183,16 @@ unit tests (24) + box integration tests (2).
 ### SemIf install (box)
 - SemIf hard-pins `torch==2.10.0`, `numpy==2.2.6`, etc. The llamacpp path does
   **not** need torch (torch is imported lazily inside `direct.score`). Install
-  with `--no-deps` and bring only what's needed:
-  `pip install -e ~/semif --no-deps`, then numpy 2.3.5, transformers 5.17.0,
-  tokenizers 0.23.2, huggingface-hub, llama-cpp-python 0.3.35.
+  with `--no-deps` and bring only what's needed — the committed manifest
+  `requirements/staging.txt` is the single source of truth:
+  `pip install -e ~/semif --no-deps`, then
+  `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install -r requirements/staging.txt`
+  (numpy 2.3.5, transformers 5.17.0, tokenizers 0.23.2, huggingface-hub 1.31.0,
+  llama-cpp-python 0.3.35, pytest).
+- **Expected pip warnings:** pip reports "dependency conflicts" against
+  semif-phase1's declared requirements (torch/accelerate/protobuf/sentencepiece
+  not installed, numpy 2.2.6 vs 2.3.5). These are informational — the box runs
+  exactly this set — not a bug; do not "fix" them by installing torch.
 - `numpy==2.2.6` has **no cp314 wheel** → pip tries a source build that fails
   without `pkg-config` + `python3-dev`. Use numpy 2.3.5 (has cp314 wheels).
 - `llama-cpp-python==0.3.35` builds from source. With all 32 cores it OOM-kills
@@ -223,8 +230,16 @@ unit tests (24) + box integration tests (2).
 - All pins are read from `config.example.json`'s `engine` block: `semif_repo`
   (public GitHub `TheoLeeCJ/SemIf`), `semif_ref` (pinned commit the box runs),
   `gguf_url`/`gguf_sha256` (verified after download), and the HF tokenizer
-  `source`/`revision`. **Maintenance**: bump those pins in `config.example.json`,
-  rerun the script, re-run the integration tests. The script never guesses.
+  `source`/`revision`. The python dep pins live in `requirements/staging.txt`
+  (committed, one versioned artifact — jarvis, guppy, and any future box all
+  provision from it). **Maintenance**: bump the pins in `config.example.json` /
+  `requirements/staging.txt`, rerun the script, re-run the integration tests.
+  The script never guesses.
+- pip prints **expected** "dependency conflict" warnings at install time
+  (semif-phase1 declares torch/accelerate/protobuf/sentencepiece/numpy 2.2.6
+  that we intentionally do not install — the llama.cpp CPU path doesn't need
+  them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Same as the box;
+  do not "fix" them by installing torch.
 - Generates `~/semif-agent/config.json` with `codegen.timeout: 3600` (codegen
   now travels the LAN) and a backup of any prior file. `--threads N` overrides
   engine threads; `--copy-data SRC` rsyncs guppy's `data/` for continuity;

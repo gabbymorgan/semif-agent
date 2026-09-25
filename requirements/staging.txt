@@ -1,0 +1,15 @@
+# Staging-machine engine deps (CPU llama.cpp path).
+#
+# semIF (semif-phase1) hard-pins torch/accelerate/safetensors/sentencepiece/
+# protobuf/numpy==2.2.6 in its BASE dependencies, but the llamacpp backend
+# never imports torch (it's lazy inside direct.score), and numpy 2.2.6 has no
+# cp314 wheel (source build fails). So semif-phase1 is installed with
+# `--no-deps` and exactly this set is brought in instead. The pins match the
+# proven guppy venv; huggingface-hub is pinned to 1.31.0 (semif-phase1's
+# declared version) so the pip resolver stays quiet about it.
+numpy==2.3.5
+transformers==5.17.0
+tokenizers==0.23.2
+huggingface-hub==1.31.0
+llama-cpp-python==0.3.35
+pytest

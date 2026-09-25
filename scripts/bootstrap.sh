@@ -10,9 +10,10 @@
 # the SemIf engine is fetched. Clone the agent repo to ~/semif-agent first
 # (its SSH key must be registered on Gitea).
 #
-# Pins (SemIf git commit, GGUF url+sha256, python deps) are read from
-# config.example.json's engine block, which is the single source of truth;
-# bump those there and rerun to upgrade.
+# Pins (SemIf git commit, GGUF url+sha256) are read from config.example.json's
+# engine block and the python dep pins from requirements/staging.txt — both
+# committed in this repo and the single source of truth; bump those there and
+# rerun to upgrade.
 #
 # Usage:
 #   scripts/bootstrap.sh [--peer-ollama URL] [--threads N] [--copy-data SRC]
@@ -137,10 +138,8 @@ PIP=~/semif-venv/bin/pip
 echo "== installing engine deps into venv"
 "$PIP" install --upgrade pip setuptools wheel
 "$PIP" install -e ~/semif --no-deps
-"$PIP" install numpy==2.3.5 transformers==5.17.0 tokenizers==0.23.2 huggingface-hub
-CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install llama-cpp-python==0.3.35
+CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
 "$PIP" install -e "$AGENT_DIR" --no-deps
-"$PIP" install pytest
 
 # --- stage 4: GGUF --------------------------------------------------------------
 GGUF_DIR=~/models
