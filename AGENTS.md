@@ -301,7 +301,7 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     `smart_limit`/`warn_limit`).
   - Test: fake server emits a usage chunk; assert it's captured and logged.
 
-- [ ] **4. SemIf degeneration watchdog** (`codegen.py`, `cli.py`, `scheduler.py`)
+- [x] **4. SemIf degeneration watchdog** (`codegen.py`, `cli.py`, `scheduler.py`)
   - Add optional `degeneration_check: Callable[[str], str|None]` to
     `CodegenClient.chat`/`generate_skill_body`; `_read_stream` calls it every
     `interval` chars with the last `window` chars (content+reasoning);
@@ -314,6 +314,25 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     `CodegenClient` standalone pure for unit tests).
   - Tests: a callback returning a reason aborts the stream; not invoked when
     disabled.
+  - Implemented on the dev machine (2026-09-24): `CodegenClient` gained
+    `degeneration_interval`/`degeneration_window`/`degeneration_min_chars`
+    constructor params and a per-`chat` `degeneration_check`; both stream
+    readers (`_read_stream` and the blocking fallback) poll it against a
+    bounded rolling buffer (content+reasoning), trimming to
+    `window + interval` chars so a long degenerating stream never grows
+    unbounded memory. `cli.build_scheduler` wires a `degeneration_check_factory`
+    (per-run SemIf continue/stop decision; `EngineUnavailable` at call time
+    degrades to "keep going", so a machine without the engine never aborts via
+    this path) into the `Scheduler`, which builds the per-request check with
+    `request.id` and passes it through `generate_skill_body`. Trace event:
+    `kind: "codegen"` carrying state/question/options/probs/stop_prob — not in
+    the decision log. Config block added to `config.example.json` (`enabled`
+    defaults true; the runtime engine check is what disables it off the box).
+    Unit-tested: callback reason aborts the stream (deviation from the "not
+    invoked when disabled" spec: the min_chars gate is covered too), callback
+    returning None continues, no callback completes normally. **Box
+    verification pending**: run the codegen integration tests and watch the
+    `codegen` trace events + an abort fire on a real degenerating stream.
 
 - [ ] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
   - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`

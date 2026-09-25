@@ -778,3 +778,119 @@ def test_context_window_is_cached():
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_degeneration_check_aborts_stream():
+    """A degeneration callback that returns a reason must abort a still-
+    streaming generation with CodegenError, before the token budget trips."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=0.5,
+            idle_timeout=30,
+            degeneration_interval=5,
+            degeneration_window=20,
+            degeneration_min_chars=1,
+        )
+        calls = []
+
+        def check(recent):
+            calls.append(recent)
+            return "looping forever"
+
+        started = time.monotonic()
+        with pytest.raises(CodegenError, match="degeneration detected"):
+            client.chat([{"role": "user", "content": "hi"}], degeneration_check=check)
+        assert time.monotonic() - started < 8.0
+        assert calls, "degeneration callback must be invoked"
+        assert calls[0] == "x", "callback must receive the recent window chars"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_degeneration_check_not_invoked_before_min_chars():
+    """The callback must not fire before `min_chars` accumulate — the token
+    budget aborts first and the callback stays silent."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=0.5,
+            idle_timeout=30,
+            degeneration_interval=5,
+            degeneration_window=20,
+            degeneration_min_chars=10**9,
+        )
+        calls = []
+
+        def check(recent):
+            calls.append(recent)
+            return "should never fire"
+
+        with pytest.raises(CodegenError, match="token budget"):
+            client.chat([{"role": "user", "content": "hi"}], degeneration_check=check)
+        assert calls == [], "callback must not run before min_chars is reached"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_degeneration_check_returning_none_continues():
+    """A callback that never flags degeneration must not abort — the token
+    budget is still the terminator."""
+    httpd, base = _cap_trip_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            stream=True,
+            context_window=100,
+            max_output=0.5,
+            idle_timeout=30,
+            degeneration_interval=5,
+            degeneration_window=20,
+            degeneration_min_chars=1,
+        )
+        calls = []
+
+        def check(recent):
+            calls.append(recent)
+            return None
+
+        with pytest.raises(CodegenError, match="token budget"):
+            client.chat([{"role": "user", "content": "hi"}], degeneration_check=check)
+        assert calls, "callback should have been polled across the stream"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_degeneration_disabled_no_callback_no_abort():
+    """With no callback (disabled), a stream exceeding min_chars completes
+    normally — nothing in the read path assumes a check is present."""
+    httpd, base = _streaming_server()
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            degeneration_interval=1,
+            degeneration_window=10,
+            degeneration_min_chars=1,
+        )
+        out = client.chat([{"role": "user", "content": "hi"}])
+        assert out == GOOD_BODY
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

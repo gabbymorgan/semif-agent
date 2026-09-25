@@ -26,7 +26,15 @@
     "max_fill_ratio": 0.9,
     "warn_fill_ratio": 0.7,
     "max_output": 0.85,
-    "chars_per_token": 4.0
+    "chars_per_token": 4.0,
+    "degeneration": {
+      "_comment": "SemIf degeneration watchdog: while the body streams, a 2-option SemIf decision (continue/stop) is made every `interval` chars against the last `window` chars of content+reasoning (once `min_chars` have accumulated); P(stop) >= threshold aborts the write with a graceful stub. Recorded trace-only (kind `codegen`), never in the decision log. Disabled when no engine is available.",
+      "enabled": true,
+      "threshold": 0.9,
+      "interval": 8000,
+      "window": 2000,
+      "min_chars": 4000
+    }
   },
   "skill_bodies": "data/skills",
   "skills": {

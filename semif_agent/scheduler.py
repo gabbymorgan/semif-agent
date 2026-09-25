@@ -8,6 +8,7 @@ state preserved; a deferred input is scored and queued by urgency.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .codegen import CodegenClient, CodegenError, generate_skill_body
 from .decisions import DecisionRequest, Option, Request
@@ -90,6 +91,8 @@ class Scheduler:
         max_reentries: int = 3,
         trace: TraceLog | None = None,
         codegen: CodegenClient | None = None,
+        degeneration_check_factory: Callable[[str], Callable[[str], str | None] | None]
+        | None = None,
     ):
         self.engine = engine
         self.llm = llm
@@ -99,6 +102,7 @@ class Scheduler:
         self.tau = tau
         self.max_reentries = max_reentries
         self.codegen = codegen
+        self.degeneration_check_factory = degeneration_check_factory
         self.queue = UrgencyQueue(
             max_size=int(config.get("queue", {}).get("max_size", 100)),
             age_rate=float(config.get("queue", {}).get("age_rate", 0.0)),
@@ -443,7 +447,16 @@ class Scheduler:
 
         try:
             draft.code = generate_skill_body(
-                self.codegen, request, category, draft, self.tree
+                self.codegen,
+                request,
+                category,
+                draft,
+                self.tree,
+                degeneration_check=(
+                    self.degeneration_check_factory(request.id)
+                    if self.degeneration_check_factory is not None
+                    else None
+                ),
             )
             skill = materialize_skill(draft, category, self.body_store)
         except (CodegenError, ValueError) as exc:

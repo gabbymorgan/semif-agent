@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from .decisions import Request
 from .skills import SkillDraft, tree_summary
@@ -75,6 +75,13 @@ class CodegenClient:
     then the `context_window` config, then 100000); the per-request budget
     caps output at `max_output` (absolute tokens if >= 1, else a fraction of
     the window) and total fill at `smart_limit`/`warn_limit`.
+
+    An optional `degeneration_check` callback (passed per `chat` call) is fed
+    the last `degeneration_window` chars of content+reasoning every
+    `degeneration_interval` chars once `degeneration_min_chars` have
+    accumulated; a non-None return aborts the stream. It lets a SemIf
+    continue/stop decision cut off a generation that is looping instead of
+    converging, before it fills the context window.
     """
 
     def __init__(
@@ -92,6 +99,9 @@ class CodegenClient:
         warn_fill_ratio: float = 0.7,
         max_output: float = 0.85,
         chars_per_token: float = 4.0,
+        degeneration_interval: int = 8000,
+        degeneration_window: int = 2000,
+        degeneration_min_chars: int = 4000,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -106,6 +116,9 @@ class CodegenClient:
         self.warn_fill_ratio = warn_fill_ratio
         self.max_output = max_output
         self.chars_per_token = chars_per_token
+        self.degeneration_interval = degeneration_interval
+        self.degeneration_window = degeneration_window
+        self.degeneration_min_chars = degeneration_min_chars
         self._window: int | None = None
 
     def chat(
@@ -113,6 +126,7 @@ class CodegenClient:
         messages: list[dict],
         max_tokens: int | None = None,
         temperature: float = 0.0,
+        degeneration_check: Callable[[str], str | None] | None = None,
     ) -> str:
         budget = self._compute_budget(messages)
         if self.stream:
@@ -132,7 +146,7 @@ class CodegenClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return self._read_stream(response, budget)
+                return self._read_stream(response, budget, degeneration_check)
         except urllib.error.URLError as exc:
             raise CodegenError(
                 f"codegen endpoint unreachable at {url}: {exc}. Is your local server running?"
@@ -264,7 +278,12 @@ class CodegenClient:
                 return True
         return warned
 
-    def _read_stream(self, response, budget: TokenBudget) -> str:
+    def _read_stream(
+        self,
+        response,
+        budget: TokenBudget,
+        degeneration_check: Callable[[str], str | None] | None = None,
+    ) -> str:
         """Read an OpenAI-compatible SSE stream; echo tokens if `stream`.
 
         Only `content` deltas are accumulated into the returned body;
@@ -282,16 +301,24 @@ class CodegenClient:
         Thresholds <= 0 disable the idle checks. If the underlying socket
         can't be reached, falls back to a plain blocking read
         (`_read_stream_blocking`, which enforces the same budgets).
+
+        An optional `degeneration_check` (last `window` chars of content +
+        reasoning, every `interval` chars past `min_chars`) can abort a
+        generation that is looping instead of converging — a non-None return
+        is the abort reason.
         """
         parts: list[str] = []
         sock = self._stream_socket(response)
         if sock is None:
-            return self._read_stream_blocking(response, budget)
+            return self._read_stream_blocking(response, budget, degeneration_check)
         start = time.monotonic()
         last_activity = start
         warned = False
         warned_fill = False
         out_chars = 0
+        recent: list[str] = []
+        recent_len = 0
+        last_check: int | None = None
         while True:
             if time.monotonic() - start >= self.timeout:
                 raise CodegenError(
@@ -330,7 +357,15 @@ class CodegenClient:
             if text:
                 parts.append(text)
             out_chars += len(text) + len(reasoning)
+            if text or reasoning:
+                recent.append(text + reasoning)
+                recent_len = self._trim_recent(recent, recent_len)
             warned_fill = self._enforce_budget(budget, out_chars, warned_fill)
+            reason, last_check = self._check_degeneration(
+                degeneration_check, recent, out_chars, last_check
+            )
+            if reason:
+                raise CodegenError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
         if parts and self.stream:
@@ -338,7 +373,12 @@ class CodegenClient:
             sys.stdout.flush()
         return "".join(parts)
 
-    def _read_stream_blocking(self, response, budget: TokenBudget) -> str:
+    def _read_stream_blocking(
+        self,
+        response,
+        budget: TokenBudget,
+        degeneration_check: Callable[[str], str | None] | None = None,
+    ) -> str:
         """Fallback reader when the response socket can't be located.
 
         A plain blocking read relies on the per-read socket timeout for
@@ -351,6 +391,9 @@ class CodegenClient:
         start = time.monotonic()
         warned_fill = False
         out_chars = 0
+        recent: list[str] = []
+        recent_len = 0
+        last_check: int | None = None
         for raw in response:
             if time.monotonic() - start >= self.timeout:
                 raise CodegenError(
@@ -365,13 +408,52 @@ class CodegenClient:
             if text:
                 parts.append(text)
             out_chars += len(text) + len(reasoning)
+            if text or reasoning:
+                recent.append(text + reasoning)
+                recent_len = self._trim_recent(recent, recent_len)
             warned_fill = self._enforce_budget(budget, out_chars, warned_fill)
+            reason, last_check = self._check_degeneration(
+                degeneration_check, recent, out_chars, last_check
+            )
+            if reason:
+                raise CodegenError(f"codegen degeneration detected: {reason}")
             if not continues:
                 break
         if parts and self.stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
         return "".join(parts)
+
+    def _trim_recent(self, recent: list[str], recent_len: int) -> int:
+        """Keep the rolling (content+reasoning) buffer bounded.
+
+        Only the last `degeneration_window + degeneration_interval` chars are
+        ever needed: the check runs every `interval` chars against the last
+        `window` chars, so older text can be dropped. Returns the new length.
+        """
+        budget = self.degeneration_window + self.degeneration_interval
+        while recent and recent_len > budget:
+            recent_len -= len(recent.pop(0))
+        return recent_len
+
+    def _check_degeneration(
+        self,
+        check: Callable[[str], str | None] | None,
+        recent: list[str],
+        out_chars: int,
+        last_check: int | None,
+    ) -> tuple[str | None, int | None]:
+        """Run the degeneration callback on the last `window` chars of
+        content+reasoning, every `interval` chars once `min_chars` have
+        accumulated. Returns (reason, new_last_check); a non-None reason means
+        the caller should abort."""
+        if check is None or out_chars < self.degeneration_min_chars:
+            return None, last_check
+        if last_check is None or out_chars - last_check >= self.degeneration_interval:
+            window = self.degeneration_window or len(recent)
+            reason = check("".join(recent)[-window:])
+            return reason, out_chars
+        return None, last_check
 
     @staticmethod
     def _consume_frame(line: str) -> tuple[bool, str, str]:
@@ -490,6 +572,7 @@ def generate_skill_body(
     tree: dict,
     contract: str | None = None,
     max_tokens: int | None = None,
+    degeneration_check: Callable[[str], str | None] | None = None,
 ) -> str:
     """Author a skill body with the big model; retries once on invalid output."""
     contract_text = contract if contract is not None else read_skill_contract()
@@ -499,7 +582,11 @@ def generate_skill_body(
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            raw = client.chat(messages, max_tokens=max_tokens)
+            raw = client.chat(
+                messages,
+                max_tokens=max_tokens,
+                degeneration_check=degeneration_check,
+            )
             return parse_skill_body(raw)
         except ValueError as exc:
             last_error = exc

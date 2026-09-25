@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .dream import dream as run_dream
 from .codegen import CodegenClient
+from .decisions import DecisionRequest, Option
 from .engine import EngineConfig, EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
@@ -46,7 +47,10 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         base_url=config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
         model=config.get("llm", {}).get("model", "qwen2.5:3b"),
     )
+    log = DecisionLog(config.get("log", "data/decisions.jsonl"))
+    trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     codegen_cfg = config.get("codegen", {})
+    deg_cfg = codegen_cfg.get("degeneration", {}) or {}
     codegen = CodegenClient(
         base_url=codegen_cfg.get(
             "base_url", config.get("llm", {}).get("base_url", "http://localhost:11434/v1")
@@ -63,9 +67,52 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         warn_fill_ratio=float(codegen_cfg.get("warn_fill_ratio", 0.7)),
         max_output=float(codegen_cfg.get("max_output", 0.85)),
         chars_per_token=float(codegen_cfg.get("chars_per_token", 4.0)),
+        degeneration_interval=int(deg_cfg.get("interval", 8000)),
+        degeneration_window=int(deg_cfg.get("window", 2000)),
+        degeneration_min_chars=int(deg_cfg.get("min_chars", 4000)),
     )
-    log = DecisionLog(config.get("log", "data/decisions.jsonl"))
-    trace = TraceLog(config.get("trace", "data/runs.jsonl"))
+
+    def make_degeneration_check(run_id: str):
+        """2-option SemIf decision (continue/stop) that aborts a degenerating
+        codegen stream: P(stop) >= threshold returns an abort reason. Recorded
+        as a trace-only event (kind `codegen`, with probs) — never in the
+        decision log. Disabled when no engine (EngineUnavailable at call time
+        degrades to "keep going"), which keeps CodegenClient standalone pure."""
+        if not bool(deg_cfg.get("enabled", True)):
+            return None
+        threshold = float(deg_cfg.get("threshold", 0.9))
+
+        def check(recent: str) -> str | None:
+            decision = DecisionRequest(
+                state=f"[codegen {codegen.model}] {recent[-2000:]}",
+                question="Is this skill-body generation degenerating (looping or repeating instead of converging)?",
+                options=[
+                    Option("continue", "Continue; it is still making progress."),
+                    Option("stop", "Stop; it is degenerating."),
+                ],
+            )
+            try:
+                result = engine.call(decision)
+            except EngineUnavailable:
+                return None
+            trace.append(
+                "codegen",
+                run_id,
+                state=decision.state,
+                question=decision.question,
+                options=[o.id for o in decision.options],
+                selected=result.selected,
+                probs=result.probs,
+                stop_prob=result.prob("stop"),
+            )
+            if result.prob("stop") >= threshold:
+                return (
+                    f"P(stop)={result.prob('stop'):.2f} >= threshold {threshold}"
+                )
+            return None
+
+        return check
+
     scheduler = Scheduler(
         engine=engine,
         llm=llm,
@@ -75,6 +122,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         max_reentries=int(config.get("max_reentries", 3)),
         trace=trace,
         codegen=codegen,
+        degeneration_check_factory=make_degeneration_check,
     )
     return scheduler, config
 
