@@ -253,6 +253,33 @@ unit tests (24) + box integration tests (2).
   `idle_timeout` — instead of blocking on the 1200s total budget. A streaming
   stall with zero output usually means the ollama ROCm runner wedged;
   `sudo systemctl restart ollama` is the recovery.
+- **Token budget + exact accounting.** The context window is auto-detected once
+  from ollama `/api/show` (`parameters.num_ctx`, falling back to
+  `model_info.<arch>.context_length`, then the `context_window` config, then
+  default 100000). `codegen.smart_limit`/`warn_limit`/`max_fill_ratio`/
+  `warn_fill_ratio` bound total fill (prompt + output); `max_output` caps
+  streamed output (>=1 = absolute tokens, 0<x<1 = fraction of window);
+  `chars_per_token` converts chars to the token estimate for the output cap.
+  The request always sends `stream_options.include_usage`, so the client logs
+  the **exact** `prompt/completion/total` tokens, % of window, and a
+  `SMART|WARN|DUMB` zone (absolute thresholds `smart_limit`/`warn_limit`) at
+  the end of the stream.
+- **Sampler params + escalation.** `codegen.temperature` (default 0.7),
+  `top_p` (0.85), `presence_penalty` (1.5), `frequency_penalty` (0.2) follow
+  the Qwen3.8 model card's instruct-mode anti-repetition guidance — a high
+  `presence_penalty`, not greedy temperature, is the loop cure. A rejected
+  body retries with the escalated sampler (presence 2.0 / temp 0.5) and a
+  fresh short prompt that resets the context to SMART; `max_attempts` (default
+  3) bounds the ladder, then a graceful stub.
+- **Degeneration watchdog.** `codegen.degeneration.{enabled, threshold=0.9,
+  interval=8000, window=2000, min_chars=4000}`: while the body streams, a
+  2-option SemIf decision (continue/stop) runs every `interval` chars against
+  the last `window` chars of content+reasoning once `min_chars` have
+  accumulated; `P(stop) >= threshold` aborts the write with a graceful stub.
+  Recorded as **trace-only** events (kind `codegen`, with probs and
+  `stop_prob`) — never in the decision log. Disabled when no engine is
+  available (`enabled` defaults true; the runtime engine check is what gates
+  it off the box).
 
 ## Codegen guardrails backlog (one session per item)
 
@@ -418,9 +445,16 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
   - Test: the actually-sent HTTP payload's system message contains a SKILL.md
     phrase (harness already records request bodies).
 
-- [ ] **8. Config + AGENTS.md docs**
+- [x] **8. Config + AGENTS.md docs**
   - Update `config.example.json` codegen block and the AGENTS.md codegen
     section with every new key from items 2, 4, 5.
+  - Implemented on the dev machine (2026-09-24): `config.example.json` was
+    already complete — every key from items 2/4/5 landed incrementally with
+    those items and matches `cli.build_scheduler` defaults exactly — so the
+    only real gap was the AGENTS.md "### codegen (skill bodies, box)" section,
+    which gained three bullets (token budget + exact `include_usage` accounting
+    with SMART/WARN/DUMB zone; sampler params + escalation ladder; degeneration
+    watchdog block), all mirroring the `codegen` block of `config.example.json`.
 
 - [x] **9. Codegen prompt: code-for-reuse + self-generated mock data**
     (`codegen.py`, `SKILL.md`)
