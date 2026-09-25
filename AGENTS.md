@@ -143,6 +143,22 @@ unit tests (24) + box integration tests (2).
   for parallel decisions; single execution slot remains for processes.
 - Dashboard: run-requeue cross-linking (child run references its parent),
   scheduler sim controls (busy/idle/tau) as a first-class panel.
+- **Data-contract tiered data lookup on skill creation**: authoring a new
+  skill emits a data contract (what data the skill needs) that kicks off a
+  tiered search for a source of truth — a global data object → category-
+  specific data objects → a skill-specific data object. The cascade reuses an
+  existing source when one exists (no re-querying the user) while keeping the
+  data–skill association explicit at each level. If no source of truth is
+  found in the cascade, the human is asked for input AFTER code generation to
+  complete the skill's function — not during authoring.
+- **Post-codegen mock-data test**: after a codegen body write, run the new
+  skill against the mock data the model supplied (per backlog item 9) before
+  declaring it runnable — a generated body that can't execute its own data
+  path fails authoring, not the first real request.
+- **Skill-code inspection**: new skills are labeled as new, and the CLI and
+  dashboard gain the ability to inspect a skill's generated code body
+  (read-only view of `data/skills/<category>/<name>.py` and its trace) so the
+  author can audit what was generated.
 
 ### Later / open questions
 - Safety/authority: which inputs may interrupt high-stakes processes; is
@@ -199,9 +215,11 @@ unit tests (24) + box integration tests (2).
 - **Do NOT cap `max_tokens`** on the codegen call. qwen38-iq3s reasons first
   and a cap truncates the hidden reasoning, leaving `content` empty
   (`finish_reason: length`) and the body write fails with "skill body is
-  empty". Unbounded, it runs to completion in ~7 min (~40k chars of reasoning
-  then the code); the client reads only `content`, so reasoning is filtered
-  automatically. The client default timeout is 1200s — raise `codegen.timeout`
+  empty". Unbounded, it runs to completion in ~25–45 min with the card
+  sampler (~28–70k tokens of reasoning then the code, ~25–40 tok/s); the
+  client reads only `content`, so reasoning is filtered automatically. The
+  client default timeout is 1200s and qwen38-iq3s routinely exceeds it —
+  the box `config.json` sets `codegen.timeout: 3600`. Raise `codegen.timeout`
   in config if a harder prompt needs more.
 - Bodies are persisted to `data/skills/<category>/<name>.py` (gitignored) and
   loaded back at startup via `importlib`, so skills stay runnable across
@@ -218,11 +236,13 @@ unit tests (24) + box integration tests (2).
   `create_skill` → run). Codegen failure — including a request timeout — leaves
   a navigable stub and returns a graceful `create_skill` result; a timeout is
   raised as `CodegenError` by the client, never a raw `TimeoutError`. The
-  default codegen timeout is 1200s (`cli.build_scheduler`); raise
-  `codegen.timeout` in config for harder prompts.
+  default codegen timeout is 1200s (`cli.build_scheduler`); the box
+  `config.json` sets `codegen.timeout: 3600` because qwen38-iq3s's card
+  sampler writes routinely run 25–45 min. Raise `codegen.timeout` in config
+  for harder prompts.
 - Set `codegen.stream: true` to echo the codegen output as an SSE token stream
   to stdout during body writes — including the chain-of-thought, so a long
-  (~7 min) write shows live progress. The client reads reasoning from either
+  (~30 min) write shows live progress. The client reads reasoning from either
   `reasoning` (ollama) or `reasoning_content` (other OpenAI-compatible
   backends) — do not drop one for the other. Echoing is console-only; the
   returned content is identical either way. Integration tests already force
@@ -332,9 +352,13 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     defaults true; the runtime engine check is what disables it off the box).
     Unit-tested: callback reason aborts the stream (deviation from the "not
     invoked when disabled" spec: the min_chars gate is covered too), callback
-    returning None continues, no callback completes normally. **Box
-    verification pending**: run the codegen integration tests and watch the
-    `codegen` trace events + an abort fire on a real degenerating stream.
+    returning None continues, no callback completes normally. **Box verified
+    (2026-09-24)**: during a real codegen write the watchdog fired 16 trace-only
+    `codegen` events, `stop_prob` range 0.056–0.693 (max 0.693 < threshold 0.9);
+    the SemIf model occasionally leaned `stop` by argmax but the threshold
+    correctly let the healthy-but-verbose generation continue. No
+    `DegenerationError` fired, no false abort — the watchdog polls and the
+    threshold logic works as designed.
 
 - [x] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
   - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`.
@@ -359,19 +383,26 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     scheduler's graceful-stub path — retry-on-degeneration is left as an open
     decision. Unit-tested on the dev machine (payload defaults, escalated retry
     payload + corrective prompt, max_attempts exhaustion, degeneration and
-    token-budget errors propagate without retry). **Box verification pending**:
-    confirm qwen38-iq3s converges faster / aborts via `codegen` trace events.
+    token-budget errors propagate without retry). **Box verified (2026-09-24)**:
+    both codegen writes converged to runnable bodies (`check_service` → 9863
+    bytes, materialized, `test_generate_skill_body_codegen` passed;
+    `track_drone_delivery` → body written + materialized + ran). No 40-min loop,
+    no 1.5 MB stream — the card sampler stopped the degeneration. **But the
+    model is now MORE verbose**: ~28–70k tokens of reasoning per body at
+    ~25–40 tok/s, so writes take 25–45 min and trip the old 1200s default
+    timeout. The box `config.json` now sets `codegen.timeout: 3600`; that
+    timeout, not degeneration or the token cap, is the binding constraint now.
 
-- [ ] **6. Box Modelfile anti-loop levers** (guppy; infra, not a code change)
+- [x] **6. Box Modelfile anti-loop levers** (guppy; infra, not a code change)
   - **Superseded by item 5.** The model card calls for `repetition_penalty 1.0`
     (off) and `min_p 0.0` — the original `repeat_penalty 1.2 / min_p 0.05`
     plan contradicts it. The card-endorsed cure (high `presence_penalty`,
     reachable per-request via OpenAI-compat) is already shipped in item 5, so
-    no Modelfile edit is needed. Left as `[ ]` only for a box sanity check:
+    no Modelfile edit is needed. **Box sanity checked (2026-09-24)**:
     `ollama show --modelfile qwen38-iq3s` still shows `repeat_penalty 1` /
-    `presence_penalty 0`; confirm the per-request values override them, then
-    re-run `test_generate_skill_body_codegen` and
-    `test_create_category_chain_runs_new_skill`; confirm no long loop.
+    `presence_penalty 0` / `min_p 0` / `num_ctx 100000`; the per-request
+    values (presence 1.5 etc.) override them at request time and the writes
+    converged — no long loop.
 
 - [ ] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)
   - `read_skill_contract` also yields sha256 of SKILL.md; record
@@ -382,6 +413,21 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
 - [ ] **8. Config + AGENTS.md docs**
   - Update `config.example.json` codegen block and the AGENTS.md codegen
     section with every new key from items 2, 4, 5.
+
+- [ ] **9. Codegen prompt: code-for-reuse + self-generated mock data**
+    (`codegen.py`, `SKILL.md`)
+  - The generated body is meant to be REUSED across requests, so the prompt
+    must tell the model to generate its own mock data (its own source of
+    truth) and not assume a human will hand it data at predict/act time. The
+    REPL input path during a run (`needs_input`/`answer`) is for CLARIFYING
+    questions only — never the primary data source.
+  - Root cause (box, 2026-09-24): the generated `track_drone_delivery` body
+    asked the human for `tracking_id`/`status`/`latitude`/`longitude` to
+    function — reasonable for a one-shot exchange, wrong for a persistent
+    skill. `SKILL.md` should encode: skills are reusable modules; prefer an
+    internal/mock data model; ask the human only to disambiguate intent.
+  - Test: prompt/`SKILL.md` contains the reuse + self-mock-data directives;
+    a generated-body parse is unaffected.
 
 ### Code principles
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
