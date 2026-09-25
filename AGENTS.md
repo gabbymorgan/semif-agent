@@ -258,21 +258,41 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     must raise while tokens still flow.
   - Verify: `python3 -m pytest tests/ -q --ignore=tests/integration`.
 
-- [ ] **2. Auto-detect context window + layered token budget** (`codegen.py`, `cli.py`, `config.example.json`)
-  - `CodegenClient` lazily queries `GET /api/show {model}` → `parameters.num_ctx`
+- [x] **2. Auto-detect context window + layered token budget** (`codegen.py`, `cli.py`, `config.example.json`)
+  - `CodegenClient` lazily queries `POST /api/show {model}` → `parameters.num_ctx`
     (fallback `model_info.<arch>.context_length`, then `context_window` config,
     then default 100000).
   - Per request: `total_limit = min(smart_limit, window*max_fill_ratio)`;
     `output_limit = min(max_output, total_limit - prompt_est)`;
     `warn_point = min(warn_limit, window*warn_fill_ratio)`.
   - `max_output`: `>=1` = absolute tokens, `0<x<1` = fraction of window,
-    default `0.25`. Enforce in `_read_stream` via chars→tokens estimate
-    (`chars_per_token`). Abort → `CodegenError` → graceful stub.
+    default `0.85`. Enforce in `_read_stream` via chars→tokens estimate
+    (`chars_per_token`). Abort → `CodegenError` → graceful stub. The transport
+    always streams (payload `"stream": true`) so the cap, idle watchdog, and
+    item-1 total budget abort a generation in real time; the `stream` config
+    now gates only the console echo, and non-stream response reading is gone.
   - Print a start line: context tokens, output cap tokens + %, peak total fill.
-  - Config: `codegen.{context_window=0, smart_limit=100000, warn_limit=200000,
-    max_fill_ratio=0.8, warn_fill_ratio=0.5, max_output=0.25, chars_per_token=4.0}`.
+  - Config: `codegen.{context_window=0, smart_limit=250000, warn_limit=500000,
+    max_fill_ratio=0.9, warn_fill_ratio=0.7, max_output=0.85, chars_per_token=4.0}`.
   - Tests: cap trips at fraction-of-window and absolute forms (fake server +
-    explicit window); `/api/show` parse (mock the fetch).
+    explicit window); `/api/show` parse (real fake server, per the no-mocking
+    rule — the backlog's "mock the fetch" was implemented as a real endpoint).
+  - **Box findings (2026-09-24):** real ollama serves `/api/show`'s
+    `parameters` as a **modelfile string** (`"num_ctx 100000\n..."`), not a
+    dict — a fake server that returned a dict hid the resulting
+    `AttributeError` crash; the parser now handles both shapes (string parses
+    the `num_ctx` line, else falls back to `model_info`). The ORIGINAL
+    defaults were far too tight for qwen38-iq3s: `max_output 0.25` (25k
+    tokens ≈ 100 KB chars) aborted a still-verbosely-reasoning `check_service`
+    body at exactly 100,154 chars — the cap fired correctly but too early.
+    Defaults were relaxed to the values above so a finite-but-verbose write
+    (~100 KB+) can complete while a window-filling degeneration still aborts.
+    **The box codegen integration tests remain flaky for a model reason, not
+    a code one**: qwen38-iq3s's reasoning often exceeds even the relaxed cap
+    before it settles on a body. That is the degeneration items 4–6 fix; the
+    budget is the safety net, not the cure. Window detection + cap firing are
+    both confirmed live on the box (`context window 100000 tokens` start
+    line; abort at the configured cap).
 
 - [ ] **3. Exact token accounting via include_usage** (`codegen.py`)
   - Send `stream_options: {"include_usage": true}`; capture the `usage` chunk
