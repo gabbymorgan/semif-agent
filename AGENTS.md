@@ -52,13 +52,17 @@ dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status +
 
 Dev machine is a thin client (no GPU, ~1.4G disk): only pure stdlib unit tests
 run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
+Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)").
 
 ## Git / sync
 
 - Canonical repo lives on Gitea: `git.manyworlds.fit`, **SSH on port 222**
   (`ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git`). Key
-  `~/.ssh/id_ed25519` is registered there. The box `guppy` keeps a working copy
-  at `~/semif-agent`; the dev machine at `~/Repos/semif-agent`. Push/pull from
+  `~/.ssh/id_ed25519` is registered there. The staging machine `jarvis` clones
+  to `~/semif-agent` (via `scripts/bootstrap.sh`); the old box working copy is
+  at `~/repos/semif-agent` (its editable install still points at the moved
+  `~/semif-agent`, so `import semif_agent` is broken there — moot, guppy runs
+  ollama only now); the dev machine at `~/Repos/semif-agent`. Push/pull from
   Gitea — never rsync/tar the code.
 - **`config.json` is gitignored and per-machine** (dev and the box use different
   engine/LLM paths). Copy `config.example.json` to `config.json` and edit.
@@ -74,7 +78,10 @@ run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
 - Decision rows logged before the `run_id` threading landed show up under
   run_id `"?"` in the dashboard — that's expected, not a bug.
 
-The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
+Machine split (Sep 2026): **guppy** is the ollama **model server only**;
+**jarvis** is the staging/test target (semif-agent + SemIf engine + deps).
+Provision jarvis with `scripts/bootstrap.sh` (see "### jarvis (staging)").
+Guppy key facts:
 
 - ssh key `~/.ssh/id_ed25519` is passphrase-protected. Load it into an agent at
   a fixed socket before connecting (the default flatpak `SSH_AUTH_SOCK` refuses):
@@ -84,18 +91,11 @@ The AMD box `guppy` (`abby@192.168.8.181`) is the real run target. Key facts:
   SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh-add ~/.ssh/id_ed25519
   ```
   The agent dies if this machine restarts; redo it each session.
-- `semif_agent` is editable-installed into the box venv
-  (`pip install -e ~/semif-agent --no-deps`), so `python -m semif_agent.cli ...`
-  works from any directory on the box, not just the repo root.
-- Run the agent on the box:
-  ```sh
-  cd ~/semif-agent && export HF_HOME=/home/abby/hf
-  ~/semif-venv/bin/python -m semif_agent.cli run              # REPL
-  ~/semif-venv/bin/python -m semif_agent.cli run --script demo.jsonl
-  ~/semif-venv/bin/python -m semif_agent.cli dream            # cost report
-  ~/semif-venv/bin/python -m semif_agent.cli relabel <id> <outcome>
-  ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
-  ```
+- The agent on guppy is **deprecated** (guppy is ollama-only now). The box
+  venv's editable install (`__editable__.semif_agent_0_1_0_finder.py`) still
+  maps to `/home/abby/semif-agent`, which was moved to `~/repos/semif-agent`,
+  so `import semif_agent` fails there — expected, not a bug. Run the agent on
+  **jarvis** instead (below).
 - Dashboard: runs as a systemd **user** service on the box
   (`semif-dashboard.service`, linger enabled, binds `0.0.0.0:8765`), so it's up
   after reboots with no manual launch — browser UI at http://192.168.8.181:8765/.
@@ -205,6 +205,36 @@ unit tests (24) + box integration tests (2).
   also works but is huge/slow.
 - If generation hangs with no log output, restart the service
   (`sudo systemctl restart ollama`) — the ROCm runner can wedge.
+- Ollama already binds `OLLAMA_HOST=0.0.0.0`, so jarvis reaches it as a plain
+  remote API at `http://192.168.8.181:11434` (no auth — LAN-visible, same
+  exposure as the old dashboard POST endpoints).
+
+### jarvis (staging)
+
+- Provision a fresh Ubuntu machine into a running staging box:
+  `scripts/bootstrap.sh --peer-ollama http://192.168.8.181:11434`.
+  Idempotent and rerunnable; every stage no-ops on existing state, so it also
+  boots an unknown-state machine. It installs **no ollama** — llm + codegen
+  both point at guppy.
+- All pins are read from `config.example.json`'s `engine` block: `semif_repo`
+  (public GitHub `TheoLeeCJ/SemIf`), `semif_ref` (pinned commit the box runs),
+  `gguf_url`/`gguf_sha256` (verified after download), and the HF tokenizer
+  `source`/`revision`. **Maintenance**: bump those pins in `config.example.json`,
+  rerun the script, re-run the integration tests. The script never guesses.
+- Generates `~/semif-agent/config.json` with `codegen.timeout: 3600` (codegen
+  now travels the LAN) and a backup of any prior file. `--threads N` overrides
+  engine threads; `--copy-data SRC` rsyncs guppy's `data/` for continuity;
+  `--public-dashboard` binds the dashboard to `0.0.0.0`.
+- Run / verify on jarvis:
+  ```sh
+  cd ~/semif-agent && export HF_HOME=~/hf
+  ~/semif-venv/bin/python -m semif_agent.cli run              # REPL
+  ~/semif-venv/bin/python -m semif_agent.cli dream            # cost report
+  ~/semif-venv/bin/python -m pytest tests/integration -q -s   # ~100s, background+poll
+  ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
+  ```
+- First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
+  (~10 min on 6 cores); reruns are fast no-ops.
 
 ### codegen (skill bodies, box)
 - Skill **bodies** are written by a separate OpenAI-compatible model, configured
@@ -513,7 +543,8 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
   the max (1.0) so low items catch up; uniform additive boosts do nothing.
 - CLI subcommands must not crash when the engine is unavailable — `submit`
   catches `EngineUnavailable` and returns `("error", ...)`.
-- Keep deps stdlib-only in the core; heavy deps live on the box venv.
+- Keep deps stdlib-only in the core; heavy deps live on the staging venv
+  (`~/semif-venv`, provisioned by `scripts/bootstrap.sh`).
 
 ## Testing
 
@@ -521,6 +552,7 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
   Includes the dashboard API tests (`tests/test_dashboard_api.py`), which spin
   up the stdlib HTTP server on an ephemeral port with the engine never loaded,
   and `tests/test_codegen.py` for prompt/parse/validate + body store round-trips.
-- `tests/integration/` — box only; requires real SemIf + real ollama.
+- `tests/integration/` — jarvis only (staging); requires real SemIf + real
+  ollama (guppy serves the models over the LAN).
 - After touching scheduler/skills/codegen/engine, re-run both; the integration
   tests are the only end-to-end verification.

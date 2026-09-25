@@ -8,6 +8,10 @@
     "source": "Qwen/Qwen3.5-4B",
     "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
     "gguf": "/home/abby/models/Qwen3.5-4B-Q4_K_M.gguf",
+    "gguf_url": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+    "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
+    "semif_repo": "https://github.com/TheoLeeCJ/SemIf.git",
+    "semif_ref": "1f2dea3e25379f9dfc98cb83c324f00ab5deda37",
     "context_tokens": 4096,
     "threads": 8
   },
