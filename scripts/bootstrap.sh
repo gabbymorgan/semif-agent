@@ -179,8 +179,14 @@ eng = cfg["engine"]
 eng["gguf"] = os.path.join(os.path.expanduser("~"), "models", os.path.basename(eng["gguf_url"]))
 if threads and threads != "__example__":
     eng["threads"] = int(threads)
-cfg["llm"]["base_url"] = peer
-cfg["codegen"]["base_url"] = peer
+# The clients hit {base_url}/chat/completions on ollama's OpenAI-compat path,
+# which lives under /v1. The native API (/api/tags, /api/show) has no /v1, so
+# the raw `peer` is kept for those; llm/codegen base_url must end in /v1.
+base_url = peer.rstrip("/")
+if not base_url.endswith("/v1"):
+    base_url += "/v1"
+cfg["llm"]["base_url"] = base_url
+cfg["codegen"]["base_url"] = base_url
 cfg["codegen"]["timeout"] = 3600
 cfg.setdefault("dashboard", {})["port"] = 8765
 cfg["dashboard"]["host"] = dash_host
@@ -199,6 +205,14 @@ echo "== verifying imports"
 ~/semif-venv/bin/python -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
 echo "== peer ollama check ($PEER_OLLAMA)"
 PEER_TAGS="$(curl -sf --max-time 5 "$PEER_OLLAMA/api/tags" || true)"
+# The OpenAI-compat chat path is what llm/codegen actually hit; a bare reachable
+# root ("Ollama is running") does not prove it. Probe it explicitly.
+PEER_V1="$(curl -sf --max-time 60 "$PEER_OLLAMA/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"qwen3.5:4b","messages":[{"role":"user","content":"hi"}],"stream":false,"options":{"num_predict":1}}' || true)"
+if grep -qE 'chatcmpl|"choices"' <<<"$PEER_V1"; then
+  echo "peer /v1/chat/completions (OpenAI-compat): OK"
+else
+  echo "WARN: peer /v1/chat/completions returned no completion — llm/codegen will fail" >&2
+fi
 if grep -qE "qwen3\.5:4b" <<<"$PEER_TAGS"; then
   echo "peer serves qwen3.5:4b (self-assessment): OK"
 else
