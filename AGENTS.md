@@ -374,8 +374,9 @@ unit tests (24) + box integration tests (2).
   `data/` for continuity; `--public-dashboard` binds the dashboard to `0.0.0.0`.
   It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
   `ws_url` from `simplex_chat.port`) and renders/enables the two user services
-  `semif-simplex.service` (the pinned `simplex-chat` daemon, headless on
-  `simplex_chat.port`) and `semif-gateway.service`
+  `semif-simplex.service` (the pinned `simplex-chat` daemon, `--relay
+  --headless` on `simplex_chat.port` — v7 requires `--relay` for `--headless`)
+  and `semif-gateway.service`
   (`.runtime/venv/bin/python -m semif_agent.cli gateway`). `--simplex-allowed-users
   CSV` / `--simplex-home-channel ID` / `--simplex-display-name NAME` populate
   the allowlist/fallback/identity; with an empty allowlist the gateway denies

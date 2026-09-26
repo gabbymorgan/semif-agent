@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex -k "" --headless --user-display-name "@DISPLAY_NAME@"
+ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex -k "" --relay --headless --user-display-name "@DISPLAY_NAME@"
 Restart=always
 RestartSec=10
 StandardOutput=journal
