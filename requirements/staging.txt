@@ -13,3 +13,6 @@ tokenizers==0.23.2
 huggingface-hub==1.31.0
 llama-cpp-python==0.3.35
 pytest
+# Messaging gateway transport (SimpleX adapter). Optional: lazy-imported, the
+# gateway refuses to start without it. Not needed by the decision engine.
+websockets==15.0.1

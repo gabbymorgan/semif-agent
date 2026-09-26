@@ -114,6 +114,15 @@ decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
 dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status/
                 questions/repairs + POST submit/answer/questions/repair/restart/
                 relabel); static/ frontend served at /
+gateway/        messenger intake/reply. base.py: GatewayAdapter contract +
+                Inbound/OutboundMessage. service.py: GatewayService maps chats
+                onto the single-slot scheduler (submit_request, owner maps,
+                pending-run ownership, queue drain, authoring questions/repairs
+                routed back to the origin chat). simplex.py: SimplexAdapter —
+                local simplex-chat daemon over its JSON WebSocket API
+                (lazy `websockets`, allowlist, batching, structured `/_send`).
+                Run with `python -m semif_agent.cli gateway [--dashboard]`;
+                config under `gateway.simplex` in config.json
 ```
 
 ## Run / verify
@@ -257,6 +266,18 @@ unit tests (24) + box integration tests (2).
   dashboard gain the ability to inspect a skill's generated code body
   (read-only view of `data/skills/<category>/<name>/` and its trace) so the
   author can audit what was generated.
+- **Messenger gateway (SimpleX first)** (Sep 2026): `python -m semif_agent.cli
+  gateway` runs a dedicated process that connects to the local `simplex-chat`
+  daemon over its JSON WebSocket API and feeds authorized DM text through the
+  normal gate/score/queue/dispatch pipeline; results, authoring questions, and
+  repair offers are sent back to the originating chat. `gateway/base.py` is the
+  transport contract (`GatewayAdapter`, `InboundMessage`, `OutboundMessage`),
+  `gateway/service.py` the scheduler glue (single execution slot, owner maps,
+  pending-run ownership, queue drain), `gateway/simplex.py` the SimpleX adapter
+  (lazy `websockets`, default-deny allowlist by contactId/display name,
+  rapid-message batching, structured `/_send`). DMs only for the first cut;
+  groups/attachments/reactions are future work. See "### gateway (messenger
+  intake)".
 
 ### Later / open questions
 - Safety/authority: which inputs may interrupt high-stakes processes; is
@@ -522,6 +543,58 @@ unit tests (24) + box integration tests (2).
   `stop_prob`) — never in the decision log. Disabled when no engine is
   available (`enabled` defaults true; the runtime engine check is what gates
   it off the box).
+
+### gateway (messenger intake)
+
+- **Run mode.** `python -m semif_agent.cli gateway [--platform simplex]
+  [--dashboard]` builds the normal scheduler (engine lazy) and runs the
+  configured `gateway.simplex` adapter in the foreground. `--dashboard`
+  co-serves the browser UI from a daemon thread. Config lives under
+  `gateway.simplex` in `config.json`; `enabled` defaults false. The gateway is
+  its own process — the REPL and the gateway are independent front ends onto
+  the same on-disk logs/registry (do not run two scheduler processes over one
+  skill store concurrently).
+- **Transport contract** (`gateway/base.py`): `GatewayAdapter.run(on_inbound,
+  outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
+  `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can
+  block on the decision engine, so the adapter bridges it off its event loop
+  (`asyncio.to_thread`) and puts replies on the queue. A second platform means
+  a new adapter subclass; the service is unchanged.
+- **SimpleX adapter** (`gateway/simplex.py`): connects to `simplex-chat -p
+  5225` at `gateway.simplex.ws_url`, XML-JSON WebSocket protocol
+  (`{"corrId","cmd"}` → `{"corrId","resp"}` / events). `websockets` is
+  **lazy-imported**; `check_requirements()` returns an install hint and the
+  gateway refuses to start without it, so the core stays importable on a
+  websocket-free machine. Default-deny allowlist matches either a numeric
+  `contactId` or a display name (`allowed_users`); `allow_all_users` is the
+  dev escape hatch. `auto_accept` answers `receivedContactRequest` with
+  `/_accept`. Inbound `newChatItems` are filtered to direct, non-echo
+  (`chatDir.type` not `*Snd`), text-only items, buffered per contact and
+  flushed after `text_batch_delay`. Outbound uses the **structured** command
+  `/_send @<contactId> json [{"msgContent":{"type":"text","text":...}}]` — the
+  `@<id> <text>` shortcut is silently rejected over WebSocket. Groups,
+  attachments, reactions, and typing are out of scope for this cut.
+- **Scheduler glue** (`gateway/service.py`): inbound text →
+  `Scheduler.submit_request(text, source=f"simplex:<chat_id>")`; the returned
+  request id maps to the chat (`owners`), and `Scheduler.on_request_requeued`
+  (a scheduler hook, default `None`) copies that ownership across an updated
+  request so its completion still routes home. A `needs_input` pause sets
+  `pending_owner` from the pending run's source; the same chat's next message
+  goes straight to `Scheduler.answer` (no gate/score/navigation). A *different*
+  chat during another chat's pause is told to wait — the single-slot scheduler
+  must not silently abandon the first chat's run. A background poll calls
+  `Scheduler.run_queue()` (routing each `[run_id] summary` to its owner) and
+  surfaces newly posted authoring questions / repair offers (`defer_questions
+  = True`; the service routes them by `run_id` → origin, falling back to
+  `home_channel`); a chat's plain reply answers the question or picks the
+  repair action (`retry`/`repair`/`ask`/`no`).
+- **Tests.** `tests/test_gateway.py` (stdlib, dev box): allowlist/auth,
+  `newChatItems` parsing + echo/group/non-text filtering, structured send
+  command, batching (real `asyncio`), and `GatewayService` routing against a
+  real `Scheduler` (lazy engine, unreachable LLM). The live `websockets`
+  transport against a real daemon is a jarvis integration concern.
+- **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
+  only); the dev box core stays stdlib-only.
 
 ## Codegen guardrails backlog (one session per item)
 

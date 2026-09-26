@@ -214,6 +214,7 @@ class Scheduler:
         regen_decision_factory: Callable[[str], Callable[[str], str] | None]
         | None = None,
         asker: Callable[[str], str | None] | None = None,
+        on_request_requeued: Callable[[str, str], None] | None = None,
     ):
         self.engine = engine
         self.llm = llm
@@ -226,6 +227,7 @@ class Scheduler:
         self.degeneration_check_factory = degeneration_check_factory
         self.regen_decision_factory = regen_decision_factory
         self.asker = asker
+        self.on_request_requeued = on_request_requeued
         codegen_cfg = config.get("codegen", {}) or {}
         elicitation_cfg = codegen_cfg.get("elicitation", {}) or {}
         self.elicitation_enabled = bool(elicitation_cfg.get("enabled", True))
@@ -312,23 +314,34 @@ class Scheduler:
 
     def submit(self, text: str, source: str = "typed") -> tuple[str, str]:
         """Feed one input. Returns (status, detail)."""
+        status, detail, _ = self.submit_request(text, source)
+        return status, detail
+
+    def submit_request(
+        self, text: str, source: str = "typed"
+    ) -> tuple[str, str, str]:
+        """Feed one input, also returning the request id.
+
+        The id lets out-of-band interfaces (the messenger gateway) map a run
+        back to the chat that originated it.
+        """
         from .engine import EngineUnavailable
 
         try:
             return self._submit(text, source)
         except EngineUnavailable as exc:
-            return "error", f"decision engine unavailable: {exc}"
+            return "error", f"decision engine unavailable: {exc}", ""
 
-    def _submit(self, text: str, source: str = "typed") -> tuple[str, str]:
+    def _submit(self, text: str, source: str = "typed") -> tuple[str, str, str]:
         with self._lock:
             return self._submit_locked(text, source)
 
-    def _submit_locked(self, text: str, source: str = "typed") -> tuple[str, str]:
+    def _submit_locked(self, text: str, source: str = "typed") -> tuple[str, str, str]:
         request = Request(text, source=source)
         self.trace.append("submit", request.id, text=text, source=source)
         if not self._contains_request(request):
             self.trace.append("dropped", request.id, reason="no actionable request")
-            return "dropped", "no actionable request"
+            return "dropped", "no actionable request", request.id
 
         if self.current is None:
             weight, label = self._score(request)
@@ -339,9 +352,9 @@ class Scheduler:
                 if self.pending is None:
                     self.current = None
             if outcome.kind == "needs_input":
-                return "needs_input", outcome.summary
+                return "needs_input", outcome.summary, request.id
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            return "running", f"[{label}] {outcome.summary}"
+            return "running", f"[{label}] {outcome.summary}", request.id
 
         interrupt = self._choice(request, self.current)
         if interrupt:
@@ -355,18 +368,18 @@ class Scheduler:
             self.trace.append("preempted", request.id, preempted=previous.skill)
             outcome = self._dispatch(request, weight=1.0)
             if outcome.kind == "needs_input":
-                return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
+                return "preempted", f"interrupted {previous.skill}; {outcome.summary}", request.id
             self.current = None
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            return "preempted", f"interrupted {previous.skill}; {outcome.summary}"
+            return "preempted", f"interrupted {previous.skill}; {outcome.summary}", request.id
 
         weight, label = self._score(request, current=self.current.skill)
         ok = self.queue.push(request, weight)
         if not ok:
             self.trace.append("rejected", request.id, reason="queue is full")
-            return "rejected", "queue is full"
+            return "rejected", "queue is full", request.id
         self.trace.append("queued", request.id, weight=weight, label=label)
-        return "queued", f"urgency {label} (weight {weight:.2f})"
+        return "queued", f"urgency {label} (weight {weight:.2f})", request.id
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
         """Set a fake in-progress process so the choice/score path is exercised."""
@@ -600,8 +613,11 @@ class Scheduler:
             updated_request=outcome.updated_request,
         )
         if outcome.updated_request and request.reentries < self.max_reentries:
-            self.queue.push(_requeue(request, outcome.updated_request), 0.5)
+            child = _requeue(request, outcome.updated_request)
+            self.queue.push(child, 0.5)
             self.trace.append("requeued", request.id, text=outcome.updated_request)
+            if self.on_request_requeued is not None:
+                self.on_request_requeued(request.id, child.id)
         if not outcome.success and not outcome.updated_request:
             self._propose_repair(skill, request, outcome)
         return DispatchResult(

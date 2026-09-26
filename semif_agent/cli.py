@@ -286,6 +286,65 @@ def scripted(scheduler: Scheduler, path: str) -> None:
         print(f"[{status}] {detail}")
 
 
+def run_gateway(
+    scheduler: Scheduler,
+    config: dict,
+    platform: str = "simplex",
+    serve_dashboard: bool = False,
+) -> int:
+    """Run the messenger gateway in the foreground (SimpleX first)."""
+    cfg = (config.get("gateway", {}) or {}).get(platform, {}) or {}
+    if not cfg.get("enabled", False):
+        print(f"gateway.{platform} is not enabled in config")
+        return 1
+
+    if platform == "simplex":
+        from .gateway.simplex import SimplexAdapter
+
+        adapter = SimplexAdapter(cfg, trace=scheduler.trace)
+    else:
+        print(f"unknown gateway platform {platform!r}")
+        return 1
+
+    ok, hint = adapter.check_requirements()
+    if not ok:
+        print(f"gateway {platform} unavailable: {hint}")
+        return 1
+
+    from .gateway.service import GatewayService
+
+    scheduler.defer_questions = True
+    service = GatewayService(scheduler, adapter, config=cfg)
+    scheduler.on_request_requeued = service.on_request_requeued
+    service.start()
+
+    if serve_dashboard:
+        import threading
+
+        from .dashboard import serve
+
+        dash_cfg = config.get("dashboard", {}) or {}
+        threading.Thread(
+            target=serve,
+            args=(scheduler,),
+            kwargs={
+                "port": int(dash_cfg.get("port", 8765)),
+                "host": str(dash_cfg.get("host", "127.0.0.1")),
+            },
+            daemon=True,
+        ).start()
+
+    print(f"gateway {platform} listening on {adapter.ws_url} (Ctrl-C to stop)")
+    try:
+        adapter.run(service.handle_inbound, service.outbound)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop()
+        adapter.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else list(sys.argv[1:])
     config = load_config(_extract_config_path(argv))
@@ -317,6 +376,14 @@ def main(argv: list[str] | None = None) -> int:
         help="replay mode: do not warm the decision engine",
     )
 
+    gw_p = sub.add_parser("gateway", help="run the messenger gateway (SimpleX)")
+    gw_p.add_argument("--platform", default="simplex", help="gateway platform (default simplex)")
+    gw_p.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="also serve the browser dashboard from the same process",
+    )
+
     args = parser.parse_args(argv)
     scheduler, config = build_scheduler(config)
 
@@ -341,6 +408,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.replay:
             print("replay mode: reading decision log + trace; engine not warmed.")
         serve(scheduler, port=args.port, host=args.host)
+    elif args.command == "gateway":
+        return run_gateway(
+            scheduler,
+            config,
+            platform=args.platform,
+            serve_dashboard=args.dashboard,
+        )
     else:
         parser.print_help()
     return 0

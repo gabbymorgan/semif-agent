@@ -72,5 +72,19 @@
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
+  "gateway": {
+    "_comment": "Messenger intake. `python -m semif_agent.cli gateway` connects to the local simplex-chat daemon (simplex-chat -p 5225) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
+    "simplex": {
+      "enabled": false,
+      "ws_url": "ws://127.0.0.1:5225",
+      "allowed_users": [],
+      "allow_all_users": false,
+      "auto_accept": true,
+      "home_channel": "",
+      "reply_prefix": "",
+      "text_batch_delay": 0.8,
+      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+    }
+  },
   "dashboard": {"port": 8765, "host": "0.0.0.0"}
 }
