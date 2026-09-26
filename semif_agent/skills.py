@@ -176,9 +176,9 @@ class SkillStore:
     """Persists one skill leaf as a folder of deliverables.
 
     Layout: <base>/<category>/<name>/{skill.py, skill.test.py, contract.json,
-    mock_data.json, config.json}. skill.py is the runnable body; the rest are
-    produced by the contract/test generation steps and read back so skills stay
-    runnable and configurable across restarts. The old single-file layout
+    config.json}. skill.py is the runnable body; the rest are produced by the
+    contract/test generation steps and read back so skills stay runnable and
+    configurable across restarts. The old single-file layout
     (<base>/<category>/<name>.py) is NOT read — this is a clean switch.
     """
 
@@ -197,9 +197,6 @@ class SkillStore:
 
     def write_contract(self, category: str, name: str, contract: dict) -> Path:
         return self._write_json(category, name, "contract.json", contract)
-
-    def write_mock(self, category: str, name: str, mock) -> Path:
-        return self._write_json(category, name, "mock_data.json", mock)
 
     def write_config(self, category: str, name: str, config: dict) -> Path:
         return self._write_json(category, name, "config.json", config)
@@ -223,9 +220,6 @@ class SkillStore:
 
     def read_config(self, category: str, name: str) -> dict:
         return self._read_json(category, name, "config.json")
-
-    def read_mock(self, category: str, name: str):
-        return self._read_json(category, name, "mock_data.json")
 
     def _read_json(self, category: str, name: str, filename: str):
         path = self.dir(category, name) / filename

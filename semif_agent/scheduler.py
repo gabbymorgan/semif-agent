@@ -638,8 +638,8 @@ class Scheduler:
 
     def _write_skill_body(self, job: SkillWrite) -> None:
         """Run the full authoring pipeline for one queued write (no scheduler
-        lock held here): codegen body -> data contract -> test artifacts ->
-        auto-run test (with a SemIf regen ladder on failure).
+        lock held here): codegen body -> data contract -> test -> auto-run test
+        (with a SemIf regen ladder on failure).
 
         The tree is snapshotted under the lock so the prompt build reads a
         stable view even if the main thread merges another skill meanwhile.
@@ -678,11 +678,12 @@ class Scheduler:
         self._complete_skill_write(job, code)
 
     def _test_and_fix(self, job: SkillWrite, code: str, contract: dict) -> None:
-        """Generate test artifacts and auto-run them; regen the failing piece.
+        """Generate the test artifact and auto-run it; regen the failing piece.
 
-        On failure a SemIf decision picks which of code/contract/test/mock data
-        to regenerate; whichever it is, the error and the existing files are fed
-        back into the corrective call. Bounded by `test_max_attempts`.
+        On failure a SemIf decision picks which of code/contract/test to
+        regenerate; whichever it is, the error and the existing files are fed
+        back into the corrective call. Fixture data lives inside the test, so a
+        fixture fix is a test regen. Bounded by `test_max_attempts`.
         """
         attempts = max(self.test_max_attempts, 1)
         reason: str | None = None
@@ -698,12 +699,11 @@ class Scheduler:
                     self.codegen, job.request, job.category, job.draft, code, reason=reason
                 )
                 self.body_store.write_contract(job.category, job.draft.name, contract)
-            test, mock = generate_skill_tests(
+            test = generate_skill_tests(
                 self.codegen, job.request, job.category, job.draft, code, contract,
                 reason=reason, target=target,
             )
             self.body_store.write_test(job.category, job.draft.name, test)
-            self.body_store.write_mock(job.category, job.draft.name, mock)
             passed, output = run_skill_test(
                 self.body_store.dir(job.category, job.draft.name), timeout=self.test_timeout
             )

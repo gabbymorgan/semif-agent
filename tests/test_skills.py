@@ -63,12 +63,10 @@ print("ok")
 sys.exit(0)
 """
 
-GOOD_BUNDLE = json.dumps({"test": GOOD_TEST, "mock_data": {}})
-
 
 def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
     """Sequenced OpenAI-compatible SSE server for the full authoring pipeline:
-    codegen body -> data contract -> test artifacts. Also answers `/api/show`
+    codegen body -> data contract -> test. Also answers `/api/show`
     so the client's context-window probe succeeds (never counted)."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -410,7 +408,7 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
     and the single-slot worker runs codegen -> contract -> testgen -> test, then
     materializes the body, hot-merges it into the tree, and re-queues the
     original request for re-dispatch."""
-    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_BUNDLE])
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_TEST])
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
         scheduler.tree["tracking"] = [
@@ -450,7 +448,6 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
         directory = scheduler.body_store.dir("tracking", "track_live")
         assert sorted(p.name for p in directory.iterdir() if not p.name.startswith("__")) == [
             "contract.json",
-            "mock_data.json",
             "skill.py",
             "skill.test.py",
         ]
@@ -566,7 +563,7 @@ def test_elicit_requirements_asks_and_records(tmp_path):
     """Opt-in elicitation asks the product owner refinement questions before
     the body is written and rides the answers on the draft into the body prompt."""
     httpd, base = _pipeline_codegen_server(
-        ['{"questions": ["Draft or send?"]}', GOOD_BODY, "{}", GOOD_BUNDLE]
+        ['{"questions": ["Draft or send?"]}', GOOD_BODY, "{}", GOOD_TEST]
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
@@ -584,7 +581,7 @@ def test_elicit_requirements_asks_and_records(tmp_path):
 
 
 def test_elicit_requirements_disabled_skips(tmp_path):
-    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_BUNDLE])
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_TEST])
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
         scheduler.elicitation_enabled = False
@@ -601,7 +598,7 @@ def test_elicit_requirements_disabled_skips(tmp_path):
 def test_elicit_requirements_asker_none_stops(tmp_path):
     """An asker that stops answering (None) halts collection without error."""
     httpd, base = _pipeline_codegen_server(
-        ['{"questions": ["A?", "B?"]}', GOOD_BODY, "{}", GOOD_BUNDLE]
+        ['{"questions": ["A?", "B?"]}', GOOD_BODY, "{}", GOOD_TEST]
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
@@ -620,9 +617,9 @@ def test_elicit_requirements_asker_none_stops(tmp_path):
 def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
     """A failing auto-run test triggers the regen decision (regen_test by
     default when no factory), regenerating the test until it passes."""
-    failing_bundle = json.dumps({"test": "import sys\nsys.exit(1)", "mock_data": {}})
+    failing_test = "import sys\nsys.exit(1)"
     httpd, base = _pipeline_codegen_server(
-        [GOOD_BODY, "{}", failing_bundle, GOOD_BUNDLE]
+        [GOOD_BODY, "{}", failing_test, GOOD_TEST]
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))

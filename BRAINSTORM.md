@@ -1,6 +1,6 @@
 
 ## 1.Implementation Details For Skill Creation
-- create folder for skill leaf instead of just a file. at the end of skill creation process, folder will contain four deliverables - skill.py, skill.test.py, contract.json, mock_data.json, and config.json
+- create folder for skill leaf instead of just a file. at the end of skill creation process, folder will contain four deliverables - skill.py, skill.test.py, contract.json, and config.json
 
 ### skill.py
 - prompt LLM generate skill. do not generate mock data at this point in the process. do not include the desire for mock data in the SKILL.md for skill creation. mocking and testing will have their own SKILL.md file for this purpose. In the codegen phase, the model should act like a dev who is talking to the product owner about requirements REPL is for questions about refining the product goal and requirements only.
@@ -9,8 +9,8 @@
     
 ### test.py and contract.json
 - *after cogeden is complete*, clear context then insert testgen SKILL.md and finished skill code. ask it to generate a data contract consisting of a single JSON file (contract.json)
-- run test automatically with mock data
-    - on failure, decide regen code or test
+- generate skill.test.py with fixture data embedded inline (no separate mock_data.json), and run it automatically
+    - on failure, decide regen code, contract, or test
         - whichever you re-run, feed error and existing code and test files into context
     - on success, proceed to config.json section below
 

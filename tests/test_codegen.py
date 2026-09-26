@@ -29,7 +29,7 @@ from semif_agent.codegen import (
     parse_data_contract,
     parse_elicitation,
     parse_skill_body,
-    parse_testgen_bundle,
+    parse_skill_test,
     read_skill_contract,
     read_testgen_contract,
     regenerate_skill_body,
@@ -64,15 +64,11 @@ GOOD_CONTRACT = {
     "tracking_id": "The package tracking number.",
 }
 
-GOOD_MOCK = {"sender_address": "agent@example.com", "tracking_id": "AB123"}
-
 GOOD_TEST = """\
 import sys
 print("ok")
 sys.exit(0)
 """
-
-GOOD_BUNDLE = json.dumps({"test": GOOD_TEST, "mock_data": GOOD_MOCK})
 
 
 def test_read_skill_contract_loads_contract():
@@ -128,6 +124,18 @@ def test_testgen_contract_owns_mocking():
     assert "single JSON object" in text
     assert "semantic description" in text
     assert "Do NOT put type declarations" in text
+
+
+def test_testgen_contract_embeds_fixtures_inline():
+    """TESTGEN.md must make the test self-contained: fixture data embedded
+    inline as Python literals, no external mock_data.json."""
+    text = read_testgen_contract()
+    assert "mock_data.json" not in text
+    assert "inline" in text
+    assert "no external files" in text
+    assert "import skill" in text
+    assert "Worked example" in text
+    assert "FIXTURES" in text
 
 
 def test_build_skill_body_prompt_includes_contract_request_and_draft():
@@ -237,20 +245,17 @@ def test_store_roundtrip_all_deliverables(tmp_path):
     store = SkillStore(str(tmp_path / "skills"))
     store.write_body("tracking", "probe", GOOD_BODY)
     store.write_contract("tracking", "probe", GOOD_CONTRACT)
-    store.write_mock("tracking", "probe", GOOD_MOCK)
     store.write_test("tracking", "probe", GOOD_TEST)
     store.write_config("tracking", "probe", {"sender_address": "agent@example.com"})
     directory = store.dir("tracking", "probe")
     assert sorted(p.name for p in directory.iterdir()) == [
         "config.json",
         "contract.json",
-        "mock_data.json",
         "skill.py",
         "skill.test.py",
     ]
     assert store.read_contract("tracking", "probe") == GOOD_CONTRACT
     assert store.read_config("tracking", "probe") == {"sender_address": "agent@example.com"}
-    assert store.read_mock("tracking", "probe") == GOOD_MOCK
     assert store.read_category_config("tracking") == {}
 
 
@@ -1539,40 +1544,40 @@ def test_generate_data_contract_exhausts_attempts(tmp_path):
 
 # ---- test artifacts ----
 
-def test_parse_testgen_bundle_accepts_forms():
-    test, mock = parse_testgen_bundle(GOOD_BUNDLE)
-    assert test == GOOD_TEST.strip()
-    assert mock == GOOD_MOCK
-    fenced = json.dumps({"test": "```python\n" + GOOD_TEST + "```", "mock_data": GOOD_MOCK})
-    test, mock = parse_testgen_bundle(fenced)
-    assert test == GOOD_TEST.strip()
-    assert mock == GOOD_MOCK
+def test_parse_skill_test_accepts_forms():
+    assert parse_skill_test(GOOD_TEST) == GOOD_TEST.strip()
+    fenced = "```python\n" + GOOD_TEST + "```"
+    assert parse_skill_test(fenced) == GOOD_TEST.strip()
+    wrapped = json.dumps({"code": GOOD_TEST})
+    assert parse_skill_test(wrapped) == GOOD_TEST.strip()
     with pytest.raises(ValueError):
-        parse_testgen_bundle('{"test": "def x(:"}')
+        parse_skill_test("def x(:")
     with pytest.raises(ValueError):
-        parse_testgen_bundle('{"mock_data": {}}')
+        parse_skill_test("")
     with pytest.raises(ValueError):
-        parse_testgen_bundle('{"test": "", "mock_data": {}}')
+        parse_skill_test("some prose without code")
 
 
 def test_generate_skill_tests_shares_contract_context(tmp_path):
     """Decoupled call: the testgen call shares the contract call's base context
-    and continues it with the accepted contract as the assistant turn."""
-    httpd, base = _sequenced_server([GOOD_BUNDLE])
+    and continues it with the accepted contract as the assistant turn; the reply
+    is plain Python (fixtures embedded inline), not a JSON envelope."""
+    httpd, base = _sequenced_server([GOOD_TEST])
     try:
         client = CodegenClient(base_url=base, model="test", timeout=10)
         draft = SkillDraft(name="probe", description="Probe the service.")
-        test, mock = generate_skill_tests(
+        test = generate_skill_tests(
             client, Request("is the service up?"), "tracking", draft, GOOD_BODY, GOOD_CONTRACT
         )
         assert test == GOOD_TEST.strip()
-        assert mock == GOOD_MOCK
         messages = httpd.RequestHandlerClass.received[0]["messages"]
         roles = [m["role"] for m in messages]
         assert roles == ["system", "user", "assistant", "user"]
         assert messages[2]["content"] == json.dumps(GOOD_CONTRACT)
         assert "skill.test.py" in messages[3]["content"]
-        assert "mock_data.json" in messages[3]["content"]
+        assert "valid Python" in messages[3]["content"]
+        assert "no JSON" in messages[3]["content"]
+        assert "mock_data.json" not in messages[3]["content"]
     finally:
         httpd.shutdown()
         httpd.server_close()

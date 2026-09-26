@@ -119,10 +119,11 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         return check
 
     def make_regen_decision(run_id: str):
-        """4-option SemIf decision on a failing skill test: which artifact to
-        regenerate (code, contract, test, mock data). Recorded as a trace-only
-        event (kind `codegen_regen`) — never in the decision log. Engine
-        unavailable at call time degrades to `regen_test`."""
+        """3-option SemIf decision on a failing skill test: which artifact to
+        regenerate (code, contract, or test — fixture data lives inside the
+        test, so a fixture fix is a test regen). Recorded as a trace-only event
+        (kind `codegen_regen`) — never in the decision log. Engine unavailable
+        at call time degrades to `regen_test`."""
         def decide(reason: str) -> str:
             decision = DecisionRequest(
                 state=f"[testgen {codegen.model}] skill test failed. {reason[-1200:]}",
@@ -131,7 +132,6 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
                     Option("regen_code", "Regenerate the skill body code."),
                     Option("regen_test", "Regenerate the test only."),
                     Option("regen_contract", "Regenerate the data contract."),
-                    Option("regen_mock_data", "Regenerate the mock data."),
                 ],
             )
             try:

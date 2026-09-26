@@ -937,7 +937,7 @@ def generate_requirements(
     return []
 
 
-# ---- data contract + test artifacts ----
+# ---- data contract + test ----
 
 TESTGEN_CONTRACT = Path(__file__).resolve().parent.parent / "TESTGEN.md"
 CONTRACT_VARIABLE_RE = re.compile(r"[a-z0-9_]+")
@@ -961,7 +961,7 @@ def build_testgen_base_prompt(
     context but produce distinct artifacts.
     """
     system = (
-        "You produce the data contract and test artifacts for a skill body of a "
+        "You produce the data contract and test for a skill body of a "
         "local agent. The contract below is authoritative: follow it exactly.\n\n"
         f"{contract_md}"
     )
@@ -1054,18 +1054,19 @@ def build_testgen_request_prompt(
     target: str | None = None,
 ) -> list[dict]:
     user = (
-        "Generate the test artifacts now: skill.test.py (stdlib-only, runnable "
-        "as `python skill.test.py`, exit 0 on pass, exercising predict and act "
-        "against mock_data.json in the same folder) and mock_data.json "
-        "(fixtures satisfying the contract above)."
+        "Generate the test now: skill.test.py, a stdlib-only Python script, "
+        "runnable as `python skill.test.py` from the skill folder (exit 0 on "
+        "pass, non-zero on failure). It exercises the skill's predict and act "
+        "against fixture data embedded directly in the test as inline Python "
+        "literals — no external files, no network, no writes outside the folder."
     )
     if target:
         user += f"\nFocus the fix on the {target.removeprefix('regen_')}."
     if note:
         user += f"\nNote: {note}"
     user += (
-        '\nReply with ONLY a JSON object: {"test": "<python code>", '
-        '"mock_data": <json>}. No prose, no markdown fences.'
+        "\nReply with ONLY valid Python for skill.test.py. No prose, no "
+        "markdown fences, no JSON."
     )
     return base + [
         {"role": "assistant", "content": json.dumps(contract)},
@@ -1073,40 +1074,39 @@ def build_testgen_request_prompt(
     ]
 
 
-def parse_testgen_bundle(raw: str) -> tuple[str, dict]:
-    """Extract and validate (skill.test.py code, mock_data) from a JSON reply."""
+def parse_skill_test(raw: str) -> str:
+    """Extract and validate skill.test.py from the model's reply.
+
+    Accepts bare code, ```fenced``` code, or JSON {"code": "..."}. The test
+    must parse as Python. Returns the cleaned source. Raises ValueError
+    otherwise.
+    """
     text = raw.strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"testgen reply is not a JSON object: {raw!r}")
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except ValueError as exc:
-        raise ValueError(f"testgen reply is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("testgen reply must be a JSON object")
-    test = parsed.get("test")
-    mock = parsed.get("mock_data")
-    if not isinstance(test, str) or not test.strip():
-        raise ValueError("testgen reply must carry a non-empty `test` string")
-    if not isinstance(mock, (dict, list)):
-        raise ValueError("testgen reply must carry `mock_data` as an object or array")
+    if "code" in text[:400] and "{" in text and "}" in text:
+        start, end = text.find("{"), text.rfind("}")
+        try:
+            parsed = json.loads(text[start : end + 1])
+            candidate = parsed.get("code")
+            if isinstance(candidate, str):
+                text = candidate.strip()
+        except (ValueError, AttributeError):
+            pass
     for fence in ("```python", "```py", "```"):
-        start_idx = test.find(fence)
-        if start_idx != -1:
-            test = test[start_idx + len(fence):]
-            close = test.rfind("```")
+        start = text.find(fence)
+        if start != -1:
+            text = text[start + len(fence):]
+            close = text.rfind("```")
             if close != -1:
-                test = test[:close]
+                text = text[:close]
             break
-    test = test.strip()
-    if not test:
-        raise ValueError("testgen reply's test is empty")
+    text = text.strip()
+    if not text:
+        raise ValueError("skill test is empty")
     try:
-        ast.parse(test, filename="<generated test>")
+        ast.parse(text, filename="<generated test>")
     except SyntaxError as exc:
         raise ValueError(f"skill test is not valid Python: {exc}") from exc
-    return test, mock
+    return text
 
 
 def generate_skill_tests(
@@ -1119,13 +1119,14 @@ def generate_skill_tests(
     contract_md: str | None = None,
     reason: str | None = None,
     target: str | None = None,
-) -> tuple[str, dict]:
-    """Generate skill.test.py + mock_data.json against the finished body.
+) -> str:
+    """Generate skill.test.py against the finished body.
 
     Shares the base context with the contract call (TESTGEN.md + skill.py) and
-    continues it with the accepted contract, so the artifacts stay compatible
-    with the body and the contract. Escalates on parse failure; `reason` +
-    `target` drive a corrective regeneration.
+    continues it with the accepted contract, so the test stays compatible with
+    the body and the contract. Fixture data is embedded inline in the test.
+    Escalates on parse failure; `reason` + `target` drive a corrective
+    regeneration.
     """
     contract_text = contract_md if contract_md is not None else read_testgen_contract()
     attempts = max(client.max_attempts, 1)
@@ -1148,7 +1149,7 @@ def generate_skill_tests(
                 messages,
                 **(ESCALATED_SAMPLER if attempt > 1 else {}),
             )
-            return parse_testgen_bundle(raw)
+            return parse_skill_test(raw)
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"testgen reply rejected {attempts} times: {last_error}")
@@ -1225,9 +1226,10 @@ def regenerate_skill_body(
 def run_skill_test(skill_dir: str | Path, timeout: float = 30.0) -> tuple[bool, str]:
     """Run skill.test.py in its folder as a subprocess.
 
-    cwd is the skill folder so mock_data.json is reachable at ./mock_data.json.
-    Returns (passed, captured output). A non-zero exit or a timeout is a
-    failure; the output feeds the regen decision and corrective prompts.
+    cwd is the skill folder so the test can import the `skill` module; its
+    fixture data is embedded inline, so no external files are needed. Returns
+    (passed, captured output). A non-zero exit or a timeout is a failure; the
+    output feeds the regen decision and corrective prompts.
     """
     cwd = Path(skill_dir)
     script = cwd / "skill.test.py"
