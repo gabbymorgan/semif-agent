@@ -71,6 +71,8 @@ class Skill:
     writing: bool = False
     config: dict = field(default_factory=dict)
     contract: dict = field(default_factory=dict)
+    integration: dict = field(default_factory=dict)
+    integration_source: str = "unknown"
 
     def is_noop(self) -> bool:
         """A stub leaf: authored (title + description) but no runnable body yet."""
@@ -121,13 +123,15 @@ class SkillDraft:
 
     `requirements` maps elicitation questions (asked of the human during
     authoring) to their answers; they are fed to the body-writer so the body
-    reflects the refined product goal.
+    reflects the refined product goal. `integration` carries the service and
+    transport the answers point at, so the body writer implements exactly that.
     """
 
     name: str
     description: str
     code: str = ""
     requirements: dict[str, str] = field(default_factory=dict)
+    integration: dict = field(default_factory=dict)
 
 
 class CategoryRegistry:
@@ -153,21 +157,29 @@ class CategoryRegistry:
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
     def register_skill(
-        self, category: str, name: str, description: str, request_text: str = ""
+        self,
+        category: str,
+        name: str,
+        description: str,
+        request_text: str = "",
+        requirements: dict[str, str] | None = None,
     ) -> None:
         """Add a skill leaf to a category, creating the category entry if needed.
 
         `request_text` is the originating request, kept so a later restart of the
-        stub can re-drive codegen with the same context.
+        stub can re-drive codegen with the same context. `requirements` are the
+        elicitation answers, kept so a restart does not have to ask again.
         """
         categories = self.read()
         entry = categories.setdefault(category, {"description": "", "skills": []})
         skills = entry.setdefault("skills", [])
         entry_row = next((s for s in skills if s.get("name") == name), None)
         if entry_row is None:
-            skills.append({"name": name, "description": description, "request_text": request_text})
-        else:
-            entry_row["request_text"] = request_text
+            entry_row = {"name": name, "description": description}
+            skills.append(entry_row)
+        entry_row["request_text"] = request_text
+        if requirements:
+            entry_row["requirements"] = requirements
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
@@ -272,13 +284,25 @@ def load_skill_module(category: str, name: str, base: str = "data/skills"):
     return module
 
 
+def _extract_integration(code: str) -> tuple[dict, str]:
+    """Integration declaration (or inference) for a body, lazily.
+
+    Lives in codegen.py; imported here so skills.py stays free of codegen at
+    module import time (codegen imports skills).
+    """
+    from .codegen import extract_integration
+
+    return extract_integration(code)
+
+
 def materialize_skill(
     draft: SkillDraft, category: str, store: SkillStore
 ) -> Skill:
     """Persist the draft's code body and build a runnable Skill from it.
 
     The skill's config and contract are read back from the store so the runner
-    can resolve its data needs across restarts.
+    can resolve its data needs across restarts; its integration declaration is
+    extracted from the body so the tree can show what it talks to.
     """
     if not draft.code:
         raise ValueError(f"skill {draft.name} has no code body to materialize")
@@ -291,6 +315,7 @@ def materialize_skill(
         getattr(module, "act", None)
     ):
         raise ValueError(f"skill {category}.{draft.name} body must define predict and act")
+    integration, integration_source = _extract_integration(draft.code)
     return Skill(
         name=draft.name,
         category=category,
@@ -299,6 +324,8 @@ def materialize_skill(
         act=module.act,
         config=store.read_config(category, draft.name),
         contract=store.read_contract(category, draft.name),
+        integration=integration,
+        integration_source=integration_source,
     )
 
 
@@ -322,6 +349,11 @@ def merge_skill_store(
             module = load_skill_module(category, name, store.path)
         except Exception:
             continue
+        code_path = store.dir(category, name) / "skill.py"
+        try:
+            integration, integration_source = _extract_integration(code_path.read_text())
+        except OSError:
+            integration, integration_source = {}, "unknown"
         skill = Skill(
             name=name,
             category=category,
@@ -330,6 +362,8 @@ def merge_skill_store(
             act=module.act,
             config=store.read_config(category, name),
             contract=store.read_contract(category, name),
+            integration=integration,
+            integration_source=integration_source,
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):

@@ -175,10 +175,37 @@ def try_warm(scheduler: Scheduler) -> str:
         return f"decision engine unavailable: {exc}"
 
 
+def _answer_questions(scheduler: Scheduler) -> None:
+    """Ask any deferred authoring/repair questions at the REPL."""
+    while True:
+        pending = scheduler.pending_questions()
+        if not pending:
+            return
+        question = pending[0]
+        answer = input(
+            f"[{question['skill']}] {question['question']}\n"
+            "answer (empty to skip): "
+        )
+        status, detail = scheduler.answer_question(question["id"], answer)
+        print(f"[{status}] {detail}")
+
+
+def _print_repairs(scheduler: Scheduler) -> None:
+    for offer in scheduler.pending_repairs():
+        print(
+            f"[repair] {offer['id']}  {offer['category']}.{offer['skill']}  "
+            f"suggested={offer['selected']}  {offer['failure'][:120]}"
+        )
+
+
 def repl(scheduler: Scheduler, config: dict) -> None:
     scheduler.asker = lambda question: input(f"{question} ")
     print(try_warm(scheduler))
-    print("type a request, or one of: busy <text> | idle | status | skills | dream | relabel <id> <outcome> | restart <category> <skill> | quit")
+    print(
+        "type a request, or one of: busy <text> | idle | status | skills | dream | "
+        "relabel <id> <outcome> | restart <category> <skill> | "
+        "repairs | repair <offer-id> [action] | quit"
+    )
     while True:
         try:
             line = input("> ").strip()
@@ -198,6 +225,22 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             continue
         if lower == "dream":
             print(run_dream(scheduler.log).render())
+            continue
+        if lower == "repairs":
+            _print_repairs(scheduler)
+            continue
+        if lower.startswith(("repair ", "/repair ")):
+            parts = line.lstrip("/").split()
+            if len(parts) not in (2, 3):
+                print("usage: repair <offer-id> [retry|repair_skill|ask_user|no_repair]")
+                continue
+            status, detail = scheduler.resolve_repair(
+                parts[1], parts[2] if len(parts) == 3 else None
+            )
+            print(f"[{status}] {detail}")
+            _answer_questions(scheduler)
+            for result_status, result_detail in scheduler.run_queue():
+                print(f"[{result_status}] {result_detail}")
             continue
         if lower.startswith("relabel "):
             parts = line.split()
@@ -231,6 +274,8 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             print(f"[{status}] {detail}")
         for result_status, result_detail in scheduler.run_queue():
             print(f"[{result_status}] {result_detail}")
+        _answer_questions(scheduler)
+        _print_repairs(scheduler)
 
 
 def scripted(scheduler: Scheduler, path: str) -> None:
@@ -292,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "dashboard":
         from .dashboard import serve
 
+        scheduler.defer_questions = True
         if args.replay:
             print("replay mode: reading decision log + trace; engine not warmed.")
         serve(scheduler, port=args.port, host=args.host)

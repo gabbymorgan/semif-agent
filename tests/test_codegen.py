@@ -16,18 +16,24 @@ from pathlib import Path
 import pytest
 
 from semif_agent.codegen import (
+    BODY_DIRECTIVES,
     CodegenClient,
     CodegenError,
     DegenerationError,
     _retry_prompt,
     build_elicitation_prompt,
     build_skill_body_prompt,
+    extract_integration,
     generate_data_contract,
     generate_requirements,
     generate_skill_body,
     generate_skill_tests,
+    infer_integration,
+    integration_findings,
     parse_data_contract,
     parse_elicitation,
+    parse_elicitation_result,
+    parse_integration,
     parse_skill_body,
     parse_skill_test,
     read_skill_contract,
@@ -51,6 +57,12 @@ from semif_agent.skills import (
 GOOD_BODY = """\
 from semif_agent.decisions import DecisionRequest, Option
 from semif_agent.skills import ActionResult, Prediction
+
+INTEGRATION = {
+    "service": "probe_service",
+    "transport": "compute",
+    "config_vars": [],
+}
 
 def predict(ctx, request):
     return Prediction(text="ok", decisions=[])
@@ -128,14 +140,17 @@ def test_testgen_contract_owns_mocking():
 
 def test_testgen_contract_embeds_fixtures_inline():
     """TESTGEN.md must make the test self-contained: fixture data embedded
-    inline as Python literals, no external mock_data.json."""
+    inline as Python literals, no external mock_data.json. The test is a
+    hermetic mechanics check, not proof of the live integration."""
     text = read_testgen_contract()
     assert "mock_data.json" not in text
     assert "inline" in text
     assert "no external files" in text
+    assert "hermetic" in text
     assert "import skill" in text
     assert "Worked example" in text
-    assert "FIXTURES" in text
+    assert "ThreadingHTTPServer" in text
+    assert "not** proof that the real integration works" in text
 
 
 def test_build_skill_body_prompt_includes_contract_request_and_draft():
@@ -1379,7 +1394,12 @@ def test_other_codegen_error_does_not_retry():
         draft = SkillDraft(name="probe", description="Probe the service.")
         with pytest.raises(CodegenError, match="token budget"):
             generate_skill_body(
-                client, Request("is the service up?"), "tracking", draft, tree
+                client,
+                Request("is the service up?"),
+                "tracking",
+                draft,
+                tree,
+                contract="SHORT CONTRACT",
             )
         assert httpd.RequestHandlerClass.chat_calls == 1
     finally:
@@ -1397,15 +1417,16 @@ def test_elicitation_prompt_contains_examples_and_antipatterns():
     )
     system = messages[0]["content"]
     joined = messages[1]["content"]
-    assert "requirements only" in system
-    assert "should the sender address change?" in system
     assert "product goal" in system
+    assert "HOW the skill will connect" in system
+    assert "should the sender address change?" in system
     assert "tracking" in joined
     for example in (
-        "just produce a draft you review and approve first",
-        "should the skill ask you which one, or automatically pick",
-        "report 'not found' as a normal result",
-        "a short message back to you, or a file/report saved to disk",
+        "against the live service, or produce a reviewable draft",
+        "how should it connect",
+        "How does it authenticate",
+        "successful run look like",
+        "fail loudly",
     ):
         assert example in system
 
@@ -1627,3 +1648,177 @@ def test_regenerate_skill_body_rewrites(tmp_path):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ---- real-action contract + integration declaration ----
+
+def test_skill_contract_directs_real_actions():
+    """SKILL.md must forbid simulation and name the stdlib transports a body
+    uses for real integrations; fixture addresses must not appear in the body."""
+    text = read_skill_contract()
+    assert "Perform the real action" in text
+    assert "Never simulate success" in text
+    assert "urllib.request" in text
+    assert "imaplib" in text
+    assert "subprocess" in text
+    assert "No test fixtures at runtime" in text
+    assert "INTEGRATION" in text
+    assert "http|caldav|imap|smtp|pop|subprocess|file|compute" in text
+
+
+def test_skill_contract_lists_all_transports():
+    text = read_skill_contract()
+    for transport in ("caldav", "imap", "smtp", "pop", "compute"):
+        assert transport in text
+
+
+def test_body_prompts_require_real_action_and_integration():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = build_skill_body_prompt(
+        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
+    )
+    joined = messages[1]["content"]
+    assert "Perform the real action" in joined
+    assert "INTEGRATION" in joined
+    assert "hermetic mechanics check" in joined
+    retry = _retry_prompt(
+        Request("check if the service is up"),
+        "tracking",
+        draft,
+        "THE CONTRACT",
+        ValueError("bad"),
+    )
+    assert "INTEGRATION" in retry[1]["content"]
+    assert BODY_DIRECTIVES in retry[1]["content"]
+
+
+def test_retry_prompt_carries_requirements():
+    messages = _retry_prompt(
+        Request("check if the service is up"),
+        "tracking",
+        SkillDraft(name="probe", description="Probe the service."),
+        "THE CONTRACT",
+        ValueError("bad"),
+        requirements={"Which service?": "Nextcloud"},
+    )
+    joined = messages[1]["content"]
+    assert "Requirements gathered from the product owner" in joined
+    assert "Which service? -> Nextcloud" in joined
+
+
+def test_regen_prompt_carries_requirements_and_kind():
+    from semif_agent.codegen import _regen_body_prompt
+
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = _regen_body_prompt(
+        Request("send the report"),
+        "tracking",
+        draft,
+        "THE CONTRACT",
+        GOOD_BODY,
+        "act returned a canned result",
+        requirements={"Should it really send?": "yes"},
+        reason_kind="fidelity",
+    )
+    joined = messages[1]["content"]
+    assert "does not really perform the requested action" in joined
+    assert "Should it really send? -> yes" in joined
+    assert "Review finding" in joined
+
+
+def test_parse_integration_valid_declaration():
+    assert parse_integration(GOOD_BODY) == {
+        "service": "probe_service",
+        "transport": "compute",
+        "config_vars": [],
+    }
+
+
+def test_parse_integration_rejects_bad_shapes():
+    cases = [
+        "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n",
+        'INTEGRATION = ["http"]\n',
+        'INTEGRATION = {"service": "Bad Service", "transport": "http", "config_vars": []}\n',
+        'INTEGRATION = {"service": "ok", "transport": "carrier_pigeon", "config_vars": []}\n',
+        'INTEGRATION = {"service": "ok", "transport": "http", "config_vars": [1]}\n',
+        'INTEGRATION = {"service": "ok", "transport": "http", "config_vars": "nope"}\n',
+    ]
+    for raw in cases:
+        with pytest.raises(ValueError):
+            parse_integration(raw)
+
+
+def test_infer_integration_detects_transports():
+    http_body = (
+        "import urllib.request\n"
+        "def predict(ctx, request):\n    return None\n"
+        "def act(ctx, request, prediction):\n"
+        "    return urllib.request.urlopen(ctx.config['service_url'])\n"
+    )
+    assert infer_integration(http_body)["transport"] == "http"
+    assert "service_url" in infer_integration(http_body)["config_vars"]
+    plain = "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n"
+    assert infer_integration(plain)["transport"] == "compute"
+    assert infer_integration("not python at all !!!")["transport"] == "compute"
+
+
+def test_extract_integration_source_declared_or_inferred():
+    integration, source = extract_integration(GOOD_BODY)
+    assert source == "declared"
+    plain = "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n"
+    integration, source = extract_integration(plain)
+    assert source == "inferred"
+    assert integration["service"] == "unknown"
+
+
+def test_integration_findings_flag_mismatches():
+    declared = {
+        "service": "mail",
+        "transport": "smtp",
+        "config_vars": ["smtp_host"],
+    }
+    code = (
+        "INTEGRATION = {'service': 'mail', 'transport': 'smtp', 'config_vars': ['smtp_host']}\n"
+        "def predict(ctx, request):\n    return None\n"
+        "def act(ctx, request, p):\n    return None\n"
+    )
+    findings = integration_findings(declared, "declared", code)
+    assert any("no smtp calls" in finding for finding in findings)
+    assert any("smtp_host" in finding for finding in findings)
+    assert integration_findings(
+        {"service": "probe", "transport": "compute", "config_vars": []}, "declared", code
+    ) == []
+    inferred = integration_findings(
+        {"service": "unknown", "transport": "compute", "config_vars": []},
+        "inferred",
+        code,
+    )
+    assert any("INTEGRATION" in finding for finding in inferred)
+
+
+def test_parse_elicitation_result_reads_integration_hint():
+    result = parse_elicitation_result(
+        '{"questions": ["Which service?"], '
+        '"integration": {"service": "nextcloud_calendar", "transport": "caldav"}}'
+    )
+    assert result.questions == ["Which service?"]
+    assert result.integration == {"service": "nextcloud_calendar", "transport": "caldav"}
+    bad = parse_elicitation_result(
+        '{"questions": [], "integration": {"service": "Nope!", "transport": "smtp"}}'
+    )
+    assert bad.integration == {}
+
+
+def test_testgen_prompt_requires_loopback_fixture_and_hermeticity():
+    base = [
+        {"role": "system", "content": "TESTGEN"},
+        {"role": "user", "content": "body"},
+    ]
+    from semif_agent.codegen import build_testgen_request_prompt
+
+    messages = build_testgen_request_prompt(base, GOOD_CONTRACT)
+    joined = messages[-1]["content"]
+    assert "HERMETIC" in joined
+    assert "loopback" in joined
+    assert "never simulate the action" in joined.lower()

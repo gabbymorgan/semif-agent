@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from semif_agent.cli import build_scheduler, load_config
-from semif_agent.codegen import CodegenClient, generate_data_contract, generate_skill_body, generate_skill_tests
+from semif_agent.codegen import (
+    CodegenClient,
+    generate_data_contract,
+    generate_skill_body,
+    generate_skill_tests,
+    parse_integration,
+)
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
@@ -155,11 +161,14 @@ def test_generate_skill(tmp_path):
 
 
 def test_generate_skill_body_codegen(tmp_path):
-    """A real OpenAI-compatible model writes a runnable skill body + data
-    contract + test, and the auto-run test passes.
+    """A real OpenAI-compatible model writes a real-integration skill body +
+    data contract + hermetic test, and the auto-run test passes.
 
-    Slow: uses the big codegen model (qwen38-iq3s by default). Run this one in
-    the background and poll — long-lived ssh sessions get SIGHUP'd.
+    The body must perform the action via a stdlib transport and declare
+    INTEGRATION; the test is a hermetic mechanics check (loopback for HTTP), not
+    proof of the live integration. Slow: uses the big codegen model
+    (qwen38-iq3s by default). Run this one in the background and poll —
+    long-lived ssh sessions get SIGHUP'd.
     """
     config = load_config()
     require_real(config)
@@ -173,23 +182,41 @@ def test_generate_skill_body_codegen(tmp_path):
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(
         name="check_service",
-        description="Check whether a service is reachable.",
+        description="Check whether an HTTP service is reachable.",
     )
+    requirements = {
+        "How should it connect?": (
+            "HTTP GET the service_url from config (no auth) and report the "
+            "status code; treat a non-2xx or unreachable host as a failure."
+        ),
+        "Should it use a test fixture address?": "No; the endpoint comes from config.",
+    }
+    request = Request("check whether my home server is reachable")
     code = generate_skill_body(
         client,
-        Request("is my home server reachable right now?"),
+        request,
         "tracking",
         draft,
         tree,
+        requirements=requirements,
     )
     print(f"generated {len(code)} bytes of skill body")
+    integration = parse_integration(code)
+    print(f"integration: {integration}")
+    assert integration["transport"] in ("http", "caldav")
+    assert "urllib.request" in code or "http.client" in code, (
+        "a service-backed body must call the service with a stdlib transport"
+    )
+    assert "127.0.0.1" not in code and "localhost" not in code, (
+        "the body must take its endpoint from ctx.config, never a fixture"
+    )
     contract = generate_data_contract(
-        client, Request("is my home server reachable right now?"), "tracking", draft, code
+        client, request, "tracking", draft, code
     )
     print(f"data contract: {contract}")
     test = generate_skill_tests(
         client,
-        Request("is my home server reachable right now?"),
+        request,
         "tracking",
         draft,
         code,
@@ -211,6 +238,71 @@ def test_generate_skill_body_codegen(tmp_path):
     skill = materialize_skill(draft, "tracking", store)
     assert callable(skill.predict) and callable(skill.act)
     assert skill.contract == contract
+    assert skill.integration["transport"] in ("http", "caldav")
+
+
+def test_review_skill_body_real_llm():
+    """The real self-assessment model must flag a simulated body and accept a
+    body that really performs the action."""
+    from semif_agent.llm import LLMClient
+
+    config = load_config()
+    llm_cfg = config.get("llm", {})
+    client = LLMClient(
+        base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
+        model=llm_cfg.get("model", "qwen3.5:4b"),
+        timeout=120.0,
+    )
+    toy = '''\
+INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_id"]}
+
+def predict(ctx, request):
+    return Prediction(text="ok", decisions=[])
+
+def act(ctx, request, prediction):
+    return ActionResult(
+        action_log=f"Package {ctx.config['tracking_id']} is delivered.",
+        new_state="delivered",
+    )
+'''
+    review = client.review_skill_body(
+        "tell me if my package was delivered",
+        "Check a package's delivery status.",
+        toy,
+        integration={"service": "carrier", "transport": "http", "config_vars": ["tracking_id"]},
+    )
+    print(f"toy verdict: {review.performs_real_action} — {review.reason}")
+    assert review.performs_real_action is False, (
+        "a canned status with no real lookup must be rejected"
+    )
+
+    real = '''\
+import json
+import urllib.request
+
+INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]}
+
+def predict(ctx, request):
+    return Prediction(text="ok", decisions=[])
+
+def act(ctx, request, prediction):
+    with urllib.request.urlopen(ctx.config["tracking_url"], timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return ActionResult(
+        action_log=f"carrier returned status {payload['status']}",
+        new_state=payload["status"],
+    )
+'''
+    review = client.review_skill_body(
+        "tell me if my package was delivered",
+        "Check a package's delivery status.",
+        real,
+        integration={"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]},
+    )
+    print(f"real verdict: {review.performs_real_action} — {review.reason}")
+    assert review.performs_real_action is True, (
+        "a body that really calls the carrier API must be accepted"
+    )
 
 
 def test_create_skill_empty_category_does_not_wedge(tmp_path):

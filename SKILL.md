@@ -10,17 +10,23 @@ contract, `TESTGEN.md`. This file is about the runnable body only.
 
 ## What a skill is
 
+Semif-agent is an end-user application: an everyday person asks it to do a task,
+and it does that task for real against their actual service. A skill is the
+thing that does it.
+
 A skill is a **leaf** in the agent's skill tree, reached by a chain of SemIf
 decisions (category -> skill). It is one specific, single-purpose action the
 agent can take — never a broad bucket (that is a category's job). It runs the
 standard skill loop: observe -> predict -> act -> observe -> assess.
 
-A skill is two things:
+A skill is three things:
 
 1. **A manifest** — the registry entry that makes it navigable and describes
    what it does.
 2. **A code body** — a runnable Python module implementing the `predict` and
-   `act` phases.
+   `act` phases against a real service.
+3. **An integration declaration** — the `INTEGRATION` module constant saying
+   which real system the body talks to and how.
 
 ## Manifest schema
 
@@ -51,7 +57,7 @@ def predict(ctx, request) -> Prediction:
     """Forecast + make any SemIf sub-decisions. Return the prediction."""
 
 def act(ctx, request, prediction) -> ActionResult:
-    """Execute the action. Return the result + new state."""
+    """Execute the action for real. Return the result + new state."""
 ```
 
 - `ctx` is an `ActionContext` with `ctx.engine` (the real SemIf engine) and
@@ -65,10 +71,52 @@ def act(ctx, request, prediction) -> ActionResult:
   logged as training rows. `needs_input` carries a question for the human; see
   the rules below.
 
+### Integration declaration
+
+Every body defines a module-level `INTEGRATION` dict: the real system this
+skill acts on. Flat, string-valued, and honest — it must match what the body
+actually does.
+
+```python
+INTEGRATION = {
+    "service": "nextcloud_calendar",
+    "transport": "caldav",
+    "config_vars": ["nextcloud_url", "nextcloud_username", "nextcloud_app_password"],
+}
+```
+
+- `service` — short snake_case id of the real system (e.g. `gmail`,
+  `nextcloud_calendar`, `simplex`, `local_files`).
+- `transport` — exactly one of `http`, `caldav`, `imap`, `smtp`, `pop`,
+  `subprocess`, `file`, `compute`
+  (`http|caldav|imap|smtp|pop|subprocess|file|compute`). `compute` is only for
+  skills that perform no external action at all (pure analysis/formatting); an
+  action skill must not use it.
+- `config_vars` — the `ctx.config` keys the body reads for this integration
+  (the same names the data contract collects). Empty list allowed for `compute`.
+
+The auto-run test is a hermetic mechanics check and never exercises the live
+service, so this declaration is how the agent knows what the skill was built to
+talk to. Declaring a transport the body does not use is a broken skill.
+
 ### Rules (hard requirements)
 
-- **Stdlib only.** No third-party imports, no files outside the project. The
-  core agent is pure-stdlib and runs on the thin dev box.
+- **Perform the real action.** If the skill's purpose involves an external
+  system, `act` must perform the real operation against the user's configured
+  service — using the endpoint, account, credential, and CLI-path values the
+  runner provides through `ctx.config`. Never simulate success, never return a
+  canned result as if the action happened, and never silently downgrade to "a
+  draft you can review": draft-only is allowed only when the requirements say
+  so. If the service is unreachable, auth fails, or a tool is missing, report
+  the real failure in `action_log` / `new_state` (status code, exception, or
+  message) — the agent will offer to fix or learn from it.
+- **Stdlib only, transports included.** No third-party imports, no files
+  outside the project. Use stdlib transports for real integrations:
+  `urllib.request` / `http.client` for HTTP, `imaplib` / `smtplib` / `poplib`
+  for mail, `subprocess` to invoke a local CLI at the absolute path given in
+  `ctx.config` (check it exists first), file I/O under configured data dirs
+  for file integrations. Do not assume a tool, library, or config value
+  exists; fail honestly when it does not.
 - **No mocking.** Sub-decisions use the real engine: build a
   `DecisionRequest(state, question, options=[Option(id, description), ...])`
   and call `ctx.engine.call(decision)`; return it inside `Prediction.decisions`.
@@ -78,12 +126,16 @@ def act(ctx, request, prediction) -> ActionResult:
 - **Data comes from the runner, never from you.** A skill body is executed
   across many requests and owns no working data. Every operational value is
   provided by the runner through `ctx.config` under a clear snake_case name —
-  request data from the runner, never embed or fabricate working values, never
-  invent mock data, and never ask the human for operational data. Whether a
-  value is remembered across runs (config) or collected fresh each fire (input)
-  is decided by the config step at first fire — treat every variable the same
-  here: read it from `ctx.config`. Choose names a reader can extract into a
-  contract (e.g. `sender_address`, `tracking_id`).
+  endpoints, accounts, credentials, CLI paths, identifiers. Request data from
+  the runner; never embed or fabricate working values, never invent mock data,
+  and never ask the human for operational data. Whether a value is remembered
+  across runs (config) or collected fresh each fire (input) is decided by the
+  config step at first fire — treat every variable the same here: read it from
+  `ctx.config`. Choose names a reader can extract into a contract (e.g.
+  `sender_address`, `tracking_id`, `nextcloud_url`).
+- **No test fixtures at runtime.** A body must never contain a hardcoded
+  localhost/loopback address, a test port, or fixture data. Which environment
+  it talks to is `ctx.config`'s decision, never the code's.
 - **Request input for clarification when requirements are unclear from the
   prompt.** If the human's intent is ambiguous, do not guess: return an
   `ActionResult(action_log="...", new_state=request.text, needs_input="<question>")`.
@@ -103,11 +155,13 @@ def act(ctx, request, prediction) -> ActionResult:
 - Avoid duplicating an existing skill in the same category.
 - `predict` resolves ambiguity (arguments, recipients, targets) with SemIf
   sub-decisions, mirroring how `email.compose` resolves its recipient.
-- `act` performs the concrete action and writes a human-readable `action_log`
-  that the self-assessment LLM can judge.
+- `act` performs the concrete real action and writes a human-readable
+  `action_log` that the self-assessment LLM can judge. Include what the service
+  actually returned.
 - Act like a developer eliciting requirements from a product owner: when the
-  prompt leaves a behavioral choice open, prefer a clarifying `needs_input`
-  over guessing — a clarifying question is cheaper than a wrong body.
+  prompt leaves a behavioral or integration choice open, prefer a clarifying
+  `needs_input` over guessing — a clarifying question is cheaper than a wrong
+  body.
 
 ## Acceptance criteria
 
@@ -122,37 +176,58 @@ A generated skill is accepted only if:
 5. It is single-purpose and does not duplicate an existing category leaf.
 6. Every operational value it needs is read from `ctx.config` under a clear
    snake_case name — nothing is embedded, fabricated, or asked of the human.
+7. If its purpose is an external action, `act` performs the real operation via
+   the configured service/transport (no simulated success, no draft-by-default)
+   and reports real failures honestly.
+8. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
+   and is consistent with the body's `ctx.config` reads and behavior.
 
 ## Worked example
 
-`email.compose` resolves its recipient with a SemIf sub-decision, then writes a
-draft file:
+A skill that checks a service's health over HTTP — for real, with the endpoint
+and token supplied by the runner:
 
 ```python
+import json
+import urllib.error
+import urllib.request
+
+from semif_agent.skills import ActionResult, Prediction
+
+INTEGRATION = {
+    "service": "status_page",
+    "transport": "http",
+    "config_vars": ["service_url", "service_token"],
+}
+
 def predict(ctx, request):
-    contacts = read_contacts(ctx.config)          # runner-provided data
-    decision = DecisionRequest(
-        state=f"{request.text} [current process: none]",
-        question="Which contact is the intended recipient?",
-        options=[Option(c["name"], c.get("description", "")) for c in contacts]
-        + [Option("none", "None of the listed contacts.")],
-    )
-    result = ctx.engine.call(decision)
-    return Prediction(text=f"recipient is {result.selected}",
-                      decisions=[(decision, result)])
+    return Prediction(text=f"check {ctx.config['service_url']}", decisions=[])
 
 def act(ctx, request, prediction):
-    recipient = prediction.text.removeprefix("recipient is ")
-    drafts = Path(ctx.config.get("drafts", "data/drafts"))
-    drafts.mkdir(parents=True, exist_ok=True)
-    target = drafts / f"{request.id}.txt"
-    target.write_text(f"To: {recipient}\nBody: {request.text}\n")
-    return ActionResult(
-        action_log=f"email.compose: wrote draft {target} for {recipient!r}.",
-        new_state=f"Draft written to {target.name} for {recipient}.",
-    )
+    url = ctx.config["service_url"]
+    token = ctx.config.get("service_token", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            status = response.status
+            payload = json.loads(response.read().decode("utf-8"))
+        return ActionResult(
+            action_log=f"status_page: {url} is {payload.get('status', 'unknown')} (HTTP {status}).",
+            new_state=f"{url} status: {payload.get('status', 'unknown')}",
+        )
+    except urllib.error.HTTPError as exc:
+        return ActionResult(
+            action_log=f"status_page: {url} returned HTTP {exc.code}: {exc.reason}.",
+            new_state=f"status check failed: HTTP {exc.code}",
+        )
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        return ActionResult(
+            action_log=f"status_page: could not reach {url}: {exc}.",
+            new_state=request.text,
+        )
 ```
 
-Write skill bodies in this shape: resolve ambiguity in `predict` via
-`ctx.engine`, do the work in `act`, keep both stdlib-only, read data from
-`ctx.config`, and return the proper types.
+Write skill bodies in this shape: declare `INTEGRATION`, resolve ambiguity in
+`predict` via `ctx.engine`, perform the real operation in `act`, keep both
+stdlib-only, read data from `ctx.config`, and return the proper types.

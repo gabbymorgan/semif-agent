@@ -16,7 +16,7 @@ from semif_agent.decisions import DecisionRequest, DecisionResult, Option, Reque
 from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
-from semif_agent.scheduler import Scheduler
+from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler
 from semif_agent.skills import ActionResult, Prediction, Skill
 from semif_agent.trace import TraceLog
 
@@ -299,5 +299,72 @@ def test_answer_roundtrip_via_api(tmp_path):
 
         status, payload = server.get("/api/status")
         assert payload["pending"] is None
+    finally:
+        server.close()
+
+def test_questions_endpoint_roundtrip(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.questions.append(
+        PendingQuestion(
+            id="q1", run_id="run-1", category="tracking", skill="probe",
+            question="Which service should it use?",
+        )
+    )
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/questions")
+        assert status == 200
+        assert payload["questions"][0]["id"] == "q1"
+        assert payload["questions"][0]["kind"] == "elicitation"
+
+        status, payload = server.post("/api/questions", {"id": "q1", "text": "Nextcloud"})
+        assert payload["status"] == "ok"
+        assert scheduler.pending_questions() == []
+
+        status, payload = server.post("/api/questions", {"id": "missing", "text": "x"})
+        assert payload["status"] == "error"
+    finally:
+        server.close()
+
+
+def test_status_carries_questions_and_repairs(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.questions.append(
+        PendingQuestion(
+            id="q1", run_id="run-1", category="tracking", skill="probe", question="Q?"
+        )
+    )
+    scheduler.repairs.append(
+        RepairOffer(
+            id="r1", run_id="run-1", category="tracking", skill="tracking.check",
+            selected="retry", reason="boom", request_text="track", failure="boom",
+        )
+    )
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/status")
+        assert payload["questions"][0]["id"] == "q1"
+        assert payload["repairs"][0]["id"] == "r1"
+    finally:
+        server.close()
+
+
+def test_repairs_endpoint_declines(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.repairs.append(
+        RepairOffer(
+            id="r1", run_id="run-1", category="tracking", skill="tracking.check",
+            selected="repair_skill", reason="boom", request_text="track", failure="boom",
+        )
+    )
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/repairs")
+        assert status == 200
+        assert payload["repairs"][0]["selected"] == "repair_skill"
+
+        status, payload = server.post("/api/repair", {"id": "r1", "action": "no_repair"})
+        assert payload["status"] == "ok"
+        assert scheduler.pending_repairs() == []
     finally:
         server.close()

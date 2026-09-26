@@ -2,13 +2,46 @@
 
 Guidance for working on the semif agent. Read this before touching code.
 
+## Product premise (read first)
+
+Semif-agent is an **end-user application**. An everyday person asks it to do a
+basic task in plain language, and it does it:
+
+1. The user asks for a task ("check my email", "message Sam on SimpleX", "put
+   lunch with Dana on my Nextcloud calendar").
+2. If the skill tree already knows how, the agent does it.
+3. If it does not, the agent asks the user a few questions about what they want
+   and how it should connect, generates a new skill, and then does it.
+4. It performs the task for real, against the user's actual service. If the
+   real attempt fails, it says so and offers to fix/learn. It never pretends a
+   task succeeded.
+
+Skills are therefore **real integrations**, not simulations: mail protocols,
+SimpleX, CalDAV/WebDAV, configured local CLIs, APIs — using the user's own
+accounts. A skill that returns a canned result, fabricates working values, or
+silently downgrades to "draft you can review" is broken, regardless of what its
+test says. Connection details, accounts, and credentials are asked once and
+recorded in tiered config; bodies read them from `ctx.config`.
+
+Two boundaries must never blur:
+
+- **SemIf routes, gates, scores, and automates; the LLM only generates and
+  self-assesses.** Skills are not chat responses.
+- **"No mocking" means the decision engine and LLM are always real.** Skill
+  tests are hermetic mechanics checks with fixtures; passing one is not proof
+  the real integration works. Only a real run against the user's service is.
+
+When requirements or connection details are unclear, the agent asks the user.
+Guessing, inventing data, or shipping a toy is always the wrong answer.
+
 ## What this is
 
 A local desktop CLI agent whose entire control flow is a single decision model
 (SemIf). Inputs are gated, scored for urgency, queued, and dispatched through a
 skill tree. Every SemIf decision is logged as a labeled training row; the
 `dream` pass computes the prediction-vs-observation cost (cross-entropy / NLL +
-ECE) that later drives fine-tuning.
+ECE) that later drives fine-tuning. See "Product premise" above for what the
+agent is for; this section is the machinery.
 
 The design spec is `IDEA.md`. The key point: **semantic ifs, not text
 generation, do the routing.** SemIf returns probabilities conditional on the
@@ -25,11 +58,14 @@ scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue;
                 gate/score/navigation; skill-body authoring is an ASYNC single-slot
                 worker (stub authored sync, write queued, gate stays free, the
                 original request is re-queued and re-runs the new leaf when the
-                body lands); the worker runs the full pipeline: codegen body ->
-                data contract -> test -> auto-run test (3-option SemIf
-                regen ladder on failure); config search auto-populates the skill
-                config from global/category config; elicitation (opt-in) asks
-                refinement questions before the write
+                body lands); the worker runs the full pipeline: elicitation ->
+                codegen body -> fidelity review -> data contract -> test ->
+                auto-run test (3-option SemIf regen ladder on failure); config
+                search auto-populates the skill config from global/category
+                config; elicitation asks implementation questions (REPL inline;
+                dashboard deferred via the question queue, `wait_timeout`); a
+                failed real run triggers a logged SemIf repair choice
+                (retry/repair_skill/ask_user/no_repair) surfaced to the user
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 navigation = SemIf choices per level (logged), create_category
@@ -39,6 +75,8 @@ skills.py    tree + registry (email.compose, response.reject, tracking.check),
                 materialize_skill / merge_skill_store
                 hot-load runnable skills from data/skills/;
                 ActionResult.needs_input pauses a run for human input;
+                Skill.integration / integration_source read the body's
+                INTEGRATION declaration (or infer it);
                 resolve_skill_config / unresolved_variables drive the tiered
                 config merge (global -> category -> skill) + pre-predict
                 contract collection
@@ -48,14 +86,19 @@ skill.py        loop: observe -> predict -> act -> observe -> assess (LLM);
                 contract variable the runner cannot satisfy pauses BEFORE
                 predict (pre_predict), collects it, and re-runs the full path
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
-codegen.py      CodegenClient (OpenAI-compatible) writes runnable skill bodies
-                against SKILL.md (data from the runner via ctx.config, never
-                embedded); parse/validate (compile + predict/act); elicitation
-                requirement questions; TESTGEN.md drives two shared-context
-                calls producing contract.json then skill.test.py (fixtures
-                embedded inline, no mock_data.json);
-                run_skill_test executes the test as a subprocess
-llm.py          OpenAI-compatible client for self-assessment (stdlib urllib)
+codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
+                bodies against SKILL.md (real actions via stdlib transports,
+                data from the runner via ctx.config, never embedded; bodies
+                declare INTEGRATION service/transport/config_vars);
+                parse/validate (compile + predict/act) + parse_integration /
+                infer_integration / integration_findings; elicitation questions
+                + integration hint; TESTGEN.md drives two shared-context calls
+                producing contract.json then skill.test.py (hermetic mechanics
+                test: inline fixtures, loopback http.server for HTTP bodies, no
+                external network, no mock_data.json); run_skill_test executes
+                the test as a subprocess
+llm.py          OpenAI-compatible client for self-assessment + skill fidelity
+                review (real-action vs simulated), stdlib urllib
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
@@ -63,8 +106,9 @@ trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
 dream.py        NLL of observed outcome per row; weighted CE, accuracy, ECE
 decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
                 Request)
-dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status +
-                POST submit/relabel); static/ frontend served at /
+dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status/
+                questions/repairs + POST submit/answer/questions/repair/restart/
+                relabel); static/ frontend served at /
 ```
 
 ## Run / verify
@@ -163,6 +207,20 @@ unit tests (24) + box integration tests (2).
   new category runs the same chain deterministically: `create_category` →
   `create_skill` → async body → re-dispatch. Authoring is still a single pass —
   validating/reusing written bodies across runs is future work.
+- **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
+  elicitation is on by default and asks implementation questions (which
+  service/account, how to connect, where the credential comes from, what success
+  looks like); the REPL asks inline, the dashboard defers via the question queue
+  (`/api/questions`, worker waits `codegen.elicitation.wait_timeout`). Bodies
+  must perform the real action via stdlib transports with values from
+  `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
+  fidelity review (small self-assessment model + static declaration checks)
+  regenerates a simulated body once, then accepts it badged `unverified`. A
+  failed real run logs a SemIf repair choice (retry / repair_skill / ask_user /
+  no_repair) surfaced in REPL/dashboard; repair writes carry the observed
+  failure and are bounded by `codegen.repair.max_attempts`. Tests are hermetic
+  mechanics checks (loopback `http.server` for HTTP bodies) and never certify
+  the live integration — only a real run does.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
@@ -311,9 +369,12 @@ unit tests (24) + box integration tests (2).
   layout** (`data/skills/<category>/<name>.py`) is **not read** — clean switch,
   no compat shim. `SKILL.md` at the repo root is the contract the codegen model
   is prompted with — change it only with intent, it shapes every generated body.
-  Mocking/testing has its **own** contract, `TESTGEN.md`; SKILL.md deliberately
-  carries no mock-data directives (the body owns no data — everything comes from
-  the runner via `ctx.config`).
+  Bodies declare `INTEGRATION` (service/transport/config_vars) and must perform
+  the real action via stdlib transports with values from `ctx.config`.
+  Mocking/testing has its **own** contract, `TESTGEN.md`: a **hermetic mechanics
+  check** (inline fixtures, loopback `http.server` for HTTP bodies, no external
+  network) that never certifies the live integration — only a real run does.
+  The body owns no data; everything comes from the runner via `ctx.config`.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the
@@ -324,19 +385,29 @@ unit tests (24) + box integration tests (2).
   badge) → the body write is queued to a **single-slot background worker** (the
   12G codegen model can't run twice), the gate stays free for new input. The
   worker runs the full authoring pipeline:
-  1. **codegen body** (`generate_skill_body`): SKILL.md + request + tree; the
-     body reads every operational value from `ctx.config` and owns no data.
-  2. **data contract** (`generate_data_contract`): a separate call sharing
+  1. **elicitation** (`generate_elicitation`): implementation questions +
+     integration hint. REPL asks inline at dispatch; the dashboard sets
+     `defer_questions` and the worker posts to the question queue and waits
+     (`codegen.elicitation.wait_timeout`) for answers.
+  2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
+     repair): SKILL.md + request + tree + requirements answers; the body reads
+     every operational value from `ctx.config`, performs the real action, and
+     declares `INTEGRATION`.
+  3. **fidelity review** (`llm.review_skill_body` + `integration_findings`): is
+     the action real or simulated/declared-but-unused? One corrective regen
+     (`codegen.fidelity.max_attempts`), then accept with a trace + `unverified`
+     badge rather than hard-failing authoring.
+  4. **data contract** (`generate_data_contract`): a separate call sharing
      TESTGEN.md + `skill.py` context derives `contract.json` — a single flat
      object of snake_case variable name -> semantic description, for user input
      and SemIf only (no types/validation; that lives in the code + test).
-3. **test** (`generate_skill_tests`): a second shared-context call
-      (appending the contract) produces `skill.test.py` with fixture data
-      embedded inline as Python literals (no mock_data.json).
-  4. **auto-run test** (`run_skill_test`): subprocess in the skill folder,
-      `codegen.test_timeout`; on failure a **3-option SemIf decision**
-      (`codegen_regen`, trace-only) picks code/contract/test to regenerate,
-      the error + existing files are fed back, bounded by `codegen.test_max_attempts`.
+  5. **test** (`generate_skill_tests`): a second shared-context call
+     (appending the contract) produces `skill.test.py` — hermetic mechanics,
+     loopback fixture injects the endpoint through config, fixtures inline.
+  6. **auto-run test** (`run_skill_test`): subprocess in the skill folder,
+     `codegen.test_timeout`; on failure a **3-option SemIf decision**
+     (`codegen_regen`, trace-only) picks code/contract/test to regenerate,
+     the error + existing files are fed back, bounded by `codegen.test_max_attempts`.
   On success the body is materialized (`materialize_skill`), hot-merged, the
   leaf's `writing` flag clears, and the **original request is re-queued** at its
   scored weight and re-runs navigation onto the new leaf (`skill_requeued`). On
@@ -363,13 +434,37 @@ unit tests (24) + box integration tests (2).
   **before predict** (`pre_predict`), asking the human one at a time. Each
   answer gets a SemIf `record-as-config vs ask-again-each-fire` choice (phase
   `config:record`); recorded values persist to the skill `config.json`.
-- **Requirements elicitation (opt-in).** `codegen.elicitation.enabled` asks the
-  product owner refinement questions before the body is written (REPL only —
-  the dashboard has no asker). The prompt carries 4 generic example questions
-  and an explicit anti-pattern block: never config-vs-input cadence questions
-  ("should the sender address change?") — that negates the runner
-  data-dependency model — never operational data values, never implementation
-  details. Answers ride on the draft into the body prompt.
+- **Requirements elicitation (implementation questions, default on).**
+  `codegen.elicitation.enabled` asks the product owner how the new skill should
+  connect (which service/account, how to connect, where the credential comes
+  from, what success looks like, how failure should behave). The REPL asks
+  inline at dispatch; the dashboard defers — the single-slot worker posts
+  questions to `scheduler.questions` (`GET/POST /api/questions`) and waits up to
+  `codegen.elicitation.wait_timeout` seconds, then proceeds with whatever
+  answers arrived (`questions_timeout` trace). Answers ride on the draft into
+  every body attempt (including retries and regens) and are persisted in the
+  registry so a `restart` does not ask again. The prompt keeps an explicit
+  anti-pattern block: never config-vs-input cadence questions ("should the
+  sender address change?"), never operational data values, never trivia.
+- **Fidelity review.** After the body lands, `llm.review_skill_body` (the small
+  self-assessment model) plus static `integration_findings` (declared transport
+  backed by real calls? declared config_vars actually read?) decide whether the
+  body really performs the action. A rejected body is rewritten once with the
+  finding (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a body that
+  still fails is accepted but traced (`fidelity_review`,
+  `performs_real_action=false`) and badged `unverified` in the dashboard — the
+  reviewer never hard-fails authoring, and a missing reviewer degrades to
+  accept.
+- **Repair loop.** A failed real run (assessment failure or a raised skill
+  error) logs a SemIf choice (phase `repair:choice`) offering
+  `retry` / `repair_skill` / `ask_user` / `no_repair`, recorded as a
+  `repair_offered` trace and surfaced in the REPL (`repairs`, `repair <id>
+  [action]`) and the dashboard repair panel. Executing is user-confirmed (a
+  codegen write is slow): `retry` requeues the request, `repair_skill` rewrites
+  the body with the observed failure (`run_failure` reason_kind) and re-runs it,
+  `ask_user` posts a repair question whose answer starts the repair. Repairs are
+  bounded by `codegen.repair.max_attempts` per skill; the run itself is never
+  auto-repaired silently.
 - Engine calls are serialized with a `threading.Lock` inside `SemIfEngine` so
   the codegen worker's degeneration SemIf checks never race main-thread
   navigation/scoring on one llama.cpp context.
@@ -661,9 +756,16 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
 
 - `python3 -m pytest tests/ -q --ignore=tests/integration` — anywhere, fast.
   Includes the dashboard API tests (`tests/test_dashboard_api.py`), which spin
-  up the stdlib HTTP server on an ephemeral port with the engine never loaded,
-  and `tests/test_codegen.py` for prompt/parse/validate + body store round-trips.
+  up the stdlib HTTP server on an ephemeral port with the engine never loaded;
+  `tests/test_codegen.py` for prompt/parse/validate, integration
+  extraction/findings, and body store round-trips; and `tests/test_llm.py` for
+  the fidelity review against a throwaway OpenAI-compatible endpoint.
 - `tests/integration/` — jarvis only (staging); requires real SemIf + real
   ollama (guppy serves the models over the LAN).
 - After touching scheduler/skills/codegen/engine, re-run both; the integration
   tests are the only end-to-end verification.
+- **Fixtures are not the runtime.** Generated skill tests (and unit tests of the
+  codegen client) use real local endpoints (a loopback `http.server`, never a
+  mock); skill bodies must call the user's configured service, never a fixture
+  address. Passing a skill test proves mechanics only; a real run proves the
+  integration.

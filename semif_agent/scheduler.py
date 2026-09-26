@@ -8,17 +8,22 @@ state preserved; a deferred input is scored and queued by urgency.
 from __future__ import annotations
 
 import threading
+import time
+import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from .codegen import (
     CodegenClient,
     CodegenError,
+    ElicitationResult,
+    extract_integration,
     generate_data_contract,
-    generate_requirements,
+    generate_elicitation,
     generate_skill_body,
     generate_skill_tests,
+    integration_findings,
     regenerate_skill_body,
     run_skill_test,
     skill_contract_ref,
@@ -94,6 +99,52 @@ class SkillWrite:
     category: str
     draft: SkillDraft
     weight: float
+    repair_reason: str | None = None
+
+
+@dataclass
+class PendingQuestion:
+    """A question waiting for the human (deferred elicitation or repair).
+
+    Posted by the codegen worker when no inline asker is wired; answered via
+    the dashboard (`/api/questions`) or `Scheduler.answer_question`. The worker
+    waits (bounded by `codegen.elicitation.wait_timeout`) and continues with
+    whatever answers arrived.
+    """
+
+    id: str
+    run_id: str
+    category: str
+    skill: str
+    question: str
+    kind: str = "elicitation"
+    offer_id: str | None = None
+    answer: str | None = None
+    skipped: bool = False
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class RepairOffer:
+    """A failed real run plus the SemIf-chosen repair, awaiting the user.
+
+    The app says the task failed and offers to fix/learn; executing a repair is
+    user-confirmed because a codegen write takes tens of minutes. `retry` and
+    `decline` are cheap; `repair_skill` regenerates the body with the observed
+    failure; `ask_user` collects a missing detail (via PendingQuestion) and
+    then repairs.
+    """
+
+    id: str
+    run_id: str
+    category: str
+    skill: str
+    selected: str
+    reason: str
+    request_text: str
+    failure: str
+    status: str = "offered"
+    created_at: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -137,8 +188,16 @@ class Scheduler:
         self.asker = asker
         codegen_cfg = config.get("codegen", {}) or {}
         elicitation_cfg = codegen_cfg.get("elicitation", {}) or {}
-        self.elicitation_enabled = bool(elicitation_cfg.get("enabled", False))
-        self.elicitation_max = int(elicitation_cfg.get("max_questions", 3))
+        self.elicitation_enabled = bool(elicitation_cfg.get("enabled", True))
+        self.elicitation_max = int(elicitation_cfg.get("max_questions", 4))
+        self.elicitation_wait = float(elicitation_cfg.get("wait_timeout", 900.0))
+        self.defer_questions = False
+        fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
+        self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
+        self.fidelity_max_attempts = int(fidelity_cfg.get("max_attempts", 1))
+        repair_cfg = codegen_cfg.get("repair", {}) or {}
+        self.repair_enabled = bool(repair_cfg.get("enabled", True))
+        self.repair_max_attempts = int(repair_cfg.get("max_attempts", 1))
         self.test_timeout = float(codegen_cfg.get("test_timeout", 30.0))
         self.test_max_attempts = int(codegen_cfg.get("test_max_attempts", 3))
         self.contract_search = bool(
@@ -162,6 +221,10 @@ class Scheduler:
         self._writes: deque[SkillWrite] = deque()
         self._write_notify = threading.Condition(self._lock)
         self._write_thread: threading.Thread | None = None
+        self._question_notify = threading.Condition(self._lock)
+        self.questions: list[PendingQuestion] = []
+        self.repairs: list[RepairOffer] = []
+        self._repair_counts: dict[str, int] = {}
 
     # ---- decision templates (all real SemIf, all logged) ----
 
@@ -355,32 +418,51 @@ class Scheduler:
         created = self._create_skill(request, category)
         if created.kind != "create_skill" or created.draft is None:
             return created
-        self._elicit_requirements(request, category, created.draft)
+        if self.asker is not None:
+            self._elicit_requirements(request, category, created.draft)
+        elif self.elicitation_enabled:
+            if self.defer_questions:
+                self.trace.append(
+                    "requirements_deferred",
+                    request.id,
+                    category=category,
+                    skill=created.draft.name,
+                )
+            else:
+                self.trace.append(
+                    "requirements_skipped",
+                    request.id,
+                    category=category,
+                    skill=created.draft.name,
+                    reason="no asker wired",
+                )
         self._start_skill_write(request, category, created.draft, weight)
         return created
 
     def _elicit_requirements(
         self, request: Request, category: str, draft: SkillDraft
     ) -> None:
-        """Ask the product owner refinement questions before the body is written.
+        """Ask the product owner implementation questions before the body is written.
 
-        Opt-in (`codegen.elicitation.enabled`) and requires an asker (the REPL
-        wires one; the dashboard degrades to skip). Requirements answers ride on
-        the draft into the body prompt. Any failure degrades to no requirements —
-        elicitation must never block authoring.
+        Inline path (the REPL wires an asker): questions are generated and asked
+        synchronously at dispatch. The dashboard uses the deferred path instead —
+        the worker posts questions to `self.questions` and waits for answers.
+        Answers seed the draft's requirements and the intended integration. Any
+        failure degrades to no requirements — elicitation must never block
+        authoring.
         """
-        if not (self.elicitation_enabled and self.asker is not None):
-            return
-        if self.codegen is None:
+        if not self.elicitation_enabled or self.codegen is None:
             return
         try:
-            questions = generate_requirements(
+            elicited = generate_elicitation(
                 self.codegen, request, category, draft, self.tree,
                 max_questions=self.elicitation_max,
             )
         except CodegenError:
             return
-        for question in questions:
+        if elicited.integration:
+            draft.integration = elicited.integration
+        for question in elicited.questions:
             try:
                 answer = self.asker(question)
             except Exception:
@@ -388,13 +470,14 @@ class Scheduler:
             if answer is None or not answer.strip():
                 return
             draft.requirements[question] = answer.strip()
-        if draft.requirements:
+        if draft.requirements or draft.integration:
             self.trace.append(
                 "requirements",
                 request.id,
                 category=category,
                 skill=draft.name,
                 questions=list(draft.requirements.keys()),
+                integration=draft.integration or None,
             )
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
@@ -448,6 +531,7 @@ class Scheduler:
             self.trace.append(
                 "error", request.id, skill=skill.name, message=outcome.error
             )
+            self._propose_repair(skill, request, outcome)
             return DispatchResult(kind="error", summary=f"skill error: {outcome.error}")
         if outcome.needs_input:
             self.pending = PendingRun(
@@ -478,11 +562,253 @@ class Scheduler:
         if outcome.updated_request and request.reentries < self.max_reentries:
             self.queue.push(_requeue(request, outcome.updated_request), 0.5)
             self.trace.append("requeued", request.id, text=outcome.updated_request)
+        if not outcome.success and not outcome.updated_request:
+            self._propose_repair(skill, request, outcome)
         return DispatchResult(
             kind="ran",
             summary=f"{skill.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
             skill=skill.name,
             decisions_logged=outcome.decisions_logged,
+        )
+
+    # ---- repair loop ----
+
+    def _propose_repair(self, skill: Skill, request: Request, outcome) -> None:
+        """A real run failed: offer to fix/learn, chosen by a SemIf decision.
+
+        Executing a repair is user-confirmed (a codegen write takes tens of
+        minutes), so the offer is recorded and surfaced in REPL/dashboard. The
+        choice is logged as a real decision (phase `repair:choice`); the offer
+        lifecycle is traced.
+        """
+        from .engine import EngineUnavailable
+
+        if not self.repair_enabled or skill.is_noop():
+            return
+        failure = outcome.error or outcome.action_log or outcome.summary or "run failed"
+        decision = DecisionRequest(
+            state=(
+                f"skill {skill.name} failed a real run for {request.text!r}. "
+                f"Integration: {skill.integration or 'unknown'}. "
+                f"Failure: {failure[:400]}"
+            ),
+            question="The real run failed. How should the agent recover?",
+            options=[
+                Option("retry", "Try the same request again."),
+                Option("repair_skill", "Repair the skill body from the observed failure."),
+                Option("ask_user", "Ask me for the missing detail, then repair."),
+                Option("no_repair", "Do nothing; just report the failure."),
+            ],
+        )
+        try:
+            result = self.engine.call(decision)
+        except EngineUnavailable:
+            return
+        self.log.append(
+            decision,
+            result,
+            extra={"phase": "repair:choice", "run_id": request.id, "skill": skill.name},
+        )
+        offer = RepairOffer(
+            id=uuid.uuid4().hex[:12],
+            run_id=request.id,
+            category=skill.category,
+            skill=skill.name,
+            selected=result.selected,
+            reason=failure[:400],
+            request_text=request.text,
+            failure=failure[:2000],
+        )
+        with self._lock:
+            self.repairs.append(offer)
+            self.trace.append(
+                "repair_offered",
+                request.id,
+                category=skill.category,
+                skill=skill.name,
+                selected=result.selected,
+                probs=result.probs,
+                failure=failure[:500],
+            )
+        print(
+            f"[repair] {skill.name} failed: {failure[:200]}. "
+            f"Suggested: {result.selected}. Use `repairs` / `repair <id> [action]`."
+        )
+
+    def pending_questions(self) -> list[dict]:
+        with self._lock:
+            return [
+                {
+                    "id": q.id,
+                    "run_id": q.run_id,
+                    "category": q.category,
+                    "skill": q.skill,
+                    "question": q.question,
+                    "kind": q.kind,
+                    "created_at": q.created_at,
+                }
+                for q in self.questions
+                if q.answer is None and not q.skipped
+            ]
+
+    def answer_question(self, question_id: str, text: str) -> tuple[str, str]:
+        """Answer a deferred question. An empty answer skips it.
+
+        A repair question carries the detail the user wants the skill repaired
+        with; answering it starts the repair directly.
+        """
+        offer_id: str | None = None
+        answer = (text or "").strip()
+        with self._lock:
+            question = next(
+                (q for q in self.questions if q.id == question_id), None
+            )
+            if question is None:
+                return "error", f"no pending question {question_id}"
+            if answer:
+                question.answer = answer
+            else:
+                question.skipped = True
+            self.questions = [q for q in self.questions if q.id != question.id]
+            self._question_notify.notify_all()
+            self.trace.append(
+                "question_answered",
+                question.run_id,
+                question=question.question,
+                answer=answer or None,
+                skipped=not answer,
+            )
+            if question.kind == "repair":
+                offer_id = question.offer_id
+        if offer_id is not None:
+            return self._repair_with_answer(offer_id, answer)
+        return "ok", "answer recorded" if answer else "question skipped"
+
+    def pending_repairs(self) -> list[dict]:
+        with self._lock:
+            return [
+                {
+                    "id": r.id,
+                    "run_id": r.run_id,
+                    "category": r.category,
+                    "skill": r.skill,
+                    "selected": r.selected,
+                    "reason": r.reason,
+                    "failure": r.failure,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                }
+                for r in self.repairs
+                if r.status == "offered"
+            ]
+
+    def resolve_repair(self, offer_id: str, action: str | None = None) -> tuple[str, str]:
+        """Execute (or decline) an offered repair. Defaults to the SemIf pick.
+
+        `retry` requeues the original request; `repair_skill` rewrites the body
+        from the observed failure; `ask_user` posts a question whose answer
+        starts the repair; `no_repair` closes the offer. Repair writes are
+        bounded by `codegen.repair.max_attempts` per skill.
+        """
+        with self._lock:
+            offer = next((r for r in self.repairs if r.id == offer_id), None)
+            if offer is None:
+                return "error", f"no repair offer {offer_id}"
+            if offer.status != "offered":
+                return "error", f"repair offer {offer_id} is already {offer.status}"
+            chosen = action or offer.selected
+            if chosen not in ("retry", "repair_skill", "ask_user", "no_repair"):
+                return "error", f"unknown repair action {chosen!r}"
+            if chosen in ("repair_skill", "ask_user") and self.codegen is None:
+                return "error", "no codegen configured"
+            if (
+                chosen in ("repair_skill", "ask_user")
+                and self._repair_counts.get(offer.skill, 0) >= max(self.repair_max_attempts, 0)
+            ):
+                return "error", f"repair budget for {offer.skill} is exhausted"
+            offer.selected = chosen
+            if chosen == "no_repair":
+                offer.status = "declined"
+            elif chosen == "ask_user":
+                offer.status = "awaiting_user"
+        if chosen == "retry":
+            retry = Request(offer.request_text, source="repair_retry")
+            self.queue.push(retry, 0.5)
+            with self._lock:
+                offer.status = "done"
+            self.trace.append("repair_retry", offer.run_id, skill=offer.skill)
+            self.run_queue()
+            return "running", f"retrying {offer.category}.{offer.skill}"
+        if chosen == "no_repair":
+            self.trace.append("repair_declined", offer.run_id, skill=offer.skill)
+            return "ok", f"declined repair for {offer.category}.{offer.skill}"
+        if chosen == "ask_user":
+            self._ask_repair_question(offer)
+            return "needs_input", f"question posted for {offer.category}.{offer.skill}"
+        return self._start_repair(offer, detail=None)
+
+    def _ask_repair_question(self, offer: RepairOffer) -> None:
+        question = (
+            f"Repairing {offer.category}.{offer.skill} after: {offer.failure[:300]}\n"
+            "What detail should I use? (Reply with the fix or leave empty to skip.)"
+        )
+        pending = PendingQuestion(
+            id=uuid.uuid4().hex[:12],
+            run_id=offer.run_id,
+            category=offer.category,
+            skill=offer.skill,
+            question=question,
+            kind="repair",
+            offer_id=offer.id,
+        )
+        with self._lock:
+            self.questions.append(pending)
+            self._question_notify.notify_all()
+            self.trace.append(
+                "repair_question", offer.run_id, skill=offer.skill, question=question
+            )
+
+    def _repair_with_answer(self, offer_id: str, answer: str) -> tuple[str, str]:
+        with self._lock:
+            offer = next((r for r in self.repairs if r.id == offer_id), None)
+            if offer is None:
+                return "error", f"no repair offer {offer_id}"
+        if not answer:
+            with self._lock:
+                offer.status = "declined"
+            self.trace.append("repair_declined", offer.run_id, skill=offer.skill)
+            return "ok", f"declined repair for {offer.category}.{offer.skill}"
+        return self._start_repair(offer, detail=answer)
+
+    def _start_repair(self, offer: RepairOffer, detail: str | None) -> tuple[str, str]:
+        draft = self._stub_draft(offer.category, offer.skill)
+        if detail:
+            draft.requirements[f"how to fix {offer.skill}"] = detail
+        with self._lock:
+            self._repair_counts[offer.skill] = self._repair_counts.get(offer.skill, 0) + 1
+            offer.status = "done"
+        request = Request(offer.request_text, source="repair")
+        self._start_skill_write(
+            request, offer.category, draft, 0.5, repair_reason=offer.failure
+        )
+        self.trace.append(
+            "repair_executed",
+            offer.run_id,
+            category=offer.category,
+            skill=offer.skill,
+            detail=detail,
+        )
+        return "running", f"repairing {offer.category}.{offer.skill}"
+
+    def _stub_draft(self, category: str, name: str) -> SkillDraft:
+        entry = self.registry.read().get(category, {})
+        row = next(
+            (s for s in entry.get("skills", []) if s.get("name") == name), {}
+        )
+        return SkillDraft(
+            name=name,
+            description=row.get("description") or name,
+            requirements=dict(row.get("requirements") or {}),
         )
 
     def _create_category(self, request: Request) -> DispatchResult:
@@ -584,7 +910,12 @@ class Scheduler:
     # ---- async skill-body writes (single-slot codegen worker) ----
 
     def _start_skill_write(
-        self, request: Request, category: str, draft: SkillDraft, weight: float
+        self,
+        request: Request,
+        category: str,
+        draft: SkillDraft,
+        weight: float,
+        repair_reason: str | None = None,
     ) -> None:
         """Mark the leaf in-progress and queue the body write for the worker.
 
@@ -592,7 +923,8 @@ class Scheduler:
         at a time, the 12G codegen model can't run twice) writes the body in the
         background. On completion the original request is re-queued and re-runs
         navigation onto the new leaf; on failure the leaf stays a restartable
-        stub and only the user is notified.
+        stub and only the user is notified. `repair_reason` makes the write a
+        repair: the existing body is rewritten from the observed failure.
         """
         with self._lock:
             leaf = next(
@@ -612,9 +944,16 @@ class Scheduler:
                 model=self.codegen.model if self.codegen else None,
                 contract_ref=contract["ref"],
                 contract_dirty=contract["dirty"],
+                repair=repair_reason is not None,
             )
             self._writes.append(
-                SkillWrite(request=request, category=category, draft=draft, weight=weight)
+                SkillWrite(
+                    request=request,
+                    category=category,
+                    draft=draft,
+                    weight=weight,
+                    repair_reason=repair_reason,
+                )
             )
             if self._write_thread is None or not self._write_thread.is_alive():
                 self._write_thread = threading.Thread(
@@ -638,7 +977,8 @@ class Scheduler:
 
     def _write_skill_body(self, job: SkillWrite) -> None:
         """Run the full authoring pipeline for one queued write (no scheduler
-        lock held here): codegen body -> data contract -> test -> auto-run test
+        lock held here): deferred elicitation -> codegen body (or repair
+        rewrite) -> fidelity review -> data contract -> test -> auto-run test
         (with a SemIf regen ladder on failure).
 
         The tree is snapshotted under the lock so the prompt build reads a
@@ -646,20 +986,35 @@ class Scheduler:
         """
         with self._lock:
             tree_snapshot = {category: list(skills) for category, skills in self.tree.items()}
+        if job.repair_reason is None and not job.draft.requirements:
+            self._deferred_elicit(job, tree_snapshot)
         try:
-            code = generate_skill_body(
-                self.codegen,
-                job.request,
-                job.category,
-                job.draft,
-                tree_snapshot,
-                requirements=job.draft.requirements,
-                degeneration_check=(
-                    self.degeneration_check_factory(job.request.id)
-                    if self.degeneration_check_factory is not None
-                    else None
-                ),
-            )
+            if job.repair_reason is not None:
+                code = regenerate_skill_body(
+                    self.codegen,
+                    job.request,
+                    job.category,
+                    job.draft,
+                    self._read_body(job.category, job.draft.name),
+                    job.repair_reason,
+                    requirements=job.draft.requirements,
+                    reason_kind="run_failure",
+                )
+            else:
+                code = generate_skill_body(
+                    self.codegen,
+                    job.request,
+                    job.category,
+                    job.draft,
+                    tree_snapshot,
+                    requirements=job.draft.requirements,
+                    degeneration_check=(
+                        self.degeneration_check_factory(job.request.id)
+                        if self.degeneration_check_factory is not None
+                        else None
+                    ),
+                )
+            code = self._review_fidelity(job, code)
             contract = generate_data_contract(
                 self.codegen, job.request, job.category, job.draft, code
             )
@@ -677,6 +1032,176 @@ class Scheduler:
             return
         self._complete_skill_write(job, code)
 
+    def _read_body(self, category: str, name: str) -> str:
+        try:
+            return (self.body_store.dir(category, name) / "skill.py").read_text()
+        except OSError:
+            return ""
+
+    def _deferred_elicit(self, job: SkillWrite, tree: dict) -> None:
+        """Generate questions in the background, post them, wait for answers.
+
+        The dashboard path: no inline asker exists, so the single-slot worker
+        itself asks. It pauses here for up to `elicitation.wait_timeout` while
+        the gate stays free and other requests proceed; whatever answers arrive
+        (possibly none) feed the body writer.
+        """
+        if not (self.defer_questions and self.elicitation_enabled and self.codegen):
+            return
+        try:
+            elicited = generate_elicitation(
+                self.codegen, job.request, job.category, job.draft, tree,
+                max_questions=self.elicitation_max,
+            )
+        except CodegenError:
+            return
+        if elicited.integration:
+            job.draft.integration = elicited.integration
+        if not elicited.questions:
+            return
+        answers = self._post_questions(job, elicited.questions)
+        job.draft.requirements.update(answers)
+        if job.draft.requirements or job.draft.integration:
+            self._registry_requirements(job)
+            self.trace.append(
+                "requirements",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                questions=list(job.draft.requirements.keys()),
+                integration=job.draft.integration or None,
+            )
+
+    def _post_questions(
+        self, job: SkillWrite, questions: list[str]
+    ) -> dict[str, str]:
+        """Post a question group and block the worker until answered or timed out."""
+        group = [
+            PendingQuestion(
+                id=uuid.uuid4().hex[:12],
+                run_id=job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                question=question,
+            )
+            for question in questions
+        ]
+        with self._lock:
+            self.questions.extend(group)
+            self._question_notify.notify_all()
+        self.trace.append(
+            "questions_asked",
+            job.request.id,
+            category=job.category,
+            skill=job.draft.name,
+            questions=questions,
+        )
+        print(
+            f"[codegen] {len(group)} question(s) waiting about "
+            f"{job.category}.{job.draft.name} — answer in the dashboard."
+        )
+        deadline = (
+            None if self.elicitation_wait <= 0
+            else time.monotonic() + self.elicitation_wait
+        )
+        with self._lock:
+            while not all(q.answer is not None or q.skipped for q in group):
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                self._question_notify.wait(timeout=1.0)
+            answers = {q.question: q.answer for q in group if q.answer}
+            self.questions = [q for q in self.questions if q not in group]
+            self._question_notify.notify_all()
+        if len(answers) < len(group):
+            self.trace.append(
+                "questions_timeout",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                answered=len(answers),
+                asked=len(group),
+            )
+        return answers
+
+    def _registry_requirements(self, job: SkillWrite) -> None:
+        entry = self.registry.read().get(job.category, {})
+        row = next(
+            (s for s in entry.get("skills", []) if s.get("name") == job.draft.name), {}
+        )
+        self.registry.register_skill(
+            job.category,
+            job.draft.name,
+            job.draft.description,
+            request_text=row.get("request_text", job.request.text),
+            requirements=job.draft.requirements,
+        )
+
+    def _review_fidelity(self, job: SkillWrite, code: str) -> str:
+        """Check the body really performs the action; regen once when it does not.
+
+        Static findings (declaration vs. code) plus the small-model review both
+        have to pass. A rejected body is rewritten with the finding as context,
+        bounded by `codegen.fidelity.max_attempts`; a still-fake body is
+        accepted (never hard-fail authoring) but traced as `performs=False` and
+        badged in the dashboard. A missing/failed reviewer degrades to accept.
+        """
+        if not self.fidelity_enabled or self.codegen is None:
+            return code
+        integration, source = extract_integration(code)
+        findings = integration_findings(integration, source, code)
+        attempts = max(self.fidelity_max_attempts, 0)
+        reviewed = code
+        for attempt in range(attempts + 1):
+            review = self.llm.review_skill_body(
+                job.request.text,
+                job.draft.description,
+                reviewed,
+                requirements=job.draft.requirements,
+                integration=integration,
+            )
+            self.trace.append(
+                "fidelity_review",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                attempt=attempt,
+                performs_real_action=review.performs_real_action,
+                reason=review.reason,
+                findings=findings,
+                integration=integration,
+                integration_source=source,
+            )
+            if review.performs_real_action and not findings:
+                return reviewed
+            if attempt >= attempts:
+                return reviewed
+            reason = "; ".join(
+                part for part in [review.reason, *findings] if part
+            ) or "the body does not perform the requested action"
+            try:
+                reviewed = regenerate_skill_body(
+                    self.codegen,
+                    job.request,
+                    job.category,
+                    job.draft,
+                    reviewed,
+                    reason,
+                    requirements=job.draft.requirements,
+                    reason_kind="fidelity",
+                )
+            except (CodegenError, ValueError) as exc:
+                self.trace.append(
+                    "fidelity_regen_failed",
+                    job.request.id,
+                    category=job.category,
+                    skill=job.draft.name,
+                    message=str(exc),
+                )
+                return reviewed
+            integration, source = extract_integration(reviewed)
+            findings = integration_findings(integration, source, reviewed)
+        return reviewed
+
     def _test_and_fix(self, job: SkillWrite, code: str, contract: dict) -> None:
         """Generate the test artifact and auto-run it; regen the failing piece.
 
@@ -691,7 +1216,13 @@ class Scheduler:
         for attempt in range(1, attempts + 1):
             if target == "regen_code":
                 code = regenerate_skill_body(
-                    self.codegen, job.request, job.category, job.draft, code, reason
+                    self.codegen,
+                    job.request,
+                    job.category,
+                    job.draft,
+                    code,
+                    reason,
+                    requirements=job.draft.requirements,
                 )
                 self.body_store.write_body(job.category, job.draft.name, code)
             if target == "regen_contract":
@@ -863,16 +1394,18 @@ class Scheduler:
                 return "error", f"skill {category}.{name} is already being written"
             if self.codegen is None:
                 return "error", "no codegen configured"
-            entry = self.registry.read().get(category, {})
+            draft = self._stub_draft(category, name)
+            if leaf.description:
+                draft.description = leaf.description
             row = next(
-                (s for s in entry.get("skills", []) if s.get("name") == name),
+                (
+                    s
+                    for s in self.registry.read().get(category, {}).get("skills", [])
+                    if s.get("name") == name
+                ),
                 {},
             )
             request_text = row.get("request_text")
-            draft = SkillDraft(
-                name=name,
-                description=leaf.description or row.get("description") or name,
-            )
             origin = (
                 Request(request_text, source="restart")
                 if request_text
@@ -889,6 +1422,12 @@ class Scheduler:
             lines.append(f"current: {current}")
             if self.pending is not None:
                 lines.append(f"awaiting input: {self.pending.question}")
+            waiting = [q for q in self.questions if q.answer is None and not q.skipped]
+            if waiting:
+                lines.append(f"questions waiting: {len(waiting)} (answer in the dashboard)")
+            offered = [r for r in self.repairs if r.status == "offered"]
+            if offered:
+                lines.append(f"repair offers: {len(offered)} (use `repairs`)")
             lines.append(f"queue: {len(self.queue)} pending")
             for weight, request in self.queue.items():
                 lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")

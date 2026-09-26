@@ -20,7 +20,7 @@ from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
-from semif_agent.scheduler import Scheduler
+from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler, SkillWrite
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
@@ -49,6 +49,12 @@ from semif_agent.trace import TraceLog
 GOOD_BODY = """\
 from semif_agent.decisions import DecisionRequest, Option
 from semif_agent.skills import ActionResult, Prediction
+
+INTEGRATION = {
+    "service": "probe_service",
+    "transport": "compute",
+    "config_vars": [],
+}
 
 def predict(ctx, request):
     return Prediction(text="ok", decisions=[])
@@ -653,3 +659,176 @@ def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ---- deferred questions ----
+
+def test_pending_questions_roundtrip(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.questions.append(
+        PendingQuestion(
+            id="q1", run_id="r1", category="tracking", skill="probe",
+            question="Which service?",
+        )
+    )
+    pending = scheduler.pending_questions()
+    assert [q["id"] for q in pending] == ["q1"]
+    status, _ = scheduler.answer_question("q1", "Nextcloud")
+    assert status == "ok"
+    assert scheduler.pending_questions() == []
+    assert scheduler.questions == []
+    assert any(e["kind"] == "question_answered" for e in scheduler.trace.read())
+
+
+def test_answer_question_empty_skips(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.questions.append(
+        PendingQuestion(
+            id="q2", run_id="r1", category="tracking", skill="probe", question="Q?"
+        )
+    )
+    status, detail = scheduler.answer_question("q2", "")
+    assert status == "ok"
+    assert "skipped" in detail
+    assert scheduler.pending_questions() == []
+
+
+def test_answer_question_unknown_id_errors(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    status, detail = scheduler.answer_question("nope", "x")
+    assert status == "error"
+    assert "no pending question" in detail
+
+
+def test_post_questions_waits_for_answers(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.elicitation_wait = 5.0
+    job = SkillWrite(
+        request=Request("track it"),
+        category="tracking",
+        draft=SkillDraft(name="probe", description="Probe."),
+        weight=0.5,
+    )
+    result: dict = {}
+    thread = threading.Thread(
+        target=lambda: result.update(scheduler._post_questions(job, ["Q1?", "Q2?"]))
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    pending = []
+    while time.monotonic() < deadline:
+        pending = scheduler.pending_questions()
+        if len(pending) == 2:
+            break
+        time.sleep(0.02)
+    assert len(pending) == 2
+    scheduler.answer_question(pending[0]["id"], "A1")
+    scheduler.answer_question(pending[1]["id"], "")
+    thread.join(timeout=5)
+    assert result == {"Q1?": "A1"}
+    assert scheduler.pending_questions() == []
+    kinds = [e["kind"] for e in scheduler.trace.read()]
+    assert "questions_asked" in kinds
+
+
+def test_post_questions_times_out(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.elicitation_wait = 0.1
+    job = SkillWrite(
+        request=Request("track it"),
+        category="tracking",
+        draft=SkillDraft(name="probe", description="Probe."),
+        weight=0.5,
+    )
+    assert scheduler._post_questions(job, ["Q?"]) == {}
+    assert scheduler.pending_questions() == []
+    assert any(e["kind"] == "questions_timeout" for e in scheduler.trace.read())
+
+
+# ---- requirements persistence ----
+
+def test_registry_stores_requirements_for_restart(tmp_path):
+    registry = CategoryRegistry(str(tmp_path / "categories.json"))
+    registry.register_skill(
+        "tracking", "probe", "Probe.", request_text="track it",
+        requirements={"Which service?": "Nextcloud"},
+    )
+    row = registry.read()["tracking"]["skills"][0]
+    assert row["requirements"] == {"Which service?": "Nextcloud"}
+    scheduler = _scheduler(tmp_path)
+    draft = scheduler._stub_draft("tracking", "probe")
+    assert draft.requirements == {"Which service?": "Nextcloud"}
+
+
+# ---- repair loop ----
+
+def _repair_offer(offer_id="r1", selected="repair_skill", skill="tracking.check"):
+    return RepairOffer(
+        id=offer_id,
+        run_id="run1",
+        category="tracking",
+        skill=skill,
+        selected=selected,
+        reason="boom",
+        request_text="track my package",
+        failure="connection refused",
+    )
+
+
+def test_resolve_repair_no_repair_declines(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.repairs.append(_repair_offer())
+    assert [r["id"] for r in scheduler.pending_repairs()] == ["r1"]
+    status, _ = scheduler.resolve_repair("r1", "no_repair")
+    assert status == "ok"
+    assert scheduler.pending_repairs() == []
+    assert any(e["kind"] == "repair_declined" for e in scheduler.trace.read())
+
+
+def test_resolve_repair_retry_requeues(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.repairs.append(_repair_offer(selected="retry"))
+    status, detail = scheduler.resolve_repair("r1")
+    assert status == "running"
+    assert "retrying" in detail
+    assert any(e["kind"] == "repair_retry" for e in scheduler.trace.read())
+
+
+def test_resolve_repair_ask_user_question_then_answer_starts_repair(tmp_path):
+    scheduler = _scheduler(
+        tmp_path,
+        codegen=CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2),
+    )
+    scheduler.repairs.append(_repair_offer(selected="ask_user"))
+    status, _ = scheduler.resolve_repair("r1")
+    assert status == "needs_input"
+    pending = scheduler.pending_questions()
+    assert len(pending) == 1
+    assert pending[0]["kind"] == "repair"
+    status, _ = scheduler.answer_question(pending[0]["id"], "use the app password")
+    assert status == "running"
+    writing = [
+        e for e in scheduler.trace.read() if e["kind"] == "skill_writing"
+    ]
+    assert writing and writing[-1]["repair"] is True
+    assert any(e["kind"] == "repair_executed" for e in scheduler.trace.read())
+
+
+def test_repair_budget_is_bounded(tmp_path):
+    scheduler = _scheduler(
+        tmp_path,
+        codegen=CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2),
+    )
+    scheduler.repairs.append(_repair_offer("r1"))
+    assert scheduler.resolve_repair("r1")[0] == "running"
+    scheduler.repairs.append(_repair_offer("r2"))
+    status, detail = scheduler.resolve_repair("r2")
+    assert status == "error"
+    assert "budget" in detail
+
+
+def test_resolve_repair_unknown_offer_errors(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    status, detail = scheduler.resolve_repair("missing")
+    assert status == "error"
+    assert "no repair offer" in detail

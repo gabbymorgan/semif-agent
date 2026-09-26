@@ -3,8 +3,10 @@
 A pure-stdlib HTTP server on localhost serving a Redux-DevTools-style
 inspector over the agent's decision flow. Reads the decision log
 (`decisions.jsonl`) plus the run lifecycle trace (`runs.jsonl`), exposes the
-static skill tree, the dream cost report, and three write endpoints: submit a
-request, answer a run paused for input, and relabel a decision (human override).
+static skill tree, the dream cost report, and the write endpoints: submit a
+request, answer a run paused for input, answer a deferred authoring question,
+resolve a repair offer, restart a skill write, and relabel a decision (human
+override).
 
 The scheduler's engine and LLM are built lazily, so the dashboard runs on the
 thin dev box in replay mode (reads logs; submit degrades to a JSON error) and
@@ -114,12 +116,16 @@ def build_status(scheduler: Scheduler) -> dict:
         ]
         tau = scheduler.tau
         queue_max = scheduler.queue.max_size
+        questions = scheduler.pending_questions()
+        repairs = scheduler.pending_repairs()
     return {
         "current": current,
         "pending": pending,
         "queue": queue,
         "tau": tau,
         "queue_max": queue_max,
+        "questions": questions,
+        "repairs": repairs,
     }
 
 
@@ -135,6 +141,8 @@ def build_tree_payload(scheduler: Scheduler) -> dict:
                     "name": skill.name,
                     "description": skill.description,
                     "status": skill.status,
+                    "integration": skill.integration or None,
+                    "integration_source": skill.integration_source,
                 }
                 for skill in skills
             ]
@@ -214,6 +222,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self._send(200, build_status(self.scheduler))
             return
+        if path == "/api/questions":
+            self._send(200, {"questions": self.scheduler.pending_questions()})
+            return
+        if path == "/api/repairs":
+            self._send(200, {"repairs": self.scheduler.pending_repairs()})
+            return
         self._send_error(404, "no such endpoint")
 
     def do_POST(self):
@@ -256,6 +270,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     body = self._read_json()
                     status, detail = self.scheduler.restart_skill(
                         str(body.get("category", "")), str(body.get("skill", ""))
+                    )
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
+            return
+        if path == "/api/questions":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    status, detail = self.scheduler.answer_question(
+                        str(body.get("id", "")), str(body.get("text", ""))
+                    )
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
+            return
+        if path == "/api/repair":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    action = body.get("action")
+                    status, detail = self.scheduler.resolve_repair(
+                        str(body.get("id", "")),
+                        None if action is None else str(action),
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))

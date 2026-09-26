@@ -511,6 +511,34 @@ async function restartSkill(category, name) {
   await refreshAll();
 }
 
+async function answerQuestion(id, text) {
+  try {
+    const res = await getJSON("/api/questions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, text }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`answer failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
+async function resolveRepair(id, action) {
+  try {
+    const res = await getJSON("/api/repair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`repair failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
 function skillStatusBadge(status, category, name) {
   const span = document.createElement("span");
   if (status === "writing") {
@@ -550,6 +578,19 @@ function renderTree() {
       desc.textContent = skill.description;
       row.appendChild(nm);
       row.appendChild(desc);
+      if (skill.integration && skill.integration.service && skill.integration.service !== "unknown") {
+        const ig = document.createElement("span");
+        ig.className = "sdesc";
+        ig.textContent = `${skill.integration.service} · ${skill.integration.transport}`;
+        row.appendChild(ig);
+      }
+      if (skill.status === "ready" && skill.integration_source && skill.integration_source !== "declared") {
+        const un = document.createElement("span");
+        un.className = "sbadge stub";
+        un.textContent = "unverified";
+        un.title = "no valid INTEGRATION declaration; the body was inferred";
+        row.appendChild(un);
+      }
       row.appendChild(skillStatusBadge(skill.status, cat, skill.name));
       div.appendChild(row);
     }
@@ -599,7 +640,53 @@ function renderStatus() {
     p.textContent = `awaiting input (${pending.run_id || pending.skill}): ${pending.question}`;
     el.appendChild(p);
   }
+  renderQuestions();
   renderAnswerFeedback();
+}
+
+function renderQuestions() {
+  const el = $("#status");
+  for (const q of state.status.questions || []) {
+    const box = document.createElement("div");
+    box.className = "pending-line";
+    const label = document.createElement("div");
+    label.textContent = `? ${q.skill}: ${q.question}`;
+    const form = document.createElement("form");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "answer (empty to skip)";
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = "answer";
+    form.appendChild(input);
+    form.appendChild(btn);
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      answerQuestion(q.id, input.value.trim());
+      input.value = "";
+    });
+    box.appendChild(label);
+    box.appendChild(form);
+    el.appendChild(box);
+  }
+  for (const r of state.status.repairs || []) {
+    const box = document.createElement("div");
+    box.className = "pending-line";
+    const label = document.createElement("div");
+    label.textContent = `repair ${r.skill}: ${r.failure.slice(0, 160)}`;
+    box.appendChild(label);
+    const actions = document.createElement("div");
+    for (const action of ["retry", "repair_skill", "ask_user", "no_repair"]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = action;
+      btn.className = action === r.selected ? "primary" : "";
+      btn.addEventListener("click", () => resolveRepair(r.id, action));
+      actions.appendChild(btn);
+    }
+    box.appendChild(actions);
+    el.appendChild(box);
+  }
 }
 
 function renderAnswerFeedback() {

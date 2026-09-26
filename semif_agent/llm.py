@@ -23,6 +23,20 @@ class Assessment:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class FidelityReview:
+    """Whether a generated skill body really performs its action.
+
+    `performs_real_action` is False when the body simulates the action (canned
+    result, fabricated data, draft-by-default, or asks the human for operational
+    data instead of acting). Degrades to True when the review endpoint is
+    unreachable so a broken reviewer never blocks authoring.
+    """
+
+    performs_real_action: bool
+    reason: str
+
+
 class LLMClient:
     def __init__(self, base_url: str, model: str, timeout: float = 120.0):
         self.base_url = base_url.rstrip("/")
@@ -75,6 +89,58 @@ class LLMClient:
             success=success,
             summary=summary,
             updated_request=None if updated is None else str(updated),
+        )
+
+    def review_skill_body(
+        self,
+        request_text: str,
+        description: str,
+        code: str,
+        requirements: dict[str, str] | None = None,
+        integration: dict | None = None,
+    ) -> FidelityReview:
+        """Judge whether a generated body performs its action for real.
+
+        The agent exists to do the user's task against their actual service; a
+        body that fakes the outcome is broken even when its hermetic test
+        passes. Any review failure degrades to `performs_real_action=True` so
+        the reviewer never blocks authoring.
+        """
+        system = (
+            "You review a generated agent skill body against the user's request. "
+            "Decide whether `act` really performs the requested operation against "
+            "the real service, or merely simulates it — a canned result, "
+            "fabricated data, a draft written when the user asked for the action, "
+            "or asking the human for operational data it should read from "
+            "config. A purely local/computational task is real when it actually "
+            "computes the result. Reply with JSON only: "
+            '{"performs_real_action": true|false, "reason": "<brief>"}'
+        )
+        requirement_lines = ""
+        if requirements:
+            requirement_lines = "Requirements answers:\n" + "\n".join(
+                f"- {question} -> {answer}" for question, answer in requirements.items()
+            ) + "\n"
+        user = (
+            f"Request: {request_text}\n"
+            f"Skill description: {description}\n"
+            f"Integration declaration: {json.dumps(integration or {}, sort_keys=True)}\n"
+            f"{requirement_lines}"
+            f"Skill body:\n```python\n{code}\n```\n"
+        )
+        try:
+            raw = self._chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+            )
+            parsed = self._parse_json(raw)
+        except Exception as exc:
+            return FidelityReview(True, f"review failed: {exc}")
+        return FidelityReview(
+            performs_real_action=bool(parsed.get("performs_real_action")),
+            reason=str(parsed.get("reason", "")),
         )
 
     @staticmethod
