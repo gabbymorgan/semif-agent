@@ -44,6 +44,7 @@ from semif_agent.codegen import (
 )
 from semif_agent.decisions import Request
 from semif_agent.skills import (
+    Skill,
     SkillDraft,
     SkillStore,
     build_skills,
@@ -155,6 +156,13 @@ def test_testgen_contract_embeds_fixtures_inline():
 
 def test_build_skill_body_prompt_includes_contract_request_and_draft():
     tree = build_tree(build_skills({"skills": {}}))
+    tree["tracking"] = [
+        Skill(
+            name="tracking.check",
+            category="tracking",
+            description="Check the delivery status of a package.",
+        )
+    ]
     draft = SkillDraft(name="probe", description="Probe the service.")
     messages = build_skill_body_prompt(
         Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"

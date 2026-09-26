@@ -12,6 +12,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,8 @@ from semif_agent.skills import (
     generate_category,
     generate_skill,
     merge_registry,
+    merge_seed_store,
+    merge_skill_store,
     navigate,
     parse_category_draft,
     parse_skill_draft,
@@ -122,6 +125,7 @@ def _scheduler(tmp_path, codegen=None):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(tmp_path / "seeds"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
         codegen=codegen,
@@ -139,7 +143,14 @@ def test_build_category_prompt_contains_request_and_tree():
     assert "category" in messages[0]["content"]
     joined = messages[1]["content"]
     assert "tracking for my drone delivery" in joined
-    assert "email: email.compose" in joined
+    assert "response: response.reject" in joined
+
+
+def test_build_skills_is_internal_behaviors_only():
+    """Real integrations are generated or seeded, never fabricated here: a
+    hardcoded fake shadows the authoring path for a real skill (navigation
+    routes to it). Only service-free behaviors stay built-in."""
+    assert [skill.name for skill in build_skills({"skills": {}})] == ["response.reject"]
 
 
 def test_parse_category_draft_plain_json():
@@ -212,6 +223,13 @@ def test_build_tree_includes_registry_stubs(tmp_path):
 
 def test_build_skill_prompt_contains_request_category_and_skills():
     tree = build_tree(build_skills({"skills": {}}))
+    tree["tracking"] = [
+        Skill(
+            name="tracking.check",
+            category="tracking",
+            description="Check the delivery status of a package.",
+        )
+    ]
     messages = build_skill_prompt(Request("tracking for my drone delivery"), "tracking", tree)
     assert messages[0]["role"] == "system"
     assert "tracking" in messages[0]["content"]
@@ -312,6 +330,71 @@ def test_merge_registry_loads_categories_and_skills(tmp_path):
     assert tree["delivery"][0].category == "delivery"
 
 
+def _write_seed(seed_store, category, name, description=""):
+    directory = seed_store.dir(category, name)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "skill.py").write_text(GOOD_BODY)
+    (directory / "contract.json").write_text(json.dumps({"probe_url": "Where to probe."}))
+    if description:
+        (directory / "manifest.json").write_text(json.dumps({"description": description}))
+
+
+def test_merge_seed_store_loads_skill_with_runtime_config(tmp_path):
+    """A seed is runnable from the committed folder; recorded config lives in
+    the runtime store, never in the seed folder."""
+    seed_store = SkillStore(str(tmp_path / "seeds"))
+    config_store = SkillStore(str(tmp_path / "skills"))
+    _write_seed(seed_store, "calendar", "probe", description="Probe a service.")
+    config_store.write_config("calendar", "probe", {"probe_url": "https://example.test"})
+
+    tree = build_tree(build_skills({"skills": {}}))
+    loaded = merge_seed_store(tree, seed_store, config_store)
+    assert loaded == 1
+    skill = tree["calendar"][0]
+    assert skill.status == "ready"
+    assert skill.description == "Probe a service."
+    assert skill.contract == {"probe_url": "Where to probe."}
+    assert skill.config == {"probe_url": "https://example.test"}
+    assert skill.integration_source == "declared"
+
+
+def test_merge_seed_store_falls_back_to_name_and_body_store_wins(tmp_path):
+    seed_store = SkillStore(str(tmp_path / "seeds"))
+    body_store = SkillStore(str(tmp_path / "skills"))
+    _write_seed(seed_store, "calendar", "probe")
+
+    tree = build_tree(build_skills({"skills": {}}))
+    merge_seed_store(tree, seed_store, body_store)
+    assert tree["calendar"][0].description == "probe"
+
+    body_store.write_body("calendar", "probe", GOOD_BODY)
+    merge_skill_store(tree, body_store, {})
+    assert tree["calendar"][0].description == "probe", "the generated body replaces the seed"
+    assert len(tree["calendar"]) == 1
+
+
+def test_scheduler_loads_committed_seed_skills(tmp_path):
+    """The real seed package ships in the tree at startup with its manifest
+    description and declared integration."""
+    seed_root = Path(__file__).resolve().parent.parent / "seeds"
+    scheduler = Scheduler(
+        engine=SemIfEngine(EngineConfig()),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(seed_root),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+    )
+    calendar = scheduler.tree["calendar"]
+    assert [s.name for s in calendar] == ["next_event"]
+    assert calendar[0].description.startswith("Report the next")
+    assert calendar[0].status == "ready"
+    assert calendar[0].integration["transport"] == "caldav"
+
+
 def test_navigate_empty_tree_short_circuits(tmp_path):
     """An empty tree goes straight to CreateCategory without a SemIf call."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
@@ -335,6 +418,7 @@ def test_dispatch_create_category_without_engine_returns_error(tmp_path):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(tmp_path / "seeds"),
         },
         trace=trace,
     )
@@ -775,6 +859,18 @@ def _repair_offer(offer_id="r1", selected="repair_skill", skill="tracking.check"
     )
 
 
+def _install_tracking_stub(scheduler):
+    """A repair rewrite needs the leaf to exist in the tree (a real skill that
+    failed), so a runnable body can replace it."""
+    scheduler.tree["tracking"] = [
+        Skill(
+            name="tracking.check",
+            category="tracking",
+            description="Check the delivery status of a package.",
+        )
+    ]
+
+
 def test_resolve_repair_no_repair_declines(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.repairs.append(_repair_offer())
@@ -799,6 +895,7 @@ def test_resolve_repair_ask_user_question_then_answer_starts_repair(tmp_path):
         tmp_path,
         codegen=CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2),
     )
+    _install_tracking_stub(scheduler)
     scheduler.repairs.append(_repair_offer(selected="ask_user"))
     status, _ = scheduler.resolve_repair("r1")
     assert status == "needs_input"
@@ -819,6 +916,7 @@ def test_repair_budget_is_bounded(tmp_path):
         tmp_path,
         codegen=CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2),
     )
+    _install_tracking_stub(scheduler)
     scheduler.repairs.append(_repair_offer("r1"))
     assert scheduler.resolve_repair("r1")[0] == "running"
     scheduler.repairs.append(_repair_offer("r2"))

@@ -50,6 +50,7 @@ from .skills import (
     generate_skill,
     materialize_skill,
     merge_registry,
+    merge_seed_store,
     merge_skill_store,
     navigate,
 )
@@ -211,7 +212,9 @@ class Scheduler:
         self.tree = build_tree(self.skills)
         self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
         self.body_store = SkillStore(config.get("skill_bodies", "data/skills"))
+        self.seed_store = SkillStore(config.get("skill_seeds", "seeds"))
         merge_registry(self.tree, self.registry.read())
+        merge_seed_store(self.tree, self.seed_store, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
         self.ctx = ActionContext(engine=self.engine, config=config)
         self.runner = SkillRunner(self.ctx, self.llm, self.log, store=self.body_store)

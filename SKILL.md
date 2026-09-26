@@ -143,8 +143,9 @@ talk to. Declaring a transport the body does not use is a broken skill.
   called again with the *same* prediction — check `request.user_input` on the
   resume pass to finish the run. This refines the product goal and requirements
   only — never operational data (the runner supplies that).
-- **Write files under configured data dirs only** (e.g. `ctx.config["drafts"]`),
-  never anywhere else on disk.
+- **Write files under configured data dirs only** (e.g. the directory named by
+  a config variable such as `ctx.config["output_dir"]`), never anywhere else on
+  disk.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.
 - **Names match the manifest.** The module is imported as its manifest name;
   the functions are `predict` and `act` exactly.
@@ -154,7 +155,8 @@ talk to. Declaring a transport the body does not use is a broken skill.
 - Single purpose, single file, single module.
 - Avoid duplicating an existing skill in the same category.
 - `predict` resolves ambiguity (arguments, recipients, targets) with SemIf
-  sub-decisions, mirroring how `email.compose` resolves its recipient.
+  sub-decisions, mirroring how `calendar.next_event` resolves which calendar
+  to read.
 - `act` performs the concrete real action and writes a human-readable
   `action_log` that the self-assessment LLM can judge. Include what the service
   actually returned.

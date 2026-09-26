@@ -25,7 +25,7 @@ def build_scheduler(tmp_path):
         engine=engine,
         llm=llm,
         log=log,
-        config={"skills": {}},
+        config={"skills": {}, "skill_seeds": str(tmp_path / "seeds")},
         trace=trace,
     )
 

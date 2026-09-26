@@ -30,7 +30,7 @@ def build_scheduler(tmp_path):
         engine=engine,
         llm=llm,
         log=log,
-        config={"skills": {}},
+        config={"skills": {}, "skill_seeds": str(tmp_path / "seeds")},
         trace=trace,
     )
     return scheduler
@@ -81,8 +81,8 @@ def test_tree_endpoint(tmp_path):
     try:
         status, payload = server.get("/api/tree")
         assert status == 200
-        assert "email" in payload["categories"]
-        assert any(s["name"] == "email.compose" for s in payload["categories"]["email"])
+        assert "response" in payload["categories"]
+        assert any(s["name"] == "response.reject" for s in payload["categories"]["response"])
     finally:
         server.close()
 

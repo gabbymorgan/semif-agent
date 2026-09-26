@@ -68,12 +68,7 @@
     }
   },
   "skill_bodies": "data/skills",
-  "skills": {
-    "email": {"cost_budget": 1.0},
-    "contacts": "data/contacts.json",
-    "drafts": "data/drafts",
-    "packages": "data/packages.json"
-  },
+  "skill_seeds": "seeds",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",

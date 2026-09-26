@@ -67,13 +67,16 @@ scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue;
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
-skills.py    tree + registry (email.compose, response.reject, tracking.check),
-                navigation = SemIf choices per level (logged), create_category
+skills.py    tree + registry (hardcoded built-in: response.reject, service-free
+                behaviors only), navigation = SemIf choices per level (logged),
+                create_category
                 and create_skill author + register stubs via the decision model
                 in generation mode; SkillStore persists one folder per skill
                 (skill.py, skill.test.py, contract.json, config.json) and
                 materialize_skill / merge_skill_store
                 hot-load runnable skills from data/skills/;
+                merge_seed_store loads committed starter skills from seeds/ with
+                their recorded config read from data/skills/;
                 ActionResult.needs_input pauses a run for human input;
                 Skill.integration / integration_source read the body's
                 INTEGRATION declaration (or infer it);
@@ -375,6 +378,15 @@ unit tests (24) + box integration tests (2).
   check** (inline fixtures, loopback `http.server` for HTTP bodies, no external
   network) that never certifies the live integration — only a real run does.
   The body owns no data; everything comes from the runner via `ctx.config`.
+- **Seed skills.** `seeds/<category>/<name>/` ships a real starter integration in
+  the exact generated-skill folder format (`skill.py`, `contract.json`,
+  `skill.test.py`, plus `manifest.json` with the description). `merge_seed_store`
+  loads them into every tree at startup; recorded config (credentials collected
+  at first fire) is written to the runtime store `data/skills/`, so the committed
+  seed never holds secrets, and a generated body with the same name replaces the
+  seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
+  server-side) is the reference seed; `tests/test_seed_skills.py` keeps it
+  honest.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the

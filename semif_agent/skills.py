@@ -233,6 +233,9 @@ class SkillStore:
     def read_config(self, category: str, name: str) -> dict:
         return self._read_json(category, name, "config.json")
 
+    def read_manifest(self, category: str, name: str) -> dict:
+        return self._read_json(category, name, "manifest.json")
+
     def _read_json(self, category: str, name: str, filename: str):
         path = self.dir(category, name) / filename
         if not path.is_file():
@@ -377,6 +380,61 @@ def merge_skill_store(
     return upgraded
 
 
+def merge_seed_store(
+    tree: dict[str, list[Skill]],
+    seed_store: SkillStore,
+    config_store: SkillStore | None = None,
+) -> int:
+    """Load committed starter skills from a read-only seed store into the tree.
+
+    A seed is a real skill in the same folder layout as a generated one
+    (`skill.py`, `contract.json`, `skill.test.py`, plus a `manifest.json` with
+    its description), so it is inspectable and testable exactly like a codegen
+    body. `config_store` is the runtime store (`data/skills`): recorded answers
+    — credentials collected at first fire — live there, never in the committed
+    seed folder. Returns the number of skills loaded.
+    """
+    loaded = 0
+    for category, name in seed_store.list_skills():
+        directory = seed_store.dir(category, name)
+        try:
+            module = load_skill_module(category, name, seed_store.path)
+        except Exception:
+            continue
+        predict = getattr(module, "predict", None)
+        act = getattr(module, "act", None)
+        if not callable(predict) or not callable(act):
+            continue
+        try:
+            code = (directory / "skill.py").read_text()
+        except OSError:
+            continue
+        integration, integration_source = _extract_integration(code)
+        manifest = seed_store.read_manifest(category, name)
+        description = str(manifest.get("description") or name)
+        skill = Skill(
+            name=name,
+            category=category,
+            description=description,
+            predict=predict,
+            act=act,
+            config=(config_store or seed_store).read_config(category, name),
+            contract=seed_store.read_contract(category, name),
+            integration=integration,
+            integration_source=integration_source,
+        )
+        skills = tree.setdefault(category, [])
+        for index, existing in enumerate(skills):
+            if existing.name == name:
+                skills[index] = skill
+                break
+        else:
+            skills.append(skill)
+            skills.sort(key=lambda s: s.name)
+        loaded += 1
+    return loaded
+
+
 def resolve_skill_config(
     store: SkillStore, skill: Skill, global_config: dict, answered: dict | None = None
 ) -> dict:
@@ -411,84 +469,26 @@ def compose_state(request: Request, current: str | None = None) -> str:
     return " ".join(parts)
 
 
-def _contacts(ctx: ActionContext) -> list[dict]:
-    path = Path(ctx.config.get("contacts", "data/contacts.json"))
-    if not path.is_file():
-        return []
-    return json.loads(path.read_text())
-
-
-def _email_predict(ctx: ActionContext, request: Request) -> Prediction:
-    contacts = _contacts(ctx)
-    if not contacts:
-        return Prediction(text="no contacts available", decisions=[])
-    decision = DecisionRequest(
-        state=compose_state(request),
-        question="Which contact is the intended recipient?",
-        options=[Option(c["name"], c.get("description", "")) for c in contacts]
-        + [Option("none", "None of the listed contacts.")],
-    )
-    result = ctx.engine.call(decision)
-    return Prediction(text=f"recipient is {result.selected}", decisions=[(decision, result)])
-
-
-def _email_compose(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
-    recipient = prediction.text.removeprefix("recipient is ")
-    if recipient == "no contacts available" or recipient == "none":
-        return ActionResult(
-            action_log="email.compose aborted: recipient not resolved.",
-            new_state=request.text,
-        )
-    drafts = Path(ctx.config.get("drafts", "data/drafts"))
-    drafts.mkdir(parents=True, exist_ok=True)
-    target = drafts / f"{request.id}.txt"
-    target.write_text(f"To: {recipient}\nBody: {request.text}\n")
-    return ActionResult(
-        action_log=f"email.compose: wrote draft {target} for {recipient!r}.",
-        new_state=f"Draft written to {target.name} for {recipient}.",
-    )
-
-
 def _response_reject(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
     message = f"Rejected: I cannot act on this while busy ({request.text})."
     return ActionResult(action_log=f"response.reject: {message}", new_state=message)
 
 
-def _tracking_check(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
-    path = Path(ctx.config.get("packages", "data/packages.json"))
-    if not path.is_file():
-        return ActionResult(
-            action_log="tracking.check aborted: no packages file.",
-            new_state=request.text,
-        )
-    packages = json.loads(path.read_text())
-    lines = [f"{p.get('id')}: {p.get('status')}" for p in packages]
-    report = "Tracking statuses:\n" + "\n".join(lines)
-    return ActionResult(action_log="tracking.check: " + report, new_state=report)
-
-
 def build_skills(config: dict) -> list[Skill]:
-    skills = config.get("skills", {})
+    """The hardcoded built-ins: internal behaviors only.
+
+    Real integrations do not live here — they are authored by the codegen
+    pipeline into `data/skills/` or shipped as seed skill packages under
+    `seeds/`. A fabricated built-in here shadows the authoring path for a real
+    one (navigation routes to it), so keep this list to behaviors that need no
+    external service.
+    """
     return [
-        Skill(
-            name="email.compose",
-            category="email",
-            description="Compose and dispatch an email.",
-            predict=_email_predict,
-            act=_email_compose,
-            cost_budget=float(skills.get("email", {}).get("cost_budget", 1.0)),
-        ),
         Skill(
             name="response.reject",
             category="response",
             description="Politely reject a request because the agent is busy.",
             act=_response_reject,
-        ),
-        Skill(
-            name="tracking.check",
-            category="tracking",
-            description="Check the delivery status of a package.",
-            act=_tracking_check,
         ),
     ]
 
