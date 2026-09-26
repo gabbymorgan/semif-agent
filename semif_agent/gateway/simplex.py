@@ -186,14 +186,25 @@ class SimplexAdapter(GatewayAdapter):
     async def _maybe_accept(self, ws, resp: dict) -> None:
         if not self.auto_accept:
             return
-        contact_id = (resp.get("contactRequest") or {}).get("contactId")
-        if contact_id is None:
+        req = resp.get("contactRequest") or {}
+        # v7 names the field contactRequestId_ (the trailing underscore is the
+        # generated-API optional marker) and /_accept takes the *request* id;
+        # older events exposed contactId. Fall back so both shapes work.
+        req_id = req.get("contactRequestId")
+        if req_id is None:
+            req_id = req.get("contactId_") or req.get("contactId")
+        if req_id is None:
             return
         self._corr += 1
         await ws.send(
-            json.dumps({"corrId": f"sf-{self._corr}", "cmd": f"/_accept {contact_id}"})
+            json.dumps({"corrId": f"sf-{self._corr}", "cmd": f"/_accept {req_id}"})
         )
-        self._event("gateway_accepted", contact_id=str(contact_id))
+        contact_id = req.get("contactId_") or req.get("contactId")
+        self._event(
+            "gateway_accepted",
+            contact_request_id=str(req_id),
+            contact_id=str(contact_id) if contact_id is not None else "",
+        )
 
     def _schedule_flush(self, message: InboundMessage, on_inbound) -> None:
         chat = message.chat_id

@@ -115,6 +115,44 @@ def test_send_command_is_structured_not_shortcut():
     assert command != "/_send @4 hello"
 
 
+# ---- adapter: contact request acceptance ----
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(json.loads(data)["cmd"])
+
+
+def _contact_request_event(req):
+    return json.dumps(
+        {"resp": {"type": "receivedContactRequest", "contactRequest": req}}
+    )
+
+
+def test_accept_uses_v7_contact_request_id():
+    # v7 exposes contactRequestId (and contactId_); /_accept takes the request id.
+    adapter = SimplexAdapter({"auto_accept": True})
+    ws = _FakeWS()
+    asyncio.run(adapter._consume(_contact_request_event({"contactRequestId": 7, "contactId_": 9}), lambda m: None, ws))
+    assert ws.sent == ["/_accept 7"]
+
+
+def test_accept_falls_back_to_contact_id_for_legacy_events():
+    adapter = SimplexAdapter({"auto_accept": True})
+    ws = _FakeWS()
+    asyncio.run(adapter._consume(_contact_request_event({"contactId": 4}), lambda m: None, ws))
+    assert ws.sent == ["/_accept 4"]
+
+
+def test_accept_disabled_sends_nothing():
+    adapter = SimplexAdapter({"auto_accept": False})
+    ws = _FakeWS()
+    asyncio.run(adapter._consume(_contact_request_event({"contactRequestId": 7, "contactId_": 9}), lambda m: None, ws))
+    assert ws.sent == []
+
+
 # ---- adapter: batching ----
 
 def test_batching_concatenates_rapid_messages():
