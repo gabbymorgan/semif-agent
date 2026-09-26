@@ -125,6 +125,42 @@ def test_pipeline_end_to_end(tmp_path):
     assert "queue:" in skills
 
 
+def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
+    """Regression: the gate must not drop lookups phrased as questions.
+
+    Before the gate state carried the end-user expectation and the available
+    skills, "tell me the next event in my nextcloud calendar" scored 0.599
+    (just under tau 0.6) and "what is the next event in my nextcloud calendar?"
+    scored 0.191, so both were dropped as "no actionable request". All lookup
+    variants must pass now, while chatter stays out.
+    """
+    config = load_config()
+    require_real(config)
+    config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
+    scheduler, config = build_scheduler(config)
+
+    lookups = [
+        "tell me the next event in my nextcloud calendar",
+        "what is the next event in my nextcloud calendar?",
+        "what is the next event in my nextcloud calendar Morgan",
+        "tell me the next event in my nextcloud calendar Morgan",
+        "tell me the next even in my calendar",
+        "tell me the next event in my personal calendar",
+    ]
+    noise = ["hello there", "thanks!", "the sky is blue", "what's up"]
+    for text in lookups:
+        accepted = scheduler._contains_request(Request(text))
+        row = scheduler.log.read()[-1]
+        print(f"[lookup] {row['predicted_probs']} accepted={accepted} {text!r}")
+        assert accepted, f"gate dropped a lookup: {text!r}"
+    for text in noise:
+        accepted = scheduler._contains_request(Request(text))
+        row = scheduler.log.read()[-1]
+        print(f"[noise] {row['predicted_probs']} accepted={accepted} {text!r}")
+        assert not accepted, f"gate accepted noise: {text!r}"
+
+
 def test_busy_choice_path(tmp_path):
     config = load_config()
     require_real(config)

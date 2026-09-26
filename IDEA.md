@@ -13,7 +13,8 @@ A local desktop CLI agent whose control flow is a single decision model (SemIf).
 
 ```
 intake (typed / events / timers / other skills)
-  └─ contains_request?          (gate: is this even actionable?)
+  └─ contains_request?          (gate: should the agent handle this? the state
+                                 carries the user's expectation + available skills)
        └─ choice                (SemIf: "should this interrupt the current process?")
             ├─ yes → preempt current, requeue it with state preserved
             └─ no  → score      (SemIf: "how urgent?")

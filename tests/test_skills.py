@@ -21,7 +21,13 @@ from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
-from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler, SkillWrite
+from semif_agent.scheduler import (
+    PendingQuestion,
+    RepairOffer,
+    Scheduler,
+    SkillWrite,
+    build_gate_decision,
+)
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
@@ -403,6 +409,33 @@ def test_navigate_empty_tree_short_circuits(tmp_path):
     assert isinstance(result, CreateCategory)
     assert log.read() == []
     assert any(e["kind"] == "create_category" for e in trace.read())
+
+
+def test_gate_decision_carries_expectation_and_capabilities():
+    """The gate must know the user expects handling and what the agent can
+    actually do; without that context, lookups are read as small talk and
+    dropped (the nextcloud calendar regression)."""
+    tree = build_tree(build_skills({"skills": {}}))
+    tree["calendar"] = [
+        Skill(name="next_event", category="calendar", description="Report the next event.")
+    ]
+    decision = build_gate_decision(
+        Request("tell me the next event in my nextcloud calendar"), tree
+    )
+    assert "tell me the next event in my nextcloud calendar" in decision.state
+    assert "expects it to handle this input" in decision.state
+    assert "reading or looking up information" in decision.state
+    assert "calendar: next_event" in decision.state
+    assert decision.question == "Should the agent handle this input?"
+    assert [o.id for o in decision.options] == ["yes", "no"]
+    assert "looking something up" in decision.options[0].description
+    assert "greeting" in decision.options[1].description
+
+
+def test_gate_decision_empty_tree_still_builds():
+    decision = build_gate_decision(Request("hello"), {})
+    assert "(none yet)" in decision.state
+    assert decision.options[0].id == "yes"
 
 
 def test_dispatch_create_category_without_engine_returns_error(tmp_path):

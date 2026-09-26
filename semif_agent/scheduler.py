@@ -53,10 +53,12 @@ from .skills import (
     merge_seed_store,
     merge_skill_store,
     navigate,
+    tree_summary,
 )
 from .trace import TraceLog
 
 GATE_YES = "yes"
+GATE_CAPABILITY_CHARS = 1200
 CHOICE_INTERRUPT = "interrupt"
 URGENCY_OPTIONS = [
     ("critical", "Immediate danger or critical failure."),
@@ -65,6 +67,43 @@ URGENCY_OPTIONS = [
     ("low", "Can wait."),
 ]
 URGENCY_WEIGHTS = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
+
+
+def build_gate_decision(request: Request, tree: dict[str, list[Skill]]) -> DecisionRequest:
+    """The top-level handle/ignore filter, with end-user expectation and the
+    agent's real capabilities in the state.
+
+    Without them the decision model reads an information request ("tell me the
+    next event in my nextcloud calendar") as small talk and drops it: "actionable"
+    implies a side effect, and the model cannot see that looking a value up in a
+    configured service is exactly what this agent does. The available skills are
+    listed so a request naming one of them is visibly within the agent's remit.
+    """
+    capabilities = tree_summary(tree)[:GATE_CAPABILITY_CHARS] or "  (none yet)"
+    state = (
+        f"User input: {request.text}\n"
+        "[Context: the user is talking to a personal task agent and expects it to "
+        "handle this input. The agent performs real tasks through its skills; "
+        "reading or looking up information from a configured service is a real "
+        "task, not small talk.]\n"
+        f"[Available skills:\n{capabilities}]"
+    )
+    return DecisionRequest(
+        state=state,
+        question="Should the agent handle this input?",
+        options=[
+            Option(
+                GATE_YES,
+                "Yes — do what it asks, including looking something up or "
+                "reporting information using the agent's skills.",
+            ),
+            Option(
+                "no",
+                "No — it is not a request for the agent to do or answer anything "
+                "(background text, noise, or a bare greeting).",
+            ),
+        ],
+    )
 
 
 @dataclass
@@ -232,11 +271,7 @@ class Scheduler:
     # ---- decision templates (all real SemIf, all logged) ----
 
     def _contains_request(self, request: Request) -> bool:
-        decision = DecisionRequest(
-            state=compose_state(request),
-            question="Does this input contain an actionable request?",
-            options=[Option(GATE_YES, "Yes, it is actionable."), Option("no", "No, it is not.")],
-        )
+        decision = build_gate_decision(request, self.tree)
         result = self.engine.call(decision)
         self.log.append(
             decision, result, extra={"phase": "gate", "run_id": request.id}

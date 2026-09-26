@@ -52,7 +52,9 @@ supplied options; an LLM is used only for generation and self-assessment.
 ```
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard
-scheduler.py    gate -> choice(tau) -> score -> queue; preempt + requeue;
+scheduler.py    gate (handle/ignore; state carries the user's expectation +
+                the available skills, so lookups are not read as small talk)
+                -> choice(tau) -> score -> queue; preempt + requeue;
                 a skill run paused for input (needs_input) keeps `current`
                 busy; `answer` routes straight to the pending run, bypassing
                 gate/score/navigation; skill-body authoring is an ASYNC single-slot
