@@ -369,8 +369,9 @@ SimpleX gateway:
     'semif-gateway' (agent). Check them with:
       systemctl --user status semif-simplex semif-gateway
       journalctl --user -u semif-gateway -f
-  - Add this bot as a contact in your SimpleX app (its address is printed by the
-    daemon), then put your contactId/display name in config.json
+  - Show the bot's contact address (add it as a contact in your SimpleX app):
+      "$PYTHON" scripts/simplex-address.py
+  - Then put your contactId/display name in config.json
     gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
     event or the daemon's /contacts) and reply. With an empty allowlist the
     gateway rejects everyone — that is the safe default.

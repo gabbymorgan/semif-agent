@@ -578,6 +578,10 @@ unit tests (24) + box integration tests (2).
   logout/reboot. The gateway is its own process — the REPL and the gateway are
   independent front ends onto the same on-disk logs/registry (do not run two
   scheduler processes over one skill store concurrently).
+- **Bot address.** `python scripts/simplex-address.py` queries the running
+  daemon for the bot's contact link (`/_show_address <userId>`), which a human
+  adds in their SimpleX app to start a DM. `bootstrap.sh` prints this hint; the
+  address is created automatically on the daemon's first `--headless` run.
 - **Transport contract** (`gateway/base.py`): `GatewayAdapter.run(on_inbound,
   outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
   `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can
