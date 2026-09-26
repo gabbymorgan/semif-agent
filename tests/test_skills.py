@@ -142,6 +142,43 @@ def test_action_result_needs_input_defaults_none():
     assert ActionResult("log", "state").needs_input is None
 
 
+def test_run_summary_surfaces_real_action_log(tmp_path):
+    """The user sees the skill's actual result, not the LLM's brief assessment.
+
+    The assessment endpoint is unreachable here, so a summary taken from the
+    assessment would read "assessment failed"; the real action log must win.
+    """
+    scheduler = _scheduler(tmp_path)
+
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        return ActionResult(
+            action_log="Next event on 'personal': Team sync — 2026-09-27 10:00 CEST",
+            new_state="next event reported",
+        )
+
+    skill = Skill(
+        name="next_event",
+        category="calendar",
+        description="Report the next event.",
+        predict=predict,
+        act=act,
+    )
+
+    result = scheduler._run_skill(skill, Request("what is my next event?"))
+    assert result.kind == "ran"
+    assert "Team sync" in result.summary
+    assert "assessment failed" not in result.summary
+
+    assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
+    assert assessed, "the run must be traced"
+    assert "Team sync" in assessed[-1]["summary"]
+    assert assessed[-1]["assessment_summary"].startswith("assessment failed")
+
+
+
 def test_build_category_prompt_contains_request_and_tree():
     tree = build_tree(build_skills({"skills": {}}))
     messages = build_category_prompt(Request("tracking for my drone delivery"), tree)

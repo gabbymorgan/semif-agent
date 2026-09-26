@@ -595,6 +595,8 @@ class Scheduler:
             skill=skill.name,
             success=outcome.success,
             summary=outcome.summary,
+            assessment_summary=outcome.assessment_summary,
+            action_log=outcome.action_log,
             updated_request=outcome.updated_request,
         )
         if outcome.updated_request and request.reentries < self.max_reentries:
@@ -604,7 +606,10 @@ class Scheduler:
             self._propose_repair(skill, request, outcome)
         return DispatchResult(
             kind="ran",
-            summary=f"{skill.name}: {'ok' if outcome.success else 'failed'} — {outcome.summary}",
+            summary=(
+                f"{skill.name}: {'ok' if outcome.success else 'failed'} — "
+                f"{outcome.action_log or outcome.summary}"
+            ),
             skill=skill.name,
             decisions_logged=outcome.decisions_logged,
         )

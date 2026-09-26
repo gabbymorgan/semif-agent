@@ -39,6 +39,7 @@ class RunResult:
     new_state: str
     updated_request: str | None = None
     decisions_logged: int = 0
+    assessment_summary: str = ""
     error: str | None = None
     needs_input: str | None = None
     prediction: Prediction | None = None
@@ -259,10 +260,11 @@ class SkillRunner:
         return RunResult(
             skill=skill.name,
             success=assessment.success,
-            summary=assessment.summary,
+            summary=action.action_log.strip() or assessment.summary,
             action_log=action.action_log,
             new_state=observed,
             updated_request=assessment.updated_request,
             decisions_logged=len(decisions),
+            assessment_summary=assessment.summary,
             prediction=prediction,
         )
