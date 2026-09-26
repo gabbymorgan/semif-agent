@@ -586,11 +586,15 @@ unit tests (24) + box integration tests (2).
 - **Bot address / v7 relay gotcha.** The daemon must NOT run with `--headless`
   or `--relay`: in SimpleX Chat v7 `--headless` means "chat relay" (requires
   `--relay`) and yields a *relay* address, not a user contact address. Run bot
-  mode instead (`simplex-chat -p PORT --create-bot-display-name NAME`), which
-  needs no TTY and is restart-safe. `python scripts/simplex-address.py` then
-  shows (creating on first run, via `/_address` / `/_show_address <userId>`)
-  the bot's user contact link, which a human adds in their SimpleX app to start
-  a DM. `bootstrap.sh` prints it at the end of provisioning.
+  mode instead (`simplex-chat -p PORT --create-bot-display-name NAME`). **The
+  CLI only pumps WebSocket events while it has a controlling terminal**, so the
+  unit wraps it in `script -q -e -c '…' /dev/null` to allocate a PTY: a TTY-less
+  process (plain `ExecStart=` under systemd) accepts the socket but never emits
+  `receivedContactRequest`/`newChatItems`, so contact requests hang forever.
+  `python scripts/simplex-address.py` then shows (creating on first run, via
+  `/_address` / `/_show_address <userId>`) the bot's user contact link, which a
+  human adds in their SimpleX app to start a DM. `bootstrap.sh` prints it at the
+  end of provisioning.
 - **Transport contract** (`gateway/base.py`): `GatewayAdapter.run(on_inbound,
   outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
   `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can

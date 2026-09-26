@@ -136,7 +136,7 @@ echo "== runtime tree: $RUNTIME"
 mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$UNITS" "$USER_UNITS"
 
 # --- stage 0: system prereqs + linger ----------------------------------------
-PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake)
+PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake util-linux)
 missing=()
 for p in "${PKGS[@]}"; do
   dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")

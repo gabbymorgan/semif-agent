@@ -8,7 +8,10 @@ Type=simple
 # Bot mode: a local WebSocket chat server with a bot user. Do NOT add
 # --headless here — in SimpleX Chat v7 --headless means "chat relay" and
 # requires --relay, which yields a relay address, not a user contact address.
-ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex/simplex_v1 -k "" --create-bot-display-name "@DISPLAY_NAME@"
+# The CLI only pumps WebSocket events (receivedContactRequest, newChatItems)
+# when it has a controlling terminal, so `script` allocates a PTY; without it
+# systemd's TTY-less process receives no events and contact requests hang.
+ExecStart=/usr/bin/script -q -e -c "@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex/simplex_v1 -k '' --create-bot-display-name '@DISPLAY_NAME@'" /dev/null
 Restart=always
 RestartSec=10
 StandardOutput=journal
