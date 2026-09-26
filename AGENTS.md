@@ -299,6 +299,10 @@ unit tests (24) + box integration tests (2).
   revision). Set `HF_HOME=/home/abby/hf` or the tokenizer re-downloads.
 
 ### SemIf install (box)
+- **Legacy layout** (predates the `.runtime/` containment rule; kept for the
+  deprecated guppy agent venv). New machines use `scripts/bootstrap.sh`, which
+  installs the venv/engine/GGUF/cache under the checkout's `.runtime/` — see
+  "### jarvis (staging)" and "Code principles".
 - SemIf hard-pins `torch==2.10.0`, `numpy==2.2.6`, etc. The llamacpp path does
   **not** need torch (torch is imported lazily inside `direct.score`). Install
   with `--no-deps` and bring only what's needed — the committed manifest
