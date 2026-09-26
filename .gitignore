@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 .venv/
+# Repo-contained install artifacts (venv, SemIf engine, GGUF, HF cache,
+# simplex-chat binary/profile, rendered systemd units). See bootstrap.sh.
+.runtime/
 data/decisions.jsonl
 data/runs.jsonl
 data/categories.json

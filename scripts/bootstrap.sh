@@ -7,17 +7,28 @@
 #
 # Must be run from a semif-agent checkout (it reads pins from this checkout's
 # config.example.json); the checkout is used as-is and never re-cloned — only
-# the SemIf engine is fetched. Clone the agent repo to ~/semif-agent first
-# (its SSH key must be registered on Gitea).
+# the SemIf engine and the simplex-chat binary are fetched. Clone the agent
+# repo first (its SSH key must be registered on Gitea).
 #
-# Pins (SemIf git commit, GGUF url+sha256) are read from config.example.json's
-# engine block and the python dep pins from requirements/staging.txt — both
-# committed in this repo and the single source of truth; bump those there and
-# rerun to upgrade.
+# Every installation artifact lives INSIDE this checkout under .runtime/
+# (gitignored), so an end user can find and debug the whole stack in one tree:
+#   .runtime/venv/     python venv            .runtime/models/  GGUF
+#   .runtime/engine/   SemIf engine clone     .runtime/hf/      HF cache
+#   .runtime/bin/      simplex-chat binary    .runtime/simplex/ simplex profile
+#   .runtime/systemd/  rendered unit files (symlinked into ~/.config/systemd/user)
+# Only artifacts that operationally must live elsewhere are outside: the SSH
+# key (~/.ssh) and the real systemd user dir/linger.
+#
+# Pins (SemIf commit, GGUF url+sha256, simplex-chat url+sha256) are read from
+# config.example.json's engine/simplex_chat blocks, and the python dep pins
+# from requirements/staging.txt — all committed here and the single source of
+# truth; bump those and rerun to upgrade.
 #
 # Usage:
 #   scripts/bootstrap.sh [--peer-ollama URL] [--threads N] [--copy-data SRC]
-#                        [--public-dashboard] [-h]
+#                        [--public-dashboard]
+#                        [--simplex-allowed-users CSV] [--simplex-home-channel X]
+#                        [--simplex-display-name NAME] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
@@ -26,15 +37,21 @@ PEER_OLLAMA="http://192.168.8.181:11434"
 THREADS=""
 COPY_DATA=""
 PUBLIC_DASHBOARD=0
+SIMPLEX_ALLOWED_USERS=""
+SIMPLEX_HOME_CHANNEL=""
+SIMPLEX_DISPLAY_NAME=""
 
 usage() {
-  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo
-  echo "  --peer-ollama URL     remote ollama API for llm+codegen (default: $PEER_OLLAMA)"
-  echo "  --threads N           engine threads for config.json (default: config.example value)"
-  echo "  --copy-data SRC       rsync SRC (e.g. abby@box:~/repos/semif-agent/data) to data/ — opt-in"
-  echo "  --public-dashboard    bind dashboard to 0.0.0.0 instead of 127.0.0.1"
-  echo "  -h                    this help"
+  echo "  --peer-ollama URL            remote ollama API for llm+codegen (default: $PEER_OLLAMA)"
+  echo "  --threads N                  engine threads for config.json (default: config.example value)"
+  echo "  --copy-data SRC              rsync SRC (e.g. abby@box:~/repos/semif-agent/data) to data/ — opt-in"
+  echo "  --public-dashboard           bind dashboard to 0.0.0.0 instead of 127.0.0.1"
+  echo "  --simplex-allowed-users CSV  comma-separated contactIds/display names the gateway accepts"
+  echo "  --simplex-home-channel ID    gateway fallback channel for unsolicited messages"
+  echo "  --simplex-display-name NAME  simplex-chat bot display name (default: config.example value)"
+  echo "  -h                           this help"
   exit "${1:-0}"
 }
 
@@ -44,6 +61,9 @@ while [[ $# -gt 0 ]]; do
     --threads) THREADS="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --public-dashboard) PUBLIC_DASHBOARD=1; shift ;;
+    --simplex-allowed-users) SIMPLEX_ALLOWED_USERS="$2"; shift 2 ;;
+    --simplex-home-channel) SIMPLEX_HOME_CHANNEL="$2"; shift 2 ;;
+    --simplex-display-name) SIMPLEX_DISPLAY_NAME="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
   esac
@@ -52,26 +72,44 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.json"
 
+RUNTIME="$REPO_ROOT/.runtime"
+VENV="$RUNTIME/venv"
+ENGINE="$RUNTIME/engine"
+MODELS="$RUNTIME/models"
+HF_CACHE="$RUNTIME/hf"
+TOOLDIR="$RUNTIME/bin"
+SIMPLEX_DB="$RUNTIME/simplex"
+UNITS="$RUNTIME/systemd"
+USER_UNITS="$HOME/.config/systemd/user"
+PYTHON="$VENV/bin/python"
+PIP="$VENV/bin/pip"
+
 if [[ ! -f "$EXAMPLE" ]]; then
   echo "config.example.json not found at $EXAMPLE — run from a semif-agent checkout" >&2
   exit 1
 fi
 
 # --- read pins from config.example.json ------------------------------------
-read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV < <(
+read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
+  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY < <(
   python3 - "$EXAMPLE" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 e = cfg["engine"]
+s = cfg.get("simplex_chat", {})
 print(
     " ".join(
         [
-            e.get("semif_repo", ""),
-            e.get("semif_ref", ""),
-            e.get("gguf_url", ""),
-            e.get("gguf_sha256", ""),
-            e.get("source", ""),
-            e.get("revision", ""),
+            str(e.get("semif_repo", "")),
+            str(e.get("semif_ref", "")),
+            str(e.get("gguf_url", "")),
+            str(e.get("gguf_sha256", "")),
+            str(e.get("source", "")),
+            str(e.get("revision", "")),
+            str(s.get("bin_url", "")),
+            str(s.get("sha256", "")),
+            str(s.get("port", "")),
+            str(s.get("display_name", "")),
         ]
     )
 )
@@ -82,10 +120,22 @@ if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256"
   echo "engine pins missing in $EXAMPLE (semif_repo/semif_ref/gguf_url/gguf_sha256)" >&2
   exit 1
 fi
+if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" || -z "$SIMPLEX_PORT" ]]; then
+  echo "simplex_chat pins missing in $EXAMPLE (bin_url/sha256/port)" >&2
+  exit 1
+fi
 
-echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | peer $PEER_OLLAMA"
+if [[ -n "$SIMPLEX_DISPLAY_NAME" ]]; then
+  SIMPLEX_DISPLAY="$SIMPLEX_DISPLAY_NAME"
+fi
+SIMPLEX_DISPLAY="${SIMPLEX_DISPLAY:-semif}"
 
-# --- stage 0: system prereqs -------------------------------------------------
+echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex-chat sha256 ${SIMPLEX_SHA256:0:12}… | peer $PEER_OLLAMA"
+echo "== runtime tree: $RUNTIME"
+
+mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$UNITS" "$USER_UNITS"
+
+# --- stage 0: system prereqs + linger ----------------------------------------
 PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake)
 missing=()
 for p in "${PKGS[@]}"; do
@@ -95,6 +145,13 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   echo "== installing prereqs: ${missing[*]}"
   sudo apt-get update
   sudo apt-get install -y "${missing[@]}"
+fi
+
+if command -v loginctl >/dev/null 2>&1; then
+  if [[ "$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')" != "yes" ]]; then
+    echo "== enabling linger for $USER (services survive logout/reboot)"
+    sudo loginctl enable-linger "$USER"
+  fi
 fi
 
 # --- stage 1: python ----------------------------------------------------------
@@ -116,39 +173,35 @@ if [[ ! -f ~/.ssh/id_ed25519 ]]; then
   cat ~/.ssh/id_ed25519.pub
 fi
 
-AGENT_DIR="$REPO_ROOT"
-git -C "$AGENT_DIR" pull --ff-only || true
+git -C "$REPO_ROOT" pull --ff-only || true
 
-if [[ ! -d ~/semif/.git ]]; then
-  echo "== cloning SemIf engine from $SEMIF_REPO"
-  git clone "$SEMIF_REPO" ~/semif
+if [[ ! -d "$ENGINE/.git" ]]; then
+  echo "== cloning SemIf engine from $SEMIF_REPO into $ENGINE"
+  git clone "$SEMIF_REPO" "$ENGINE"
 fi
-if [[ "$(git -C ~/semif rev-parse HEAD 2>/dev/null)" != "$SEMIF_REF" ]]; then
+if [[ "$(git -C "$ENGINE" rev-parse HEAD 2>/dev/null)" != "$SEMIF_REF" ]]; then
   echo "== pinning SemIf engine to $SEMIF_REF"
-  git -C ~/semif fetch origin
-  git -C ~/semif checkout "$SEMIF_REF"
+  git -C "$ENGINE" fetch origin
+  git -C "$ENGINE" checkout "$SEMIF_REF"
 fi
 
 # --- stage 3: venv + deps -------------------------------------------------------
-if [[ ! -d ~/semif-venv ]]; then
-  echo "== creating ~/semif-venv"
-  "$PY" -m venv ~/semif-venv
+if [[ ! -x "$PYTHON" ]]; then
+  echo "== creating venv at $VENV"
+  "$PY" -m venv "$VENV"
 fi
-PIP=~/semif-venv/bin/pip
-echo "== installing engine deps into venv"
+echo "== installing engine deps into $VENV"
 "$PIP" install --upgrade pip setuptools wheel
-"$PIP" install -e ~/semif --no-deps
+"$PIP" install -e "$ENGINE" --no-deps
 CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
-"$PIP" install -e "$AGENT_DIR" --no-deps
+"$PIP" install -e "$REPO_ROOT" --no-deps
 
 # --- stage 4: GGUF --------------------------------------------------------------
-GGUF_DIR=~/models
 GGUF_NAME="$(basename "$GGUF_URL")"
-GGUF="$GGUF_DIR/$GGUF_NAME"
-mkdir -p "$GGUF_DIR"
+GGUF="$MODELS/$GGUF_NAME"
 sha_ok() { [[ -f "$GGUF" ]] && [[ "$(sha256sum "$GGUF" | cut -d' ' -f1)" == "$GGUF_SHA256" ]]; }
 if ! sha_ok; then
-  echo "== downloading GGUF ($GGUF_NAME)"
+  echo "== downloading GGUF ($GGUF_NAME) into $MODELS"
   rm -f "$GGUF" "$GGUF.tmp"
   curl -fL --retry 3 -o "$GGUF.tmp" "$GGUF_URL"
   mv "$GGUF.tmp" "$GGUF"
@@ -157,26 +210,45 @@ sha_ok || { echo "GGUF sha256 mismatch: expected $GGUF_SHA256" >&2; exit 1; }
 echo "== GGUF verified ($GGUF)"
 
 # --- stage 5: HF tokenizer cache --------------------------------------------------
-export HF_HOME="$HOME/hf"
-mkdir -p "$HF_HOME"
-echo "== pre-fetching tokenizer $HF_SOURCE @ $HF_REV"
-~/semif-venv/bin/python - "$HF_SOURCE" "$HF_REV" <<'PY'
+export HF_HOME="$HF_CACHE"
+mkdir -p "$HF_CACHE"
+echo "== pre-fetching tokenizer $HF_SOURCE @ $HF_REV into $HF_CACHE"
+"$PYTHON" - "$HF_SOURCE" "$HF_REV" <<'PY'
 import sys
 from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained(sys.argv[1], revision=sys.argv[2])
 PY
 
-# --- stage 6: config.json -----------------------------------------------------------
+# --- stage 6: simplex-chat daemon binary -------------------------------------------
+SIMPLEX_BIN="$TOOLDIR/simplex-chat"
+simplex_ok() {
+  [[ -f "$SIMPLEX_BIN" ]] && [[ "$(sha256sum "$SIMPLEX_BIN" | cut -d' ' -f1)" == "$SIMPLEX_SHA256" ]]
+}
+if ! simplex_ok; then
+  echo "== downloading simplex-chat into $SIMPLEX_BIN"
+  rm -f "$SIMPLEX_BIN" "$SIMPLEX_BIN.tmp"
+  curl -fL --retry 3 -o "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN_URL"
+  mv "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN"
+  chmod +x "$SIMPLEX_BIN"
+fi
+simplex_ok || { echo "simplex-chat sha256 mismatch: expected $SIMPLEX_SHA256" >&2; exit 1; }
+echo "== simplex-chat verified ($SIMPLEX_BIN)"
+
+# --- stage 7: config.json -----------------------------------------------------------
 if [[ -f "$REPO_ROOT/config.json" ]]; then
   cp "$REPO_ROOT/config.json" "$REPO_ROOT/config.json.bak.$(date +%s)"
 fi
-echo "== writing config.json (llm/codegen -> $PEER_OLLAMA)"
-python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$PEER_OLLAMA" "$([ "$PUBLIC_DASHBOARD" = 1 ] && echo 0.0.0.0 || echo 127.0.0.1)" <<'PY'
+echo "== writing config.json (llm/codegen -> $PEER_OLLAMA, runtime -> $RUNTIME)"
+python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$PEER_OLLAMA" \
+  "$([ "$PUBLIC_DASHBOARD" = 1 ] && echo 0.0.0.0 || echo 127.0.0.1)" \
+  "$REPO_ROOT" "$SIMPLEX_ALLOWED_USERS" "$SIMPLEX_HOME_CHANNEL" "$SIMPLEX_DISPLAY" <<'PY'
 import json, os, sys
-example, out, threads, peer, dash_host = sys.argv[1:]
+(example, out, threads, peer, dash_host, repo,
+ allowed_csv, home_channel, display) = sys.argv[1:]
 cfg = json.load(open(example))
 eng = cfg["engine"]
-eng["gguf"] = os.path.join(os.path.expanduser("~"), "models", os.path.basename(eng["gguf_url"]))
+runtime = os.path.join(repo, ".runtime")
+eng["gguf"] = os.path.join(runtime, "models", os.path.basename(eng["gguf_url"]))
 if threads and threads != "__example__":
     eng["threads"] = int(threads)
 # The clients hit {base_url}/chat/completions on ollama's OpenAI-compat path,
@@ -188,21 +260,52 @@ if not base_url.endswith("/v1"):
 cfg["llm"]["base_url"] = base_url
 cfg["codegen"]["base_url"] = base_url
 cfg["codegen"]["timeout"] = 3600
+cfg.setdefault("simplex_chat", {})["display_name"] = display
 cfg.setdefault("dashboard", {})["port"] = 8765
 cfg["dashboard"]["host"] = dash_host
+allowed = [u.strip() for u in allowed_csv.split(",") if u.strip()]
+simplex = cfg.setdefault("gateway", {}).setdefault("simplex", {})
+simplex["enabled"] = True
+simplex["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('port', 5226)}"
+simplex["allowed_users"] = allowed
+simplex["home_channel"] = home_channel
 json.dump(cfg, open(out, "w"), indent=2)
 PY
 
-# --- stage 7: optional data copy -----------------------------------------------------
-if [[ -n "$COPY_DATA" ]]; then
-  echo "== rsync data from $COPY_DATA"
-  mkdir -p "$AGENT_DIR/data"
-  rsync -a "$COPY_DATA/" "$AGENT_DIR/data/"
+# --- stage 8: systemd user units -----------------------------------------------------
+render_unit() {
+  local src="$1" dst="$2"
+  sed -e "s|@REPO@|$REPO_ROOT|g" \
+      -e "s|@PORT@|$SIMPLEX_PORT|g" \
+      -e "s|@DISPLAY_NAME@|$SIMPLEX_DISPLAY|g" "$src" > "$dst"
+}
+echo "== rendering systemd user units into $UNITS"
+for unit in semif-simplex.service semif-gateway.service; do
+  render_unit "$REPO_ROOT/scripts/systemd/$unit.in" "$UNITS/$unit"
+  ln -sf "$UNITS/$unit" "$USER_UNITS/$unit"
+done
+
+if command -v systemctl >/dev/null 2>&1; then
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now semif-simplex.service semif-gateway.service 2>/dev/null \
+      && echo "== enabled semif-simplex.service semif-gateway.service" \
+      || echo "WARN: could not enable user services (run: systemctl --user enable --now semif-simplex semif-gateway)" >&2
+  else
+    echo "WARN: systemctl --user unavailable; units are at $USER_UNITS" >&2
+  fi
 fi
 
-# --- stage 8: verify --------------------------------------------------------------------
+# --- stage 9: optional data copy -----------------------------------------------------
+if [[ -n "$COPY_DATA" ]]; then
+  echo "== rsync data from $COPY_DATA"
+  mkdir -p "$REPO_ROOT/data"
+  rsync -a "$COPY_DATA/" "$REPO_ROOT/data/"
+fi
+
+# --- stage 10: verify -------------------------------------------------------------------
 echo "== verifying imports"
-~/semif-venv/bin/python -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
+"$PYTHON" -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
 echo "== peer ollama check ($PEER_OLLAMA)"
 PEER_TAGS="$(curl -sf --max-time 5 "$PEER_OLLAMA/api/tags" || true)"
 # The OpenAI-compat chat path is what llm/codegen actually hit; a bare reachable
@@ -224,9 +327,28 @@ else
   echo "WARN: peer /api/tags shows no qwen38-iq3s" >&2
 fi
 
-echo
-echo "Done. Next steps:"
-echo "  cd ~/semif-agent"
-echo "  HF_HOME=~/hf ~/semif-venv/bin/python -m semif_agent.cli run"
-echo "  HF_HOME=~/hf ~/semif-venv/bin/python -m pytest tests/integration -q -s  (box needs real engine+LLM)"
-echo "  HF_HOME=~/hf ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765"
+if command -v systemctl >/dev/null 2>&1; then
+  echo "== gateway services"
+  systemctl --user is-active semif-simplex.service 2>/dev/null | sed 's/^/  semif-simplex: /' || true
+  systemctl --user is-active semif-gateway.service 2>/dev/null | sed 's/^/  semif-gateway: /' || true
+fi
+
+cat <<EOF
+
+Done. Next steps:
+  cd "$REPO_ROOT"
+  HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run
+  HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)
+  HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli dashboard --port 8765
+
+SimpleX gateway:
+  - The bot runs as systemd user services 'semif-simplex' (daemon, port $SIMPLEX_PORT) and
+    'semif-gateway' (agent). Check them with:
+      systemctl --user status semif-simplex semif-gateway
+      journalctl --user -u semif-gateway -f
+  - Add this bot as a contact in your SimpleX app (its address is printed by the
+    daemon), then put your contactId/display name in config.json
+    gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
+    event or the daemon's /contacts) and reply. With an empty allowlist the
+    gateway rejects everyone — that is the safe default.
+EOF

@@ -1,0 +1,16 @@
+[Unit]
+Description=SemIf agent SimpleX Chat daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex -k "" --headless --user-display-name "@DISPLAY_NAME@"
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semif-simplex
+
+[Install]
+WantedBy=default.target

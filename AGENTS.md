@@ -136,9 +136,9 @@ Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)
 - Canonical repo lives on Gitea: `git.manyworlds.fit`, **SSH on port 222**
   (`ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git`). Key
   `~/.ssh/id_ed25519` is registered there. The staging machine `jarvis` runs
-  from a manual clone at `~/semif-agent` (`scripts/bootstrap.sh` provisions
+  from a manual clone at `~/repos/semif-agent` (`scripts/bootstrap.sh` provisions
   everything else and never re-clones the agent repo); the old box working copy
-  is at `~/repos/semif-agent` (its editable install still points at the moved
+  is also at `~/repos/semif-agent` (its editable install still points at the moved
   `~/semif-agent`, so `import semif_agent` is broken there — moot, guppy runs
   ollama only now); the dev machine at `~/Repos/semif-agent`. Push/pull from
   Gitea — never rsync/tar the code.
@@ -338,17 +338,27 @@ unit tests (24) + box integration tests (2).
 ### jarvis (staging)
 
 - Provision a fresh Ubuntu machine into a running staging box: clone
-  `semif-agent` to `~/semif-agent` first (register its SSH key on Gitea), then
+  `semif-agent` to a checkout (jarvis keeps it at `~/repos/semif-agent`; the
+  script derives all paths from wherever it is run, so any path works — just
+  register its SSH key on Gitea first), then
   `scripts/bootstrap.sh --peer-ollama http://192.168.8.181:11434`.
   The script must be run from a checkout — it reads pins from that checkout's
   `config.example.json` and never re-clones the agent repo (only the SemIf
-  engine). Idempotent and rerunnable; every stage no-ops on existing state, so
-  it also boots an unknown-state machine. It installs **no ollama** — llm +
-  codegen both point at guppy.
-- All pins are read from `config.example.json`'s `engine` block: `semif_repo`
-  (public GitHub `TheoLeeCJ/SemIf`), `semif_ref` (pinned commit the box runs),
-  `gguf_url`/`gguf_sha256` (verified after download), and the HF tokenizer
-  `source`/`revision`. The python dep pins live in `requirements/staging.txt`
+  engine and the simplex-chat binary). Idempotent and rerunnable; every stage
+  no-ops on existing state, so it also boots an unknown-state machine. It
+  installs **no ollama** — llm + codegen both point at guppy.
+- **All installation artifacts live inside the checkout under a gitignored
+  `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
+  `simplex/`, `systemd/`), so an end user can find and debug the whole stack in
+  one tree. Only operationally-forced artifacts live outside: the SSH key
+  (`~/.ssh`) and the real systemd user dir + linger (the rendered units are
+  stored in `.runtime/systemd/` and symlinked into `~/.config/systemd/user/`).
+  See the "Code principles" containment rule.
+- All pins are read from `config.example.json`: the `engine` block
+  (`semif_repo` public GitHub `TheoLeeCJ/SemIf`, `semif_ref` pinned commit,
+  `gguf_url`/`gguf_sha256`, HF tokenizer `source`/`revision`) and the
+  `simplex_chat` block (`version`, `bin_url`, `sha256`, `port`,
+  `display_name`). The python dep pins live in `requirements/staging.txt`
   (committed, one versioned artifact — jarvis, guppy, and any future box all
   provision from it). **Maintenance**: bump the pins in `config.example.json` /
   `requirements/staging.txt`, rerun the script, re-run the integration tests.
@@ -358,17 +368,26 @@ unit tests (24) + box integration tests (2).
   that we intentionally do not install — the llama.cpp CPU path doesn't need
   them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Same as the box;
   do not "fix" them by installing torch.
-- Generates `~/semif-agent/config.json` with `codegen.timeout: 3600` (codegen
-  now travels the LAN) and a backup of any prior file. `--threads N` overrides
-  engine threads; `--copy-data SRC` rsyncs guppy's `data/` for continuity;
-  `--public-dashboard` binds the dashboard to `0.0.0.0`.
+- Generates `config.json` with `codegen.timeout: 3600` (codegen now travels the
+  LAN), a repo-relative `.runtime/models` GGUF path, and a backup of any prior
+  file. `--threads N` overrides engine threads; `--copy-data SRC` rsyncs guppy's
+  `data/` for continuity; `--public-dashboard` binds the dashboard to `0.0.0.0`.
+  It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
+  `ws_url` from `simplex_chat.port`) and renders/enables the two user services
+  `semif-simplex.service` (the pinned `simplex-chat` daemon, headless on
+  `simplex_chat.port`) and `semif-gateway.service`
+  (`.runtime/venv/bin/python -m semif_agent.cli gateway`). `--simplex-allowed-users
+  CSV` / `--simplex-home-channel ID` / `--simplex-display-name NAME` populate
+  the allowlist/fallback/identity; with an empty allowlist the gateway denies
+  everyone (the safe default until the human adds their contact id).
 - Run / verify on jarvis:
   ```sh
-  cd ~/semif-agent && export HF_HOME=~/hf
-  ~/semif-venv/bin/python -m semif_agent.cli run              # REPL
-  ~/semif-venv/bin/python -m semif_agent.cli dream            # cost report
-  ~/semif-venv/bin/python -m pytest tests/integration -q -s   # ~100s, background+poll
-  ~/semif-venv/bin/python -m semif_agent.cli dashboard --port 8765
+  REPO=~/repos/semif-agent && cd "$REPO" && export HF_HOME="$REPO/.runtime/hf"
+  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli run              # REPL
+  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dream            # cost report
+  "$REPO/.runtime/venv/bin/python" -m pytest tests/integration -q -s   # ~100s, background+poll
+  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dashboard --port 8765
+  systemctl --user status semif-simplex semif-gateway                  # gateway stack
   ```
 - First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
   (~10 min on 6 cores); reruns are fast no-ops.
@@ -550,18 +569,23 @@ unit tests (24) + box integration tests (2).
   [--dashboard]` builds the normal scheduler (engine lazy) and runs the
   configured `gateway.simplex` adapter in the foreground. `--dashboard`
   co-serves the browser UI from a daemon thread. Config lives under
-  `gateway.simplex` in `config.json`; `enabled` defaults false. The gateway is
-  its own process — the REPL and the gateway are independent front ends onto
-  the same on-disk logs/registry (do not run two scheduler processes over one
-  skill store concurrently).
+  `gateway.simplex` in `config.json`; `enabled` defaults false. On a
+  bootstrap-provisioned box `scripts/bootstrap.sh` renders and enables the
+  `semif-simplex.service` daemon (pinned `simplex-chat`, profile under
+  `.runtime/simplex/`, port from `simplex_chat.port`) and the
+  `semif-gateway.service` agent process, so the gateway runs headless across
+  logout/reboot. The gateway is its own process — the REPL and the gateway are
+  independent front ends onto the same on-disk logs/registry (do not run two
+  scheduler processes over one skill store concurrently).
 - **Transport contract** (`gateway/base.py`): `GatewayAdapter.run(on_inbound,
   outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
   `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can
   block on the decision engine, so the adapter bridges it off its event loop
   (`asyncio.to_thread`) and puts replies on the queue. A second platform means
   a new adapter subclass; the service is unchanged.
-- **SimpleX adapter** (`gateway/simplex.py`): connects to `simplex-chat -p
-  5225` at `gateway.simplex.ws_url`, XML-JSON WebSocket protocol
+- **SimpleX adapter** (`gateway/simplex.py`): connects to the local
+  `simplex-chat` daemon at `gateway.simplex.ws_url` (default port 5226, pinning
+  `simplex_chat.port`), XML-JSON WebSocket protocol
   (`{"corrId","cmd"}` → `{"corrId","resp"}` / events). `websockets` is
   **lazy-imported**; `check_requirements()` returns an install hint and the
   gateway refuses to start without it, so the core stays importable on a
@@ -819,6 +843,15 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
     the config step at first fire, never in SKILL.md.
 
 ### Code principles
+- **Contain installation artifacts in the repo.** Everything a machine installs
+  to run the agent (python venv, SemIf engine clone, GGUF, HF cache, the
+  simplex-chat binary/profile, rendered systemd units) lives inside the checkout
+  under a gitignored `.runtime/` tree — never scattered across `$HOME`. An end
+  user must be able to find and debug the whole stack with as few steps as
+  possible. Only artifacts that operationally cannot live there are outside
+  (`~/.ssh/id_ed25519`; the real systemd user dir + linger, which the repo units
+  are symlinked into). `scripts/bootstrap.sh` owns this layout; derive paths from
+  the checkout, never hardcode `$HOME`.
 - **No mocking.** The decision engine is always real SemIf; the LLM is always a
   real endpoint. Pure unit tests touch data-structure math only (queue ordering,
   dream cost, contract serialization). Engine-dependent behavior is verified by
@@ -837,7 +870,7 @@ WARN 100–200K, DUMB>200K), so limits are a total-context budget
 - CLI subcommands must not crash when the engine is unavailable — `submit`
   catches `EngineUnavailable` and returns `("error", ...)`.
 - Keep deps stdlib-only in the core; heavy deps live on the staging venv
-  (`~/semif-venv`, provisioned by `scripts/bootstrap.sh`).
+  (`.runtime/venv`, provisioned by `scripts/bootstrap.sh`).
 
 ## Testing
 

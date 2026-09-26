@@ -72,11 +72,19 @@
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
+  "simplex_chat": {
+    "_comment": "Pinned simplex-chat daemon that the messenger gateway talks to. bootstrap.sh downloads this exact binary (sha256 verified) into .runtime/bin/, runs it headless on `port` with its profile in .runtime/simplex/, and renders the semif-simplex.service unit from it. Bump version/bin_url/sha256 together. The gateway's ws_url (gateway.simplex.ws_url) must match `port`.",
+    "version": "v7.0.3",
+    "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
+    "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0",
+    "port": 5226,
+    "display_name": "semif"
+  },
   "gateway": {
-    "_comment": "Messenger intake. `python -m semif_agent.cli gateway` connects to the local simplex-chat daemon (simplex-chat -p 5225) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
+    "_comment": "Messenger intake. `python -m semif_agent.cli gateway` connects to the local simplex-chat daemon (see `simplex_chat` above) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
     "simplex": {
       "enabled": false,
-      "ws_url": "ws://127.0.0.1:5225",
+      "ws_url": "ws://127.0.0.1:5226",
       "allowed_users": [],
       "allow_all_users": false,
       "auto_accept": true,

@@ -1,0 +1,18 @@
+[Unit]
+Description=SemIf agent messenger gateway (SimpleX)
+After=network-online.target semif-simplex.service
+Wants=network-online.target semif-simplex.service
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+Environment=HF_HOME=@REPO@/.runtime/hf
+ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semif-gateway
+
+[Install]
+WantedBy=default.target
