@@ -280,9 +280,22 @@ render_unit() {
       -e "s|@DISPLAY_NAME@|$SIMPLEX_DISPLAY|g" "$src" > "$dst"
 }
 echo "== rendering systemd user units into $UNITS"
+UNIT_CHANGED=0
+ACTIVE_BEFORE=""
 for unit in semif-simplex.service semif-gateway.service; do
-  render_unit "$REPO_ROOT/scripts/systemd/$unit.in" "$UNITS/$unit"
+  tmp="$UNITS/$unit.new"
+  render_unit "$REPO_ROOT/scripts/systemd/$unit.in" "$tmp"
+  if [[ ! -f "$UNITS/$unit" ]] || ! cmp -s "$tmp" "$UNITS/$unit"; then
+    mv "$tmp" "$UNITS/$unit"
+    UNIT_CHANGED=1
+  else
+    rm -f "$tmp"
+  fi
   ln -sf "$UNITS/$unit" "$USER_UNITS/$unit"
+  if command -v systemctl >/dev/null 2>&1; then
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    systemctl --user is-active --quiet "$unit" 2>/dev/null && ACTIVE_BEFORE="$ACTIVE_BEFORE $unit"
+  fi
 done
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -291,6 +304,16 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user enable --now semif-simplex.service semif-gateway.service 2>/dev/null \
       && echo "== enabled semif-simplex.service semif-gateway.service" \
       || echo "WARN: could not enable user services (run: systemctl --user enable --now semif-simplex semif-gateway)" >&2
+    # Apply a changed unit to services that were already running (enable --now
+    # leaves active units untouched). A daemon restart is safe: the simplex
+    # profile persists and the gateway reconnects.
+    if [[ "$UNIT_CHANGED" = 1 && -n "$ACTIVE_BEFORE" ]]; then
+      for unit in $ACTIVE_BEFORE; do
+        systemctl --user restart "$unit" 2>/dev/null \
+          && echo "== restarted $unit (unit changed)" \
+          || echo "WARN: could not restart $unit" >&2
+      done
+    fi
   else
     echo "WARN: systemctl --user unavailable; units are at $USER_UNITS" >&2
   fi
