@@ -20,22 +20,32 @@ from semif_agent.codegen import (
     CodegenError,
     DegenerationError,
     _retry_prompt,
+    build_elicitation_prompt,
     build_skill_body_prompt,
+    generate_data_contract,
+    generate_requirements,
     generate_skill_body,
+    generate_skill_tests,
+    parse_data_contract,
+    parse_elicitation,
     parse_skill_body,
+    parse_testgen_bundle,
     read_skill_contract,
+    read_testgen_contract,
+    regenerate_skill_body,
+    run_skill_test,
     skill_contract_ref,
 )
 from semif_agent.decisions import Request
 from semif_agent.skills import (
-    SkillBodyStore,
     SkillDraft,
+    SkillStore,
     build_skills,
     build_tree,
     load_skill_module,
     materialize_skill,
-    merge_skill_bodies,
     merge_registry,
+    merge_skill_store,
 )
 
 GOOD_BODY = """\
@@ -48,6 +58,21 @@ def predict(ctx, request):
 def act(ctx, request, prediction):
     return ActionResult(action_log="probe ran", new_state=request.text)
 """
+
+GOOD_CONTRACT = {
+    "sender_address": "The email address the message is sent from.",
+    "tracking_id": "The package tracking number.",
+}
+
+GOOD_MOCK = {"sender_address": "agent@example.com", "tracking_id": "AB123"}
+
+GOOD_TEST = """\
+import sys
+print("ok")
+sys.exit(0)
+"""
+
+GOOD_BUNDLE = json.dumps({"test": GOOD_TEST, "mock_data": GOOD_MOCK})
 
 
 def test_read_skill_contract_loads_contract():
@@ -84,13 +109,25 @@ def test_skill_contract_ref_degrades_off_repo(tmp_path):
         skill_contract_ref(str(tmp_path / "missing.md"))
 
 
-def test_contract_directs_reusable_self_mocked_skills():
-    """SKILL.md must tell the model that a body is a reusable module owning its
-    own source of truth, not a one-shot that leans on the human for data."""
+def test_contract_directs_runner_provided_data():
+    """SKILL.md must tell the model that data comes from the runner via
+    ctx.config — never embedded, fabricated, or asked of the human. Mock-data
+    directives belong in TESTGEN.md, not here."""
     text = read_skill_contract()
-    assert "Reusable module with its own data model" in text
-    assert "internal/mock data model" in text
-    assert "for clarifying questions only" in text
+    assert "Data comes from the runner, never from you" in text
+    assert "`ctx.config`" in text
+    assert "never embed or fabricate working values" in text
+    assert "internal/mock data model" not in text
+
+
+def test_testgen_contract_owns_mocking():
+    """Mocking/testing has its own contract: TESTGEN.md. It must define the
+    flat semantic contract shape and forbid structure/type declarations."""
+    text = read_testgen_contract()
+    assert "contract.json" in text
+    assert "single JSON object" in text
+    assert "semantic description" in text
+    assert "Do NOT put type declarations" in text
 
 
 def test_build_skill_body_prompt_includes_contract_request_and_draft():
@@ -107,19 +144,36 @@ def test_build_skill_body_prompt_includes_contract_request_and_draft():
     assert "tracking.check" in joined
 
 
-def test_build_skill_body_prompt_directs_reuse_and_self_mock_data():
+def test_build_skill_body_prompt_directs_runner_provided_data():
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
     messages = build_skill_body_prompt(
         Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
     )
     joined = messages[1]["content"]
-    assert "reused across many requests" in joined
-    assert "internal/mock data model" in joined
-    assert "ask only to clarify intent" in joined
+    assert "owns no working data" in joined
+    assert "`ctx.config`" in joined
+    assert "never embed or fabricate working values" in joined
+    assert "internal/mock data model" not in joined
 
 
-def test_retry_prompt_directs_reuse_and_self_mock_data():
+def test_build_skill_body_prompt_includes_requirements():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = build_skill_body_prompt(
+        Request("check if the service is up"),
+        "tracking",
+        draft,
+        tree,
+        "THE CONTRACT",
+        requirements={"Should it actually send, or draft first?": "draft first"},
+    )
+    joined = messages[1]["content"]
+    assert "Requirements gathered from the product owner" in joined
+    assert "draft first" in joined
+
+
+def test_retry_prompt_directs_runner_provided_data():
     messages = _retry_prompt(
         Request("check if the service is up"),
         "tracking",
@@ -128,9 +182,10 @@ def test_retry_prompt_directs_reuse_and_self_mock_data():
         ValueError("skill body is empty"),
     )
     joined = messages[1]["content"]
-    assert "reused across many requests" in joined
-    assert "internal/mock data model" in joined
-    assert "ask only to clarify intent" in joined
+    assert "owns no working data" in joined
+    assert "`ctx.config`" in joined
+    assert "never embed or fabricate working values" in joined
+    assert "internal/mock data model" not in joined
 
 
 @pytest.mark.parametrize(
@@ -169,64 +224,102 @@ def test_parse_skill_body_rejects_missing_act():
 
 
 def test_body_store_roundtrip(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
-    assert store.list_bodies() == []
-    store.write("tracking", "probe", GOOD_BODY)
-    assert store.list_bodies() == [("tracking", "probe")]
-    target = store.body_path("tracking", "probe")
+    store = SkillStore(str(tmp_path / "skills"))
+    assert store.list_skills() == []
+    store.write_body("tracking", "probe", GOOD_BODY)
+    assert store.list_skills() == [("tracking", "probe")]
+    target = store.dir("tracking", "probe") / "skill.py"
     assert target.is_file()
     assert "def predict" in target.read_text()
 
 
+def test_store_roundtrip_all_deliverables(tmp_path):
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_body("tracking", "probe", GOOD_BODY)
+    store.write_contract("tracking", "probe", GOOD_CONTRACT)
+    store.write_mock("tracking", "probe", GOOD_MOCK)
+    store.write_test("tracking", "probe", GOOD_TEST)
+    store.write_config("tracking", "probe", {"sender_address": "agent@example.com"})
+    directory = store.dir("tracking", "probe")
+    assert sorted(p.name for p in directory.iterdir()) == [
+        "config.json",
+        "contract.json",
+        "mock_data.json",
+        "skill.py",
+        "skill.test.py",
+    ]
+    assert store.read_contract("tracking", "probe") == GOOD_CONTRACT
+    assert store.read_config("tracking", "probe") == {"sender_address": "agent@example.com"}
+    assert store.read_mock("tracking", "probe") == GOOD_MOCK
+    assert store.read_category_config("tracking") == {}
+
+
+def test_store_ignores_legacy_single_file_layout(tmp_path):
+    """Clean switch: a skill written as <category>/<name>.py is NOT read."""
+    legacy = tmp_path / "skills" / "tracking"
+    legacy.mkdir(parents=True)
+    (legacy / "probe.py").write_text(GOOD_BODY)
+    store = SkillStore(str(tmp_path / "skills"))
+    assert store.list_skills() == []
+
+
 def test_load_skill_module_exposes_predict_act(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
-    store.write("tracking", "probe", GOOD_BODY)
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_body("tracking", "probe", GOOD_BODY)
     module = load_skill_module("tracking", "probe", store.path)
     assert callable(module.predict) and callable(module.act)
 
 
 def test_materialize_skill_builds_runnable_skill(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_contract("tracking", "probe", GOOD_CONTRACT)
+    store.write_config("tracking", "probe", {"sender_address": "agent@example.com"})
     draft = SkillDraft(name="probe", description="Probe the service.", code=GOOD_BODY)
     skill = materialize_skill(draft, "tracking", store)
     assert skill.name == "probe"
     assert skill.category == "tracking"
     assert callable(skill.predict) and callable(skill.act)
+    assert skill.contract == GOOD_CONTRACT
+    assert skill.config == {"sender_address": "agent@example.com"}
 
 
 def test_materialize_skill_requires_code(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
+    store = SkillStore(str(tmp_path / "skills"))
     draft = SkillDraft(name="probe", description="Probe the service.")
     with pytest.raises(ValueError):
         materialize_skill(draft, "tracking", store)
 
 
 def test_materialize_skill_rejects_import_failure(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
+    store = SkillStore(str(tmp_path / "skills"))
     bad = "def predict(ctx, request):\n    return None\n"
     draft = SkillDraft(name="probe", description="Probe.", code=bad)
     with pytest.raises(ValueError):
         materialize_skill(draft, "tracking", store)
 
 
-def test_merge_skill_bodies_upgrades_stub(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
-    store.write("tracking", "probe", GOOD_BODY)
+def test_merge_skill_store_upgrades_stub(tmp_path):
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_body("tracking", "probe", GOOD_BODY)
+    store.write_contract("tracking", "probe", GOOD_CONTRACT)
+    store.write_config("tracking", "probe", {"sender_address": "agent@example.com"})
     tree = build_tree(build_skills({"skills": {}}))
     registry = {"tracking": {"description": "", "skills": [{"name": "probe", "description": "Probe."}]}}
     merge_registry(tree, registry)
-    upgraded = merge_skill_bodies(tree, store, registry)
+    upgraded = merge_skill_store(tree, store, registry)
     assert upgraded == 1
     skill = next(s for s in tree["tracking"] if s.name == "probe")
     assert callable(skill.predict) and callable(skill.act)
     assert skill.description == "Probe."
+    assert skill.contract == GOOD_CONTRACT
+    assert skill.config == {"sender_address": "agent@example.com"}
 
 
-def test_merge_skill_bodies_creates_missing_category(tmp_path):
-    store = SkillBodyStore(str(tmp_path / "skills"))
-    store.write("brand_new", "ping", GOOD_BODY)
+def test_merge_skill_store_creates_missing_category(tmp_path):
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_body("brand_new", "ping", GOOD_BODY)
     tree = build_tree(build_skills({"skills": {}}))
-    upgraded = merge_skill_bodies(tree, store, {})
+    upgraded = merge_skill_store(tree, store, {})
     assert upgraded == 1
     assert tree["brand_new"][0].name == "ping"
 
@@ -1284,6 +1377,248 @@ def test_other_codegen_error_does_not_retry():
                 client, Request("is the service up?"), "tracking", draft, tree
             )
         assert httpd.RequestHandlerClass.chat_calls == 1
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# ---- elicitation ----
+
+def test_elicitation_prompt_contains_examples_and_antipatterns():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    messages = build_elicitation_prompt(
+        Request("is the service up?"), "tracking", draft, tree, max_questions=3
+    )
+    system = messages[0]["content"]
+    joined = messages[1]["content"]
+    assert "requirements only" in system
+    assert "should the sender address change?" in system
+    assert "product goal" in system
+    assert "tracking" in joined
+    for example in (
+        "just produce a draft you review and approve first",
+        "should the skill ask you which one, or automatically pick",
+        "report 'not found' as a normal result",
+        "a short message back to you, or a file/report saved to disk",
+    ):
+        assert example in system
+
+
+def test_parse_elicitation():
+    assert parse_elicitation('{"questions": ["A?", "B?"]}') == ["A?", "B?"]
+    assert parse_elicitation('Sure:\n{"questions": ["  A?  "]}') == ["A?"]
+    assert parse_elicitation('{"questions": []}') == []
+    with pytest.raises(ValueError):
+        parse_elicitation("not json")
+    with pytest.raises(ValueError):
+        parse_elicitation('{"questions": "nope"}')
+
+
+def test_generate_requirements_end_to_end():
+    httpd, base = _sequenced_server(['{"questions": ["Draft or send?", "Which one?"]}'])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        questions = generate_requirements(
+            client, Request("is the service up?"), "tracking", draft, tree, max_questions=3
+        )
+        assert questions == ["Draft or send?", "Which one?"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_requirements_truncates_to_max():
+    httpd, base = _sequenced_server(['{"questions": ["A?", "B?", "C?", "D?"]}'])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        questions = generate_requirements(
+            client, Request("is the service up?"), "tracking", draft, tree, max_questions=2
+        )
+        assert questions == ["A?", "B?"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_requirements_degrades_on_parse_failure():
+    """Elicitation must never block authoring: a garbage reply degrades to []."""
+    httpd, base = _sequenced_server(["this is not json at all"])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2)
+        tree = build_tree(build_skills({"skills": {}}))
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        assert generate_requirements(
+            client, Request("is the service up?"), "tracking", draft, tree
+        ) == []
+        assert httpd.RequestHandlerClass.chat_calls == 2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# ---- data contract ----
+
+def test_parse_data_contract_flat_object():
+    contract = parse_data_contract(json.dumps(GOOD_CONTRACT))
+    assert contract == GOOD_CONTRACT
+    contract = parse_data_contract("Here:\n" + json.dumps(GOOD_CONTRACT))
+    assert contract == GOOD_CONTRACT
+    assert parse_data_contract("{}") == {}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"just a string"',
+        '{"sender": {"type": "string"}}',
+        '{"sender": ""}',
+        '{"Sender Address": "the sender"}',
+        "not json at all",
+    ],
+)
+def test_parse_data_contract_rejects_bad_shape(raw):
+    with pytest.raises(ValueError):
+        parse_data_contract(raw)
+
+
+def test_generate_data_contract_end_to_end(tmp_path):
+    httpd, base = _sequenced_server([json.dumps(GOOD_CONTRACT)])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        contract = generate_data_contract(
+            client, Request("is the service up?"), "tracking", draft, GOOD_BODY
+        )
+        assert contract == GOOD_CONTRACT
+        sent = httpd.RequestHandlerClass.received[0]
+        joined = " ".join(m["content"] for m in sent["messages"])
+        assert read_testgen_contract() in sent["messages"][0]["content"]
+        assert "data contract" in joined
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_data_contract_escalates_on_bad_parse():
+    httpd, base = _sequenced_server(["not json", json.dumps(GOOD_CONTRACT)])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        contract = generate_data_contract(
+            client, Request("is the service up?"), "tracking", draft, GOOD_BODY
+        )
+        assert contract == GOOD_CONTRACT
+        reqs = httpd.RequestHandlerClass.received
+        assert len(reqs) == 2
+        assert reqs[1]["temperature"] == 0.5  # escalated sampler
+        assert reqs[1]["presence_penalty"] == 2.0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_data_contract_exhausts_attempts(tmp_path):
+    httpd, base = _sequenced_server(["not json"])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2)
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        with pytest.raises(ValueError, match="rejected 2 times"):
+            generate_data_contract(
+                client, Request("is the service up?"), "tracking", draft, GOOD_BODY
+            )
+        assert httpd.RequestHandlerClass.chat_calls == 2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# ---- test artifacts ----
+
+def test_parse_testgen_bundle_accepts_forms():
+    test, mock = parse_testgen_bundle(GOOD_BUNDLE)
+    assert test == GOOD_TEST.strip()
+    assert mock == GOOD_MOCK
+    fenced = json.dumps({"test": "```python\n" + GOOD_TEST + "```", "mock_data": GOOD_MOCK})
+    test, mock = parse_testgen_bundle(fenced)
+    assert test == GOOD_TEST.strip()
+    assert mock == GOOD_MOCK
+    with pytest.raises(ValueError):
+        parse_testgen_bundle('{"test": "def x(:"}')
+    with pytest.raises(ValueError):
+        parse_testgen_bundle('{"mock_data": {}}')
+    with pytest.raises(ValueError):
+        parse_testgen_bundle('{"test": "", "mock_data": {}}')
+
+
+def test_generate_skill_tests_shares_contract_context(tmp_path):
+    """Decoupled call: the testgen call shares the contract call's base context
+    and continues it with the accepted contract as the assistant turn."""
+    httpd, base = _sequenced_server([GOOD_BUNDLE])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        test, mock = generate_skill_tests(
+            client, Request("is the service up?"), "tracking", draft, GOOD_BODY, GOOD_CONTRACT
+        )
+        assert test == GOOD_TEST.strip()
+        assert mock == GOOD_MOCK
+        messages = httpd.RequestHandlerClass.received[0]["messages"]
+        roles = [m["role"] for m in messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert messages[2]["content"] == json.dumps(GOOD_CONTRACT)
+        assert "skill.test.py" in messages[3]["content"]
+        assert "mock_data.json" in messages[3]["content"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_run_skill_test_verdict(tmp_path):
+    skill_dir = tmp_path / "skills" / "tracking" / "probe"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.test.py").write_text(GOOD_TEST)
+    passed, _ = run_skill_test(skill_dir)
+    assert passed
+    (skill_dir / "skill.test.py").write_text("import sys\nprint('boom')\nsys.exit(3)\n")
+    passed, output = run_skill_test(skill_dir)
+    assert not passed
+    assert "boom" in output
+
+
+def test_run_skill_test_timeout(tmp_path):
+    skill_dir = tmp_path / "skills" / "tracking" / "probe"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.test.py").write_text("import time\ntime.sleep(5)\n")
+    passed, output = run_skill_test(skill_dir, timeout=0.5)
+    assert not passed
+    assert "timed out" in output
+
+
+def test_run_skill_test_missing_script(tmp_path):
+    passed, output = run_skill_test(tmp_path)
+    assert not passed
+    assert "no skill.test.py" in output
+
+
+def test_regenerate_skill_body_rewrites(tmp_path):
+    httpd, base = _sequenced_server([GOOD_BODY])
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10)
+        draft = SkillDraft(name="probe", description="Probe the service.")
+        code = regenerate_skill_body(
+            client, Request("is the service up?"), "tracking", draft, GOOD_BODY,
+            "test failed with an error",
+        )
+        assert "def predict" in code and "def act" in code
+        sent = httpd.RequestHandlerClass.received[0]
+        joined = " ".join(m["content"] for m in sent["messages"])
+        assert "test failed with an error" in joined
+        assert "Previous body" in joined
     finally:
         httpd.shutdown()
         httpd.server_close()

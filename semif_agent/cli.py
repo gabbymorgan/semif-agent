@@ -118,6 +118,40 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
 
         return check
 
+    def make_regen_decision(run_id: str):
+        """4-option SemIf decision on a failing skill test: which artifact to
+        regenerate (code, contract, test, mock data). Recorded as a trace-only
+        event (kind `codegen_regen`) — never in the decision log. Engine
+        unavailable at call time degrades to `regen_test`."""
+        def decide(reason: str) -> str:
+            decision = DecisionRequest(
+                state=f"[testgen {codegen.model}] skill test failed. {reason[-1200:]}",
+                question="The auto-run test failed. What should be regenerated to fix it?",
+                options=[
+                    Option("regen_code", "Regenerate the skill body code."),
+                    Option("regen_test", "Regenerate the test only."),
+                    Option("regen_contract", "Regenerate the data contract."),
+                    Option("regen_mock_data", "Regenerate the mock data."),
+                ],
+            )
+            try:
+                result = engine.call(decision)
+            except EngineUnavailable:
+                return "regen_test"
+            trace.append(
+                "codegen_regen",
+                run_id,
+                state=decision.state,
+                question=decision.question,
+                options=[o.id for o in decision.options],
+                selected=result.selected,
+                probs=result.probs,
+                reason=reason[-2000:],
+            )
+            return result.selected
+
+        return decide
+
     scheduler = Scheduler(
         engine=engine,
         llm=llm,
@@ -128,6 +162,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         trace=trace,
         codegen=codegen,
         degeneration_check_factory=make_degeneration_check,
+        regen_decision_factory=make_regen_decision,
     )
     return scheduler, config
 
@@ -141,6 +176,7 @@ def try_warm(scheduler: Scheduler) -> str:
 
 
 def repl(scheduler: Scheduler, config: dict) -> None:
+    scheduler.asker = lambda question: input(f"{question} ")
     print(try_warm(scheduler))
     print("type a request, or one of: busy <text> | idle | status | skills | dream | relabel <id> <outcome> | restart <category> <skill> | quit")
     while True:

@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from .codegen import (
     CodegenClient,
     CodegenError,
+    generate_data_contract,
+    generate_requirements,
     generate_skill_body,
+    generate_skill_tests,
+    regenerate_skill_body,
+    run_skill_test,
     skill_contract_ref,
 )
 from .decisions import DecisionRequest, Option, Request
@@ -31,8 +36,8 @@ from .skills import (
     CreateSkill,
     Prediction,
     Skill,
-    SkillBodyStore,
     SkillDraft,
+    SkillStore,
     build_skills,
     build_tree,
     compose_state,
@@ -40,7 +45,7 @@ from .skills import (
     generate_skill,
     materialize_skill,
     merge_registry,
-    merge_skill_bodies,
+    merge_skill_store,
     navigate,
 )
 from .trace import TraceLog
@@ -69,13 +74,16 @@ class PendingRun:
 
     `prediction` is kept so resume re-invokes only `act` (predict is not
     re-run, avoiding duplicate SemIf sub-decisions); `question` is what the
-    run asked the human.
+    run asked the human. A `pre_predict` pause (contract variables collected
+    by the runner before predict) has no prediction yet — resume runs the full
+    predict+act path.
     """
 
     request: Request
     skill: Skill
-    prediction: Prediction
+    prediction: Prediction | None
     question: str
+    pre_predict: bool = False
 
 
 @dataclass
@@ -112,6 +120,9 @@ class Scheduler:
         codegen: CodegenClient | None = None,
         degeneration_check_factory: Callable[[str], Callable[[str], str | None] | None]
         | None = None,
+        regen_decision_factory: Callable[[str], Callable[[str], str] | None]
+        | None = None,
+        asker: Callable[[str], str | None] | None = None,
     ):
         self.engine = engine
         self.llm = llm
@@ -122,6 +133,17 @@ class Scheduler:
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
+        self.regen_decision_factory = regen_decision_factory
+        self.asker = asker
+        codegen_cfg = config.get("codegen", {}) or {}
+        elicitation_cfg = codegen_cfg.get("elicitation", {}) or {}
+        self.elicitation_enabled = bool(elicitation_cfg.get("enabled", False))
+        self.elicitation_max = int(elicitation_cfg.get("max_questions", 3))
+        self.test_timeout = float(codegen_cfg.get("test_timeout", 30.0))
+        self.test_max_attempts = int(codegen_cfg.get("test_max_attempts", 3))
+        self.contract_search = bool(
+            (codegen_cfg.get("contract_search", {}) or {}).get("enabled", True)
+        )
         self.queue = UrgencyQueue(
             max_size=int(config.get("queue", {}).get("max_size", 100)),
             age_rate=float(config.get("queue", {}).get("age_rate", 0.0)),
@@ -129,11 +151,11 @@ class Scheduler:
         self.skills = build_skills(config)
         self.tree = build_tree(self.skills)
         self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
-        self.body_store = SkillBodyStore(config.get("skill_bodies", "data/skills"))
+        self.body_store = SkillStore(config.get("skill_bodies", "data/skills"))
         merge_registry(self.tree, self.registry.read())
-        merge_skill_bodies(self.tree, self.body_store, self.registry.read())
+        merge_skill_store(self.tree, self.body_store, self.registry.read())
         self.ctx = ActionContext(engine=self.engine, config=config)
-        self.runner = SkillRunner(self.ctx, self.llm, self.log)
+        self.runner = SkillRunner(self.ctx, self.llm, self.log, store=self.body_store)
         self.current: Process | None = None
         self.pending: PendingRun | None = None
         self._lock = threading.RLock()
@@ -333,8 +355,47 @@ class Scheduler:
         created = self._create_skill(request, category)
         if created.kind != "create_skill" or created.draft is None:
             return created
+        self._elicit_requirements(request, category, created.draft)
         self._start_skill_write(request, category, created.draft, weight)
         return created
+
+    def _elicit_requirements(
+        self, request: Request, category: str, draft: SkillDraft
+    ) -> None:
+        """Ask the product owner refinement questions before the body is written.
+
+        Opt-in (`codegen.elicitation.enabled`) and requires an asker (the REPL
+        wires one; the dashboard degrades to skip). Requirements answers ride on
+        the draft into the body prompt. Any failure degrades to no requirements —
+        elicitation must never block authoring.
+        """
+        if not (self.elicitation_enabled and self.asker is not None):
+            return
+        if self.codegen is None:
+            return
+        try:
+            questions = generate_requirements(
+                self.codegen, request, category, draft, self.tree,
+                max_questions=self.elicitation_max,
+            )
+        except CodegenError:
+            return
+        for question in questions:
+            try:
+                answer = self.asker(question)
+            except Exception:
+                return
+            if answer is None or not answer.strip():
+                return
+            draft.requirements[question] = answer.strip()
+        if draft.requirements:
+            self.trace.append(
+                "requirements",
+                request.id,
+                category=category,
+                skill=draft.name,
+                questions=list(draft.requirements.keys()),
+            )
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
         if skill.writing:
@@ -371,7 +432,10 @@ class Scheduler:
             self.pending = None
             pending.request.user_input = text
             self.trace.append("answered", pending.request.id, text=text)
-            outcome = self.runner.resume(pending.skill, pending.request, pending.prediction)
+            outcome = self.runner.resume(
+                pending.skill, pending.request, pending.prediction,
+                pre_predict=pending.pre_predict,
+            )
             result = self._finish_run(pending.skill, pending.request, outcome)
             if result.kind == "needs_input":
                 return "needs_input", result.summary
@@ -391,6 +455,7 @@ class Scheduler:
                 skill=skill,
                 prediction=outcome.prediction,
                 question=outcome.needs_input,
+                pre_predict=outcome.pre_predict,
             )
             self.current = Process(request=request, skill=skill.name, weight=0.5)
             self.trace.append(
@@ -572,7 +637,9 @@ class Scheduler:
             self._write_skill_body(job)
 
     def _write_skill_body(self, job: SkillWrite) -> None:
-        """Run codegen for one queued write (no scheduler lock held here).
+        """Run the full authoring pipeline for one queued write (no scheduler
+        lock held here): codegen body -> data contract -> test artifacts ->
+        auto-run test (with a SemIf regen ladder on failure).
 
         The tree is snapshotted under the lock so the prompt build reads a
         stable view even if the main thread merges another skill meanwhile.
@@ -586,16 +653,130 @@ class Scheduler:
                 job.category,
                 job.draft,
                 tree_snapshot,
+                requirements=job.draft.requirements,
                 degeneration_check=(
                     self.degeneration_check_factory(job.request.id)
                     if self.degeneration_check_factory is not None
                     else None
                 ),
             )
+            contract = generate_data_contract(
+                self.codegen, job.request, job.category, job.draft, code
+            )
+        except (CodegenError, ValueError) as exc:
+            self._fail_skill_write(job, exc)
+            return
+        self.body_store.write_body(job.category, job.draft.name, code)
+        self.body_store.write_contract(job.category, job.draft.name, contract)
+        if self.contract_search:
+            self._config_search(job, contract)
+        try:
+            self._test_and_fix(job, code, contract)
         except (CodegenError, ValueError) as exc:
             self._fail_skill_write(job, exc)
             return
         self._complete_skill_write(job, code)
+
+    def _test_and_fix(self, job: SkillWrite, code: str, contract: dict) -> None:
+        """Generate test artifacts and auto-run them; regen the failing piece.
+
+        On failure a SemIf decision picks which of code/contract/test/mock data
+        to regenerate; whichever it is, the error and the existing files are fed
+        back into the corrective call. Bounded by `test_max_attempts`.
+        """
+        attempts = max(self.test_max_attempts, 1)
+        reason: str | None = None
+        target: str | None = None
+        for attempt in range(1, attempts + 1):
+            if target == "regen_code":
+                code = regenerate_skill_body(
+                    self.codegen, job.request, job.category, job.draft, code, reason
+                )
+                self.body_store.write_body(job.category, job.draft.name, code)
+            if target == "regen_contract":
+                contract = generate_data_contract(
+                    self.codegen, job.request, job.category, job.draft, code, reason=reason
+                )
+                self.body_store.write_contract(job.category, job.draft.name, contract)
+            test, mock = generate_skill_tests(
+                self.codegen, job.request, job.category, job.draft, code, contract,
+                reason=reason, target=target,
+            )
+            self.body_store.write_test(job.category, job.draft.name, test)
+            self.body_store.write_mock(job.category, job.draft.name, mock)
+            passed, output = run_skill_test(
+                self.body_store.dir(job.category, job.draft.name), timeout=self.test_timeout
+            )
+            self.trace.append(
+                "skill_testing",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                attempt=attempt,
+                passed=passed,
+                output=output[-400:],
+            )
+            if passed:
+                return
+            if attempt >= attempts:
+                raise ValueError(
+                    f"skill test failed after {attempts} attempts: {output[-2000:]}"
+                )
+            reason = output
+            target = self._decide_regen(job, output)
+
+    def _decide_regen(self, job: SkillWrite, reason: str) -> str:
+        """Which artifact to regenerate: a SemIf decision, or regen_test by default."""
+        if self.regen_decision_factory is None:
+            return "regen_test"
+        decide = self.regen_decision_factory(job.request.id)
+        if decide is None:
+            return "regen_test"
+        try:
+            return decide(reason)
+        except Exception:
+            return "regen_test"
+
+    def _config_search(self, job: SkillWrite, contract: dict) -> None:
+        """Auto-populate the skill config: a SemIf choice per contract variable
+        maps it against candidate values from the global config and the
+        category config. Unmatched variables are left to the first-fire ask."""
+        from .engine import EngineUnavailable
+
+        merged: dict = {}
+        merged.update(self.config)
+        merged.update(self.body_store.read_category_config(job.category))
+        try:
+            for key in contract:
+                candidates = _config_candidates(key, merged)
+                if not candidates:
+                    continue
+                decision = DecisionRequest(
+                    state=(
+                        f"[config search] skill {job.category}.{job.draft.name} "
+                        f"needs {key!r}: {contract[key]}"
+                    ),
+                    question=f"Which config value satisfies the skill variable {key!r}?",
+                    options=[Option(c, str(merged[c])[:80]) for c in candidates]
+                    + [Option("ask", "None of these; ask the user.")],
+                )
+                result = self.engine.call(decision)
+                self.log.append(
+                    decision,
+                    result,
+                    extra={
+                        "phase": "config:search",
+                        "run_id": job.request.id,
+                        "skill": f"{job.category}.{job.draft.name}",
+                        "variable": key,
+                    },
+                )
+                if result.selected != "ask":
+                    current = self.body_store.read_config(job.category, job.draft.name)
+                    current[key] = merged[result.selected]
+                    self.body_store.write_config(job.category, job.draft.name, current)
+        except (EngineUnavailable, ValueError, TypeError):
+            return
 
     def _complete_skill_write(self, job: SkillWrite, code: str) -> None:
         """Materialize the body, hot-merge it into the tree, and re-dispatch the
@@ -615,7 +796,7 @@ class Scheduler:
             else:
                 skills.append(skill)
             skills.sort(key=lambda s: s.name)
-            body_path = self.body_store.body_path(job.category, job.draft.name).as_posix()
+            body_path = self.body_store.dir(job.category, job.draft.name).as_posix()
             self.trace.append(
                 "skill_created",
                 job.request.id,
@@ -624,6 +805,13 @@ class Scheduler:
                 description=job.draft.description,
                 body=body_path,
                 written=True,
+            )
+            self.trace.append(
+                "skill_ready",
+                job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                contract_vars=list(skill.contract or {}),
             )
             requeued = job.request.copy_for_requeue()
             requeued.meta["awaiting_skill_body"] = [job.category, job.draft.name]
@@ -712,3 +900,19 @@ def _requeue(request: Request, updated_text: str) -> Request:
     updated.reentries = request.reentries + 1
     updated.meta["parent_run"] = request.id
     return updated
+
+
+def _config_candidates(key: str, merged: dict) -> list[str]:
+    """Candidate config keys that plausibly satisfy a contract variable.
+
+    Cheap keyword overlap on snake_case tokens — enough to offer the SemIf
+    config search a small, sane option set. Only scalar values are candidates.
+    """
+    parts = set(key.split("_"))
+    candidates = []
+    for cfg_key, value in merged.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            cfg_parts = set(str(cfg_key).split("_"))
+            if parts & cfg_parts:
+                candidates.append(str(cfg_key))
+    return sorted(candidates)

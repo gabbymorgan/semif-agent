@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from semif_agent.cli import build_scheduler, load_config
-from semif_agent.codegen import CodegenClient, generate_skill_body
+from semif_agent.codegen import CodegenClient, generate_data_contract, generate_skill_body, generate_skill_tests
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
@@ -22,8 +22,8 @@ from semif_agent.skills import (
     CategoryDraft,
     Prediction,
     Skill,
-    SkillBodyStore,
     SkillDraft,
+    SkillStore,
     build_skills,
     build_tree,
     generate_category,
@@ -155,7 +155,8 @@ def test_generate_skill(tmp_path):
 
 
 def test_generate_skill_body_codegen(tmp_path):
-    """A real OpenAI-compatible model writes a runnable skill body.
+    """A real OpenAI-compatible model writes a runnable skill body + data
+    contract + test artifacts, and the auto-run test passes.
 
     Slow: uses the big codegen model (qwen38-iq3s by default). Run this one in
     the background and poll — long-lived ssh sessions get SIGHUP'd.
@@ -182,10 +183,35 @@ def test_generate_skill_body_codegen(tmp_path):
         tree,
     )
     print(f"generated {len(code)} bytes of skill body")
+    contract = generate_data_contract(
+        client, Request("is my home server reachable right now?"), "tracking", draft, code
+    )
+    print(f"data contract: {contract}")
+    test, mock = generate_skill_tests(
+        client,
+        Request("is my home server reachable right now?"),
+        "tracking",
+        draft,
+        code,
+        contract,
+    )
+    print(f"generated {len(test)} bytes of skill test, mock={mock!r}")
+
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_body("tracking", draft.name, code)
+    store.write_contract("tracking", draft.name, contract)
+    store.write_test("tracking", draft.name, test)
+    store.write_mock("tracking", draft.name, mock)
+    from semif_agent.codegen import run_skill_test
+
+    passed, output = run_skill_test(store.dir("tracking", draft.name), timeout=60)
+    print(f"auto-run test: passed={passed}\n{output[:400]}")
+    assert passed, "the auto-run test must pass against the mock data"
+
     draft.code = code
-    store = SkillBodyStore(str(tmp_path / "skills"))
     skill = materialize_skill(draft, "tracking", store)
     assert callable(skill.predict) and callable(skill.act)
+    assert skill.contract == contract
 
 
 def test_create_skill_empty_category_does_not_wedge(tmp_path):

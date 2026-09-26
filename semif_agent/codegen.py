@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import select
 import subprocess
 import sys
@@ -619,12 +620,15 @@ def build_skill_body_prompt(
     draft: SkillDraft,
     tree: dict,
     contract: str,
+    requirements: dict[str, str] | None = None,
 ) -> list[dict]:
     """Messages for the code-generation model.
 
     The small model already chose the title + description; the big model only
     writes the runnable body against the SKILL.md contract, informed by the
     request, the category, and the existing skills so it avoids duplication.
+    `requirements` carries the answers to elicitation questions asked of the
+    human during authoring.
     """
     existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
     system = (
@@ -632,6 +636,13 @@ def build_skill_body_prompt(
         "is authoritative: follow it exactly.\n\n"
         f"{contract}"
     )
+    req_block = ""
+    if requirements:
+        lines = "\n".join(f"- {question} -> {answer}" for question, answer in requirements.items())
+        req_block = (
+            "Requirements gathered from the product owner:\n"
+            f"{lines}\n"
+        )
     user = (
         f"Request: {request.text}\n"
         f"Category: {category}\n"
@@ -639,9 +650,13 @@ def build_skill_body_prompt(
         f"Skill description: {draft.description}\n"
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
-        "This body will be reused across many requests: give the skill its own "
-        "internal/mock data model and never ask the human for operational data — "
-        "ask only to clarify intent.\n"
+        f"{req_block}"
+        "This body is a reusable module executed across many requests. It owns "
+        "no working data: every operational value is provided by the runner "
+        "through `ctx.config` under a clear snake_case name — request data from "
+        "the runner, never embed or fabricate working values, and never ask the "
+        "human for operational data. Ask the human only to refine the product "
+        "goal and requirements.\n"
         "Write the Python module body now. Reply with ONLY valid Python code "
         "defining `predict` and `act`. No prose, no markdown fences, no JSON."
     )
@@ -723,9 +738,12 @@ def _retry_prompt(
         f"Category: {category}\n"
         f"Skill name: {draft.name}\n"
         f"Skill description: {draft.description}\n"
-        "This body will be reused across many requests: give the skill its own "
-        "internal/mock data model and never ask the human for operational data — "
-        "ask only to clarify intent.\n"
+        "This body is a reusable module executed across many requests. It owns "
+        "no working data: every operational value is provided by the runner "
+        "through `ctx.config` under a clear snake_case name — request data from "
+        "the runner, never embed or fabricate working values, and never ask the "
+        "human for operational data. Ask the human only to refine the product "
+        "goal and requirements.\n"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
         "no markdown fences, no JSON."
     )
@@ -744,6 +762,7 @@ def generate_skill_body(
     contract: str | None = None,
     max_tokens: int | None = None,
     degeneration_check: Callable[[str], str | None] | None = None,
+    requirements: dict[str, str] | None = None,
 ) -> str:
     """Author a skill body with the big model; escalate up to `max_attempts`.
 
@@ -753,7 +772,8 @@ def generate_skill_body(
     that resets the context to SMART and tells the model to emit the final
     Python now. Only an invalid parse (ValueError) escalates; a
     DegenerationError or other CodegenError propagates immediately so the
-    scheduler can stub out gracefully.
+    scheduler can stub out gracefully. `requirements` (elicitation answers) are
+    fed to the first-attempt prompt only.
     """
     contract_text = contract if contract is not None else read_skill_contract()
     if client.stream:
@@ -763,7 +783,12 @@ def generate_skill_body(
     for attempt in range(1, attempts + 1):
         if attempt == 1:
             messages = build_skill_body_prompt(
-                request, category, draft, tree, contract_text
+                request,
+                category,
+                draft,
+                tree,
+                contract_text,
+                requirements=requirements,
             )
         else:
             messages = _retry_prompt(
@@ -780,3 +805,443 @@ def generate_skill_body(
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"skill body rejected {attempts} times: {last_error}")
+
+
+# ---- requirements elicitation ----
+
+ELICITATION_EXAMPLES = [
+    "Should this skill actually send/reply/execute, or just produce a draft you review and approve first?",
+    "If the request could match several items (several packages, contacts, services), should the skill ask you which one, or automatically pick the most likely?",
+    "If it can't complete (service down, item not found, missing info), should it fail with an error, or report 'not found' as a normal result?",
+    "What should the final result be — a short message back to you, or a file/report saved to disk?",
+]
+
+
+def build_elicitation_prompt(
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    tree: dict,
+    max_questions: int = 3,
+) -> list[dict]:
+    """Messages asking the big model to propose requirement-refinement questions.
+
+    The REPL conversation with the human is for refining the product goal and
+    requirements only — never operational data values (the runner provides
+    those) and never config-vs-input cadence questions (the config step decides
+    that at first fire). The examples are deliberately generic so a weaker
+    model can mirror them.
+    """
+    examples = "\n".join(f"- \"{q}\"" for q in ELICITATION_EXAMPLES)
+    existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
+    system = (
+        "You are eliciting requirements for a new skill in a local agent. "
+        "You ask the human (the product owner) up to "
+        f"{max_questions} questions that refine the product goal and "
+        "requirements only. Ask about product behavior, not implementation.\n\n"
+        "Good example questions:\n"
+        f"{examples}\n\n"
+        "Never ask:\n"
+        "- config-vs-input cadence questions like \"should the sender address "
+        "change?\" — the config step owns that decision at first fire, and it "
+        "negates the runner data-dependency model;\n"
+        "- for operational data values (tracking numbers, addresses, "
+        "credentials) — the runner provides those;\n"
+        "- pure implementation details you should just decide.\n\n"
+        "Reply with JSON only: {\"questions\": [\"...\", \"...\"]}"
+    )
+    user = (
+        f"Request: {request.text}\n"
+        f"Category: {category}\n"
+        f"Skill name: {draft.name}\n"
+        f"Skill description: {draft.description}\n"
+        f"Existing skills in this category: {existing}\n"
+        f"Existing categories:\n{tree_summary(tree)}\n"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_elicitation(raw: str) -> list[str]:
+    """Extract a JSON {"questions": [...]} list of non-empty strings."""
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"elicitation reply is not a JSON object: {raw!r}")
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except ValueError as exc:
+        raise ValueError(f"elicitation reply is not valid JSON: {exc}") from exc
+    questions = parsed.get("questions")
+    if not isinstance(questions, list):
+        raise ValueError("elicitation reply must have a `questions` list")
+    cleaned = []
+    for question in questions:
+        if isinstance(question, str) and question.strip():
+            cleaned.append(question.strip())
+    return cleaned
+
+
+def _retry_elicitation_prompt(
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    tree: dict,
+    error: Exception,
+    max_questions: int = 3,
+) -> list[dict]:
+    messages = build_elicitation_prompt(
+        request, category, draft, tree, max_questions=max_questions
+    )
+    messages[1]["content"] += (
+        f"\nYour previous reply was rejected: {error}. Reply with JSON only: "
+        '{"questions": ["...", "..."]}'
+    )
+    return messages
+
+
+def generate_requirements(
+    client: CodegenClient,
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    tree: dict,
+    max_questions: int = 3,
+) -> list[str]:
+    """Propose requirement-refinement questions with the big model.
+
+    Returns an empty list when the model produced none or the reply failed to
+    parse after the escalation ladder — elicitation must never block authoring.
+    """
+    attempts = max(client.max_attempts, 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if attempt == 1:
+            messages = build_elicitation_prompt(
+                request, category, draft, tree, max_questions=max_questions
+            )
+        else:
+            messages = _retry_elicitation_prompt(
+                request, category, draft, tree, last_error, max_questions=max_questions
+            )
+        try:
+            raw = client.chat(
+                messages,
+                **(ESCALATED_SAMPLER if attempt > 1 else {}),
+            )
+            return parse_elicitation(raw)[: max(0, max_questions)]
+        except ValueError as exc:
+            last_error = exc
+    return []
+
+
+# ---- data contract + test artifacts ----
+
+TESTGEN_CONTRACT = Path(__file__).resolve().parent.parent / "TESTGEN.md"
+CONTRACT_VARIABLE_RE = re.compile(r"[a-z0-9_]+")
+
+
+def read_testgen_contract(path: str | None = None) -> str:
+    contract = Path(path) if path else TESTGEN_CONTRACT
+    if not contract.is_file():
+        raise CodegenError(f"testgen contract not found: {contract}")
+    return contract.read_text()
+
+
+def build_testgen_base_prompt(
+    request: Request, category: str, name: str, skill_code: str, contract_md: str
+) -> list[dict]:
+    """The shared context for the contract + test generation calls.
+
+    Seeded with the TESTGEN.md contract and the finished skill body; the
+    contract call appends its ask, and the testgen call appends the contract
+    output (as the assistant turn) plus its own ask — the two calls share this
+    context but produce distinct artifacts.
+    """
+    system = (
+        "You produce the data contract and test artifacts for a skill body of a "
+        "local agent. The contract below is authoritative: follow it exactly.\n\n"
+        f"{contract_md}"
+    )
+    user = (
+        f"Skill: {category}.{name}\n"
+        f"Request: {request.text}\n"
+        f"Finished skill body:\n```python\n{skill_code}\n```"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_contract_request_prompt(
+    base: list[dict], note: str | None = None
+) -> list[dict]:
+    user = "Generate the data contract now: a single JSON object."
+    if note:
+        user += f"\nNote: {note}"
+    user += "\nReply with ONLY the JSON object. No prose, no markdown fences."
+    return base + [{"role": "user", "content": user}]
+
+
+def parse_data_contract(raw: str) -> dict:
+    """Validate a flat semantic contract: one JSON object whose keys are
+    snake_case variable names and whose values are non-empty descriptions."""
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"data contract is not a JSON object: {raw!r}")
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except ValueError as exc:
+        raise ValueError(f"data contract is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("data contract must be a single JSON object")
+    for key, value in parsed.items():
+        if not CONTRACT_VARIABLE_RE.fullmatch(key):
+            raise ValueError(f"contract variable {key!r} must be lowercase snake_case")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"contract value for {key!r} must be a semantic description string")
+    return parsed
+
+
+def generate_data_contract(
+    client: CodegenClient,
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    skill_code: str,
+    contract_md: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Derive the flat data contract from the finished skill body.
+
+    Reads every `ctx.config[...]` operational access in the body and expresses
+    each as a variable name -> semantic description. Escalates like the body
+    writer on parse failure; `reason` (a failing-test error) is fed on regen.
+    """
+    contract_text = contract_md if contract_md is not None else read_testgen_contract()
+    attempts = max(client.max_attempts, 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if attempt == 1:
+            note = reason
+        else:
+            note = str(last_error)
+        messages = build_contract_request_prompt(
+            build_testgen_base_prompt(
+                request, category, draft.name, skill_code, contract_text
+            ),
+            note=note,
+        )
+        try:
+            raw = client.chat(
+                messages,
+                **(ESCALATED_SAMPLER if attempt > 1 else {}),
+            )
+            return parse_data_contract(raw)
+        except ValueError as exc:
+            last_error = exc
+    raise ValueError(f"data contract rejected {attempts} times: {last_error}")
+
+
+def build_testgen_request_prompt(
+    base: list[dict],
+    contract: dict,
+    note: str | None = None,
+    target: str | None = None,
+) -> list[dict]:
+    user = (
+        "Generate the test artifacts now: skill.test.py (stdlib-only, runnable "
+        "as `python skill.test.py`, exit 0 on pass, exercising predict and act "
+        "against mock_data.json in the same folder) and mock_data.json "
+        "(fixtures satisfying the contract above)."
+    )
+    if target:
+        user += f"\nFocus the fix on the {target.removeprefix('regen_')}."
+    if note:
+        user += f"\nNote: {note}"
+    user += (
+        '\nReply with ONLY a JSON object: {"test": "<python code>", '
+        '"mock_data": <json>}. No prose, no markdown fences.'
+    )
+    return base + [
+        {"role": "assistant", "content": json.dumps(contract)},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_testgen_bundle(raw: str) -> tuple[str, dict]:
+    """Extract and validate (skill.test.py code, mock_data) from a JSON reply."""
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"testgen reply is not a JSON object: {raw!r}")
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except ValueError as exc:
+        raise ValueError(f"testgen reply is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("testgen reply must be a JSON object")
+    test = parsed.get("test")
+    mock = parsed.get("mock_data")
+    if not isinstance(test, str) or not test.strip():
+        raise ValueError("testgen reply must carry a non-empty `test` string")
+    if not isinstance(mock, (dict, list)):
+        raise ValueError("testgen reply must carry `mock_data` as an object or array")
+    for fence in ("```python", "```py", "```"):
+        start_idx = test.find(fence)
+        if start_idx != -1:
+            test = test[start_idx + len(fence):]
+            close = test.rfind("```")
+            if close != -1:
+                test = test[:close]
+            break
+    test = test.strip()
+    if not test:
+        raise ValueError("testgen reply's test is empty")
+    try:
+        ast.parse(test, filename="<generated test>")
+    except SyntaxError as exc:
+        raise ValueError(f"skill test is not valid Python: {exc}") from exc
+    return test, mock
+
+
+def generate_skill_tests(
+    client: CodegenClient,
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    skill_code: str,
+    contract: dict,
+    contract_md: str | None = None,
+    reason: str | None = None,
+    target: str | None = None,
+) -> tuple[str, dict]:
+    """Generate skill.test.py + mock_data.json against the finished body.
+
+    Shares the base context with the contract call (TESTGEN.md + skill.py) and
+    continues it with the accepted contract, so the artifacts stay compatible
+    with the body and the contract. Escalates on parse failure; `reason` +
+    `target` drive a corrective regeneration.
+    """
+    contract_text = contract_md if contract_md is not None else read_testgen_contract()
+    attempts = max(client.max_attempts, 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if attempt == 1:
+            note = reason
+        else:
+            note = str(last_error)
+        messages = build_testgen_request_prompt(
+            build_testgen_base_prompt(
+                request, category, draft.name, skill_code, contract_text
+            ),
+            contract,
+            note=note,
+            target=target,
+        )
+        try:
+            raw = client.chat(
+                messages,
+                **(ESCALATED_SAMPLER if attempt > 1 else {}),
+            )
+            return parse_testgen_bundle(raw)
+        except ValueError as exc:
+            last_error = exc
+    raise ValueError(f"testgen reply rejected {attempts} times: {last_error}")
+
+
+def _regen_body_prompt(
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    contract: str,
+    previous_code: str,
+    note: str,
+) -> list[dict]:
+    system = (
+        "You write runnable skill bodies for a local agent. The contract below "
+        "is authoritative: follow it exactly.\n\n"
+        f"{contract}"
+    )
+    user = (
+        f"The auto-run test for {category}.{draft.name} failed. Rewrite the body "
+        f"so it passes.\n"
+        f"Request: {request.text}\n"
+        f"Skill description: {draft.description}\n"
+        f"Test failure: {note}\n"
+        f"Previous body:\n```python\n{previous_code}\n```\n"
+        "This body is a reusable module executed across many requests. It owns "
+        "no working data: every operational value is provided by the runner "
+        "through `ctx.config` under a clear snake_case name — request data from "
+        "the runner, never embed or fabricate working values, and never ask the "
+        "human for operational data.\n"
+        "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
+        "no markdown fences, no JSON."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def regenerate_skill_body(
+    client: CodegenClient,
+    request: Request,
+    category: str,
+    draft: SkillDraft,
+    previous_code: str,
+    reason: str,
+    contract: str | None = None,
+) -> str:
+    """Rewrite a skill body whose auto-run test failed.
+
+    Fresh prompt (context resets) carrying the failing test error and the
+    previous body; escalation ladder identical to generate_skill_body. A
+    DegenerationError or other CodegenError propagates immediately.
+    """
+    contract_text = contract if contract is not None else read_skill_contract()
+    attempts = max(client.max_attempts, 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        note = reason if attempt == 1 else str(last_error)
+        messages = _regen_body_prompt(
+            request, category, draft, contract_text, previous_code, note
+        )
+        try:
+            raw = client.chat(
+                messages,
+                **(ESCALATED_SAMPLER if attempt > 1 else {}),
+            )
+            return parse_skill_body(raw)
+        except ValueError as exc:
+            last_error = exc
+    raise ValueError(f"skill body rejected {attempts} times: {last_error}")
+
+
+def run_skill_test(skill_dir: str | Path, timeout: float = 30.0) -> tuple[bool, str]:
+    """Run skill.test.py in its folder as a subprocess.
+
+    cwd is the skill folder so mock_data.json is reachable at ./mock_data.json.
+    Returns (passed, captured output). A non-zero exit or a timeout is a
+    failure; the output feeds the regen decision and corrective prompts.
+    """
+    cwd = Path(skill_dir)
+    script = cwd / "skill.test.py"
+    if not script.is_file():
+        return False, "no skill.test.py found in the skill folder"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "skill.test.py"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=max(timeout, 1.0),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"skill test timed out after {timeout:.0f}s"
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0, output

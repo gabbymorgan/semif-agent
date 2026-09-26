@@ -130,6 +130,15 @@ function eventRow(evt) {
   } else if (evt.kind === "skill_created") {
     div.textContent = `created ${evt.skill}${evt.written ? " (body written)" : " (stub)"}`;
     div.title = evt.body || evt.description || "";
+  } else if (evt.kind === "skill_testing") {
+    div.textContent = `test attempt ${evt.attempt}: ${evt.passed ? "passed" : "failed"}`;
+    div.title = evt.output || "";
+  } else if (evt.kind === "skill_ready") {
+    div.textContent = `ready: ${evt.skill}`;
+  } else if (evt.kind === "codegen_regen") {
+    div.textContent = `regen → ${evt.selected}`;
+  } else if (evt.kind === "requirements") {
+    div.textContent = "refinement questions asked";
   } else if (evt.kind === "skill_write_failed") {
     div.textContent = `body write failed: ${evt.skill}`;
     div.title = evt.message || "";
@@ -384,6 +393,37 @@ function eventNode(evt) {
       node.appendChild(p);
     }
     node.classList.add(evt.written ? "ok" : "stub");
+  } else if (evt.kind === "skill_testing") {
+    node.classList.add(evt.passed ? "ok" : "fail");
+    body.textContent = `test attempt ${evt.attempt}: ${evt.passed ? "passed" : "failed"}`;
+    if (evt.output) {
+      const out = document.createElement("div");
+      out.className = "muted";
+      out.textContent = evt.output.slice(0, 200);
+      body.appendChild(out);
+    }
+  } else if (evt.kind === "skill_ready") {
+    node.classList.add("ok");
+    const title = document.createElement("div");
+    title.className = "skill-title";
+    title.textContent = `${evt.skill} — ready`;
+    body.appendChild(title);
+    if (evt.contract_vars) {
+      const vars = document.createElement("div");
+      vars.className = "muted";
+      vars.textContent = `contract: ${evt.contract_vars.join(", ")}`;
+      body.appendChild(vars);
+    }
+  } else if (evt.kind === "codegen_regen") {
+    body.textContent = `regen decision → ${evt.selected || ""}`;
+    if (evt.reason) {
+      const out = document.createElement("div");
+      out.className = "muted";
+      out.textContent = evt.reason.slice(0, 160);
+      body.appendChild(out);
+    }
+  } else if (evt.kind === "requirements") {
+    body.textContent = `refinement: ${(evt.questions || []).join(" | ")}`;
   } else if (evt.kind === "skill_write_failed") {
     node.classList.add("stub");
     const title = document.createElement("div");

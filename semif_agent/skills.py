@@ -69,6 +69,8 @@ class Skill:
         default=_noop_act
     )
     writing: bool = False
+    config: dict = field(default_factory=dict)
+    contract: dict = field(default_factory=dict)
 
     def is_noop(self) -> bool:
         """A stub leaf: authored (title + description) but no runnable body yet."""
@@ -115,11 +117,17 @@ class CategoryDraft:
 
 @dataclass
 class SkillDraft:
-    """An authored skill leaf stub: one specific action within a category."""
+    """An authored skill leaf stub: one specific action within a category.
+
+    `requirements` maps elicitation questions (asked of the human during
+    authoring) to their answers; they are fed to the body-writer so the body
+    reflects the refined product goal.
+    """
 
     name: str
     description: str
     code: str = ""
+    requirements: dict[str, str] = field(default_factory=dict)
 
 
 class CategoryRegistry:
@@ -164,41 +172,103 @@ class CategoryRegistry:
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
 
-class SkillBodyStore:
-    """Persists runnable skill bodies as one Python file per skill.
+class SkillStore:
+    """Persists one skill leaf as a folder of deliverables.
 
-    Layout: <base>/<category>/<name>.py. Bodies are written by the codegen step
-    and loaded back at startup so skills stay runnable across restarts.
+    Layout: <base>/<category>/<name>/{skill.py, skill.test.py, contract.json,
+    mock_data.json, config.json}. skill.py is the runnable body; the rest are
+    produced by the contract/test generation steps and read back so skills stay
+    runnable and configurable across restarts. The old single-file layout
+    (<base>/<category>/<name>.py) is NOT read — this is a clean switch.
     """
 
     def __init__(self, path: str = "data/skills"):
         self.path = Path(path)
 
-    def write(self, category: str, name: str, code: str) -> Path:
-        directory = self.path / category
+    def dir(self, category: str, name: str) -> Path:
+        return self.path / category / name
+
+    def write_body(self, category: str, name: str, code: str) -> Path:
+        directory = self.dir(category, name)
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / f"{name}.py"
+        target = directory / "skill.py"
         target.write_text(code.rstrip() + "\n")
         return target
 
-    def body_path(self, category: str, name: str) -> Path:
-        return self.path / category / f"{name}.py"
+    def write_contract(self, category: str, name: str, contract: dict) -> Path:
+        return self._write_json(category, name, "contract.json", contract)
 
-    def list_bodies(self) -> list[tuple[str, str]]:
+    def write_mock(self, category: str, name: str, mock) -> Path:
+        return self._write_json(category, name, "mock_data.json", mock)
+
+    def write_config(self, category: str, name: str, config: dict) -> Path:
+        return self._write_json(category, name, "config.json", config)
+
+    def write_test(self, category: str, name: str, code: str) -> Path:
+        directory = self.dir(category, name)
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / "skill.test.py"
+        target.write_text(code.rstrip() + "\n")
+        return target
+
+    def _write_json(self, category: str, name: str, filename: str, value) -> Path:
+        directory = self.dir(category, name)
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / filename
+        target.write_text(json.dumps(value, indent=2) + "\n")
+        return target
+
+    def read_contract(self, category: str, name: str) -> dict:
+        return self._read_json(category, name, "contract.json")
+
+    def read_config(self, category: str, name: str) -> dict:
+        return self._read_json(category, name, "config.json")
+
+    def read_mock(self, category: str, name: str):
+        return self._read_json(category, name, "mock_data.json")
+
+    def _read_json(self, category: str, name: str, filename: str):
+        path = self.dir(category, name) / filename
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            return {}
+
+    def read_category_config(self, category: str) -> dict:
+        """Category-scoped config: <base>/<category>/config.json."""
+        path = self.path / category / "config.json"
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            return {}
+
+    def write_category_config(self, category: str, config: dict) -> Path:
+        directory = self.path / category
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / "config.json"
+        target.write_text(json.dumps(config, indent=2) + "\n")
+        return target
+
+    def list_skills(self) -> list[tuple[str, str]]:
         if not self.path.is_dir():
             return []
-        bodies = []
-        for directory in sorted(self.path.iterdir()):
-            if not directory.is_dir():
+        skills = []
+        for category_dir in sorted(self.path.iterdir()):
+            if not category_dir.is_dir():
                 continue
-            for module in sorted(directory.glob("*.py")):
-                bodies.append((directory.name, module.stem))
-        return bodies
+            for entry in sorted(category_dir.iterdir()):
+                if entry.is_dir() and (entry / "skill.py").is_file():
+                    skills.append((category_dir.name, entry.name))
+        return skills
 
 
 def load_skill_module(category: str, name: str, base: str = "data/skills"):
     """Import a persisted skill body and return its module."""
-    path = Path(base) / category / f"{name}.py"
+    path = Path(base) / category / name / "skill.py"
     module_name = f"_skill_{category}_{name}".replace("-", "_")
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
@@ -209,12 +279,16 @@ def load_skill_module(category: str, name: str, base: str = "data/skills"):
 
 
 def materialize_skill(
-    draft: SkillDraft, category: str, store: SkillBodyStore
+    draft: SkillDraft, category: str, store: SkillStore
 ) -> Skill:
-    """Persist the draft's code body and build a runnable Skill from it."""
+    """Persist the draft's code body and build a runnable Skill from it.
+
+    The skill's config and contract are read back from the store so the runner
+    can resolve its data needs across restarts.
+    """
     if not draft.code:
         raise ValueError(f"skill {draft.name} has no code body to materialize")
-    store.write(category, draft.name, draft.code)
+    store.write_body(category, draft.name, draft.code)
     try:
         module = load_skill_module(category, draft.name, store.path)
     except Exception as exc:
@@ -229,20 +303,22 @@ def materialize_skill(
         description=draft.description,
         predict=module.predict,
         act=module.act,
+        config=store.read_config(category, draft.name),
+        contract=store.read_contract(category, draft.name),
     )
 
 
-def merge_skill_bodies(
-    tree: dict[str, list[Skill]], store: SkillBodyStore, registry: dict[str, dict]
+def merge_skill_store(
+    tree: dict[str, list[Skill]], store: SkillStore, registry: dict[str, dict]
 ) -> int:
-    """Upgrade persisted skill bodies in the tree to runnable skills.
+    """Upgrade persisted skill folders in the tree to runnable skills.
 
-    A body file makes a stub leaf executable; where the registry entry was lost
-    (or never written), the category is created and the description falls back
-    to the skill name. Returns the number of skills made runnable.
+    A skill folder makes a stub leaf executable; where the registry entry was
+    lost (or never written), the category is created and the description falls
+    back to the skill name. Returns the number of skills made runnable.
     """
     upgraded = 0
-    for category, name in store.list_bodies():
+    for category, name in store.list_skills():
         description = ""
         entry = registry.get(category, {})
         for skill in entry.get("skills", []):
@@ -258,6 +334,8 @@ def merge_skill_bodies(
             description=description or name,
             predict=module.predict,
             act=module.act,
+            config=store.read_config(category, name),
+            contract=store.read_contract(category, name),
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -269,6 +347,33 @@ def merge_skill_bodies(
             skills.sort(key=lambda s: s.name)
         upgraded += 1
     return upgraded
+
+
+def resolve_skill_config(
+    store: SkillStore, skill: Skill, global_config: dict, answered: dict | None = None
+) -> dict:
+    """Tiered config lookup: global config.json -> category config -> skill
+    config, plus any per-fire answers collected this run.
+
+    Higher tiers win. This is the merged view a skill reads from `ctx.config`.
+    """
+    merged: dict = {}
+    merged.update(global_config)
+    merged.update(store.read_category_config(skill.category))
+    merged.update(skill.config or {})
+    for key, value in (answered or {}).items():
+        merged[key] = value
+    return merged
+
+
+def unresolved_variables(
+    store: SkillStore, skill: Skill, global_config: dict, answered: dict | None = None
+) -> list[str]:
+    """Contract variables the runner has not satisfied yet (not in the merged
+    config and not answered this run). A missing input var is asked of the
+    human before predict runs."""
+    merged = resolve_skill_config(store, skill, global_config, answered)
+    return [name for name in (skill.contract or {}) if name not in merged]
 
 
 def compose_state(request: Request, current: str | None = None) -> str:

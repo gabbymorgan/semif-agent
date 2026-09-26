@@ -26,8 +26,10 @@ from semif_agent.skills import (
     CategoryDraft,
     CategoryRegistry,
     CreateCategory,
+    Prediction,
     Skill,
     SkillDraft,
+    SkillStore,
     build_category_prompt,
     build_skill_prompt,
     build_skills,
@@ -38,6 +40,8 @@ from semif_agent.skills import (
     navigate,
     parse_category_draft,
     parse_skill_draft,
+    resolve_skill_config,
+    unresolved_variables,
 )
 from semif_agent.trace import TraceLog
 
@@ -53,15 +57,27 @@ def act(ctx, request, prediction):
     return ActionResult(action_log="probe ran", new_state=request.text)
 """
 
+GOOD_TEST = """\
+import sys
+print("ok")
+sys.exit(0)
+"""
 
-def _fake_codegen_server() -> tuple[ThreadingHTTPServer, str]:
-    """Single-shot OpenAI-compatible SSE server standing in for ollama. Also
-    answers `/api/show` so the client's context-window probe succeeds."""
+GOOD_BUNDLE = json.dumps({"test": GOOD_TEST, "mock_data": {}})
+
+
+def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
+    """Sequenced OpenAI-compatible SSE server for the full authoring pipeline:
+    codegen body -> data contract -> test artifacts. Also answers `/api/show`
+    so the client's context-window probe succeeds (never counted)."""
 
     class Handler(BaseHTTPRequestHandler):
+        received: list = []
+        chat_calls: int = 0
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
-            self.rfile.read(length)
+            raw = self.rfile.read(length).decode("utf-8")
             if self.path.endswith("/api/show"):
                 body = json.dumps({"parameters": {"num_ctx": 4242}}).encode("utf-8")
                 self.send_response(200)
@@ -70,8 +86,12 @@ def _fake_codegen_server() -> tuple[ThreadingHTTPServer, str]:
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            type(self).chat_calls += 1
+            type(self).received.append(json.loads(raw))
+            index = min(type(self).chat_calls - 1, len(replies) - 1)
+            reply = replies[index]
             frame = "data: " + json.dumps(
-                {"choices": [{"delta": {"content": GOOD_BODY}}]}
+                {"choices": [{"delta": {"content": reply}}]}
             ) + "\n\n"
             body = (frame + "data: [DONE]\n\n").encode("utf-8")
             self.send_response(200)
@@ -83,7 +103,8 @@ def _fake_codegen_server() -> tuple[ThreadingHTTPServer, str]:
         def log_message(self, format, *args):
             pass
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    handler = type("Handler", (Handler,), {"received": [], "chat_calls": 0})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
@@ -385,10 +406,11 @@ def test_run_skill_guards_stub_and_writing_leaves(tmp_path):
 
 
 def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
-    """The full async path: _start_skill_write flags the leaf in-progress and
-    the single-slot worker materializes the body, hot-merges it into the tree,
-    and re-queues the original request for re-dispatch."""
-    httpd, base = _fake_codegen_server()
+    """The full async pipeline: _start_skill_write flags the leaf in-progress
+    and the single-slot worker runs codegen -> contract -> testgen -> test, then
+    materializes the body, hot-merges it into the tree, and re-queues the
+    original request for re-dispatch."""
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_BUNDLE])
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
         scheduler.tree["tracking"] = [
@@ -422,6 +444,215 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
         # is a valid end state; the requeue trace proves the push happened.
         events = [e["kind"] for e in scheduler.trace.read()]
         assert "skill_requeued" in events
+        assert "skill_testing" in events
+        assert "skill_ready" in events
+        # The full deliverable set landed in the skill folder.
+        directory = scheduler.body_store.dir("tracking", "track_live")
+        assert sorted(p.name for p in directory.iterdir() if not p.name.startswith("__")) == [
+            "contract.json",
+            "mock_data.json",
+            "skill.py",
+            "skill.test.py",
+        ]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
+    """A contract reply that never parses (after the escalation ladder) leaves
+    the leaf a restartable stub — no silent no-op, no wedged worker."""
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, "this is not a contract"])
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2))
+        scheduler.tree["tracking"] = [
+            Skill(name="track_live", category="tracking", description="Follow a package.")
+        ]
+        leaf = scheduler.tree["tracking"][0]
+
+        request = Request("track my drone delivery in real time")
+        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5)
+
+        deadline = time.monotonic() + 10
+        failed = None
+        while time.monotonic() < deadline:
+            failed = next(
+                (e for e in scheduler.trace.read() if e["kind"] == "skill_write_failed"),
+                None,
+            )
+            if failed:
+                break
+            time.sleep(0.05)
+        assert failed is not None, "worker must surface the failure"
+        assert not leaf.writing
+        assert leaf.is_noop(), "leaf must stay a restartable stub"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
+    """A contract variable the runner cannot satisfy pauses BEFORE predict;
+    the answer is recorded (engine unavailable -> ask-again, per-fire), then the
+    run continues. A second pause comes from the skill's own needs_input."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["tracking"] = []
+    store = scheduler.body_store
+    store.write_contract("tracking", "track_live", {"token": "The tracking token."})
+
+    seen = []
+
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        if request.user_input:
+            return ActionResult(action_log="done", new_state="done")
+        return ActionResult(
+            action_log="need confirmation", new_state=request.text, needs_input="Confirm?"
+        )
+
+    skill = Skill(
+        name="track_live",
+        category="tracking",
+        description="Follow a package.",
+        predict=predict,
+        act=act,
+        contract={"token": "The tracking token."},
+    )
+
+    result = scheduler._run_skill(skill, Request("track my package"))
+    assert result.kind == "needs_input"
+    assert "`token`" in result.summary
+    assert scheduler.pending is not None
+    assert scheduler.pending.pre_predict is True
+    assert scheduler.pending.prediction is None
+
+    status, detail = scheduler.answer("AB123")
+    assert status == "needs_input"
+    assert scheduler.pending is not None
+    assert scheduler.pending.pre_predict is False
+    assert scheduler.pending.request.meta["config_answers"]["token"] == "AB123"
+    assert "Confirm?" in scheduler.pending.question
+
+    status, detail = scheduler.answer("yes")
+    assert status == "ran"
+    assert scheduler.pending is None
+
+
+def test_unresolved_variables_respects_tiered_config(tmp_path):
+    """Contract vars are satisfied by global config, category config, skill
+    config, or per-fire answers — in that order of precedence."""
+    store = SkillStore(str(tmp_path / "skills"))
+    store.write_contract("tracking", "probe", {"sender_address": "the sender", "receiver": "the receiver", "tag": "a tag"})
+    store.write_config("tracking", "probe", {"sender_address": "skill-value"})
+    store.write_category_config("tracking", {"receiver": "category-value"})
+    skill = Skill(name="probe", category="tracking", description="Probe.",
+                  contract={"sender_address": "the sender", "receiver": "the receiver", "tag": "a tag"},
+                  config=store.read_config("tracking", "probe"))
+    global_config = {"tag": "global-value"}
+    assert unresolved_variables(store, skill, global_config) == []
+    merged = resolve_skill_config(store, skill, global_config)
+    assert merged["sender_address"] == "skill-value"
+    assert merged["receiver"] == "category-value"
+    assert merged["tag"] == "global-value"
+
+    skill2 = Skill(name="probe", category="tracking", description="Probe.",
+                   contract={"sender_address": "the sender", "receiver": "the receiver", "tag": "a tag"})
+    assert unresolved_variables(store, skill2, {}) == ["sender_address", "tag"]
+    assert unresolved_variables(store, skill2, {}, answered={"tag": "per-fire"}) == ["sender_address"]
+
+def test_elicit_requirements_asks_and_records(tmp_path):
+    """Opt-in elicitation asks the product owner refinement questions before
+    the body is written and rides the answers on the draft into the body prompt."""
+    httpd, base = _pipeline_codegen_server(
+        ['{"questions": ["Draft or send?"]}', GOOD_BODY, "{}", GOOD_BUNDLE]
+    )
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.elicitation_enabled = True
+        answers = []
+        scheduler.asker = lambda q: (answers.append(q), "draft first")[1]
+        draft = SkillDraft(name="track_live", description="Follow a package.")
+        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
+        assert answers == ["Draft or send?"]
+        assert draft.requirements == {"Draft or send?": "draft first"}
+        assert any(e["kind"] == "requirements" for e in scheduler.trace.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_elicit_requirements_disabled_skips(tmp_path):
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_BUNDLE])
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.elicitation_enabled = False
+        scheduler.asker = lambda q: "answer"
+        draft = SkillDraft(name="track_live", description="Follow a package.")
+        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
+        assert draft.requirements == {}
+        assert httpd.RequestHandlerClass.chat_calls == 0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_elicit_requirements_asker_none_stops(tmp_path):
+    """An asker that stops answering (None) halts collection without error."""
+    httpd, base = _pipeline_codegen_server(
+        ['{"questions": ["A?", "B?"]}', GOOD_BODY, "{}", GOOD_BUNDLE]
+    )
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.elicitation_enabled = True
+        asked = []
+        scheduler.asker = lambda q: (asked.append(q), None)[1]
+        draft = SkillDraft(name="track_live", description="Follow a package.")
+        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
+        assert asked == ["A?"]
+        assert draft.requirements == {}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
+    """A failing auto-run test triggers the regen decision (regen_test by
+    default when no factory), regenerating the test until it passes."""
+    failing_bundle = json.dumps({"test": "import sys\nsys.exit(1)", "mock_data": {}})
+    httpd, base = _pipeline_codegen_server(
+        [GOOD_BODY, "{}", failing_bundle, GOOD_BUNDLE]
+    )
+    try:
+        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.tree["tracking"] = [
+            Skill(name="track_live", category="tracking", description="Follow a package.")
+        ]
+        scheduler.regen_decision_factory = lambda run_id: (lambda reason: "regen_test")
+
+        request = Request("track my drone delivery in real time")
+        scheduler._start_skill_write(
+            request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5
+        )
+
+        deadline = time.monotonic() + 10
+        created = None
+        while time.monotonic() < deadline:
+            created = next(
+                (e for e in scheduler.trace.read() if e["kind"] == "skill_created"),
+                None,
+            )
+            if created:
+                break
+            time.sleep(0.05)
+        assert created is not None and created["written"] is True
+
+        testings = [e for e in scheduler.trace.read() if e["kind"] == "skill_testing"]
+        assert [t["passed"] for t in testings] == [False, True], (
+            "first attempt must fail, the regen must pass"
+        )
+        assert any(e["kind"] == "skill_ready" for e in scheduler.trace.read())
     finally:
         httpd.shutdown()
         httpd.server_close()
