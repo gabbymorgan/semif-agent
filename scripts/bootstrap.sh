@@ -319,6 +319,25 @@ if command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 
+# --- stage 8b: SimpleX bot contact address -------------------------------------------
+SIMPLEX_ADDRESS=""
+if command -v systemctl >/dev/null 2>&1; then
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if systemctl --user is-active --quiet semif-simplex.service 2>/dev/null; then
+    echo "== ensuring the SimpleX bot contact address exists"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if SIMPLEX_ADDRESS="$("$PYTHON" "$REPO_ROOT/scripts/simplex-address.py" 2>/dev/null)"; then
+        printf '%s\n' "$SIMPLEX_ADDRESS" | sed 's/^/  /'
+        break
+      fi
+      sleep 2
+    done
+    if [[ -z "$SIMPLEX_ADDRESS" ]]; then
+      echo "WARN: bot address not ready; run: $PYTHON scripts/simplex-address.py" >&2
+    fi
+  fi
+fi
+
 # --- stage 9: optional data copy -----------------------------------------------------
 if [[ -n "$COPY_DATA" ]]; then
   echo "== rsync data from $COPY_DATA"
@@ -365,12 +384,13 @@ Done. Next steps:
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli dashboard --port 8765
 
 SimpleX gateway:
-  - The bot runs as systemd user services 'semif-simplex' (daemon, port $SIMPLEX_PORT) and
+  - The bot runs as systemd user services 'semif-simplex' (bot daemon, port $SIMPLEX_PORT) and
     'semif-gateway' (agent). Check them with:
       systemctl --user status semif-simplex semif-gateway
       journalctl --user -u semif-gateway -f
-  - Show the bot's contact address (add it as a contact in your SimpleX app):
+  - Its user contact address is printed above; re-print (creating if needed) with:
       "$PYTHON" scripts/simplex-address.py
+    Add that address as a contact in your SimpleX app.
   - Then put your contactId/display name in config.json
     gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
     event or the daemon's /contacts) and reply. With an empty allowlist the

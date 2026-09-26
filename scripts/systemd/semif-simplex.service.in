@@ -1,11 +1,14 @@
 [Unit]
-Description=SemIf agent SimpleX Chat daemon
+Description=SemIf agent SimpleX Chat bot daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex/simplex_v1 -k "" --relay --headless --user-display-name "@DISPLAY_NAME@"
+# Bot mode: a local WebSocket chat server with a bot user. Do NOT add
+# --headless here — in SimpleX Chat v7 --headless means "chat relay" and
+# requires --relay, which yields a relay address, not a user contact address.
+ExecStart=@REPO@/.runtime/bin/simplex-chat -p @PORT@ -d @REPO@/.runtime/simplex/simplex_v1 -k "" --create-bot-display-name "@DISPLAY_NAME@"
 Restart=always
 RestartSec=10
 StandardOutput=journal

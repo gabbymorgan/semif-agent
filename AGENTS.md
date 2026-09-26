@@ -378,13 +378,14 @@ unit tests (24) + box integration tests (2).
   `data/` for continuity; `--public-dashboard` binds the dashboard to `0.0.0.0`.
   It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
   `ws_url` from `simplex_chat.port`) and renders/enables the two user services
-  `semif-simplex.service` (the pinned `simplex-chat` daemon, `--relay
-  --headless` on `simplex_chat.port` — v7 requires `--relay` for `--headless`)
-  and `semif-gateway.service`
+  `semif-simplex.service` (the pinned `simplex-chat` bot daemon,
+  `--create-bot-display-name` on `simplex_chat.port`) and `semif-gateway.service`
   (`.runtime/venv/bin/python -m semif_agent.cli gateway`). `--simplex-allowed-users
   CSV` / `--simplex-home-channel ID` / `--simplex-display-name NAME` populate
   the allowlist/fallback/identity; with an empty allowlist the gateway denies
-  everyone (the safe default until the human adds their contact id).
+  everyone (the safe default until the human adds their contact id). Bootstrap
+  then runs `scripts/simplex-address.py` to create/print the bot's contact
+  address.
 - Run / verify on jarvis:
   ```sh
   REPO=~/repos/semif-agent && cd "$REPO" && export HF_HOME="$REPO/.runtime/hf"
@@ -576,16 +577,20 @@ unit tests (24) + box integration tests (2).
   co-serves the browser UI from a daemon thread. Config lives under
   `gateway.simplex` in `config.json`; `enabled` defaults false. On a
   bootstrap-provisioned box `scripts/bootstrap.sh` renders and enables the
-  `semif-simplex.service` daemon (pinned `simplex-chat`, profile under
-  `.runtime/simplex/`, port from `simplex_chat.port`) and the
-  `semif-gateway.service` agent process, so the gateway runs headless across
+  `semif-simplex.service` bot daemon (pinned `simplex-chat` in **bot mode**,
+  profile under `.runtime/simplex/`, port from `simplex_chat.port`) and the
+  `semif-gateway.service` agent process, so the gateway runs across
   logout/reboot. The gateway is its own process — the REPL and the gateway are
   independent front ends onto the same on-disk logs/registry (do not run two
   scheduler processes over one skill store concurrently).
-- **Bot address.** `python scripts/simplex-address.py` queries the running
-  daemon for the bot's contact link (`/_show_address <userId>`), which a human
-  adds in their SimpleX app to start a DM. `bootstrap.sh` prints this hint; the
-  address is created automatically on the daemon's first `--headless` run.
+- **Bot address / v7 relay gotcha.** The daemon must NOT run with `--headless`
+  or `--relay`: in SimpleX Chat v7 `--headless` means "chat relay" (requires
+  `--relay`) and yields a *relay* address, not a user contact address. Run bot
+  mode instead (`simplex-chat -p PORT --create-bot-display-name NAME`), which
+  needs no TTY and is restart-safe. `python scripts/simplex-address.py` then
+  shows (creating on first run, via `/_address` / `/_show_address <userId>`)
+  the bot's user contact link, which a human adds in their SimpleX app to start
+  a DM. `bootstrap.sh` prints it at the end of provisioning.
 - **Transport contract** (`gateway/base.py`): `GatewayAdapter.run(on_inbound,
   outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
   `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can
