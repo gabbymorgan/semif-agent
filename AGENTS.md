@@ -454,6 +454,14 @@ unit tests (24) + box integration tests (2).
   seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
   server-side) is the reference seed; `tests/test_seed_skills.py` keeps it
   honest.
+- **Contract provenance.** Each authored body records the SKILL.md revision it
+  was written against. `skill_contract_ref()` (`codegen.py`) returns
+  `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read
+  under (revive with `git show <ref>:SKILL.md`) and `dirty` records whether the
+  working-tree contract differed from that commit; both degrade to `None`
+  outside a git checkout. Recorded as `contract_ref`/`contract_dirty` on the
+  `skill_writing` trace event; the dashboard shows `SKILL.md @ <ref>` with a `*`
+  when dirty.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the
@@ -570,14 +578,27 @@ unit tests (24) + box integration tests (2).
   The request always sends `stream_options.include_usage`, so the client logs
   the **exact** `prompt/completion/total` tokens, % of window, and a
   `SMART|WARN|DUMB` zone (absolute thresholds `smart_limit`/`warn_limit`) at
-  the end of the stream.
+  the end of the stream. Real ollama serves `/api/show`'s `parameters` as
+  modelfile **text** (`"num_ctx 100000\n..."`), not a dict, so the parser
+  handles both shapes and falls back to `model_info.<arch>.context_length`. The
+  total wall-clock `timeout` is enforced while the stream is live (a
+  continuously-streaming runaway is cut off), not only during idle gaps. The
+  budget is a safety net, not the loop cure: qwen38-iq3s's reasoning routinely
+  exceeds even the relaxed cap before it settles on a body, which is why the
+  sampler (below) is the real fix.
 - **Sampler params + escalation.** `codegen.temperature` (default 0.7),
   `top_p` (0.85), `presence_penalty` (1.5), `frequency_penalty` (0.2) follow
   the Qwen3.8 model card's instruct-mode anti-repetition guidance — a high
-  `presence_penalty`, not greedy temperature, is the loop cure. A rejected
-  body retries with the escalated sampler (presence 2.0 / temp 0.5) and a
-  fresh short prompt that resets the context to SMART; `max_attempts` (default
-  3) bounds the ladder, then a graceful stub.
+  `presence_penalty`, not greedy temperature, is the loop cure. Those four are
+  the only sampler knobs reachable via ollama's OpenAI-compat API;
+  `repeat_penalty`/`min_p`/`top_k` are Modelfile-only, so the per-request
+  `presence_penalty` (which overrides the Modelfile) is what actually stops the
+  loop and no Modelfile edit is needed. A rejected body retries with the
+  escalated sampler (presence 2.0 / temp 0.5) and a fresh short prompt that
+  resets the context to SMART; `max_attempts` (default 3) bounds the ladder,
+  then a graceful stub. Degeneration does **not** retry: the watchdog raises
+  `DegenerationError(CodegenError)`, which propagates straight to the graceful
+  stub (retry-on-degeneration is left as an open decision).
 - **Degeneration watchdog.** `codegen.degeneration.{enabled, threshold=0.9,
   interval=8000, window=2000, min_chars=4000}`: while the body streams, a
   2-option SemIf decision (continue/stop) runs every `interval` chars against
@@ -680,227 +701,35 @@ unit tests (24) + box integration tests (2).
 - **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
   only); the dev box core stays stdlib-only.
 
-## Codegen guardrails backlog (one session per item)
+## Gateway messaging backlog (one session per item)
 
-Context learned 2026-09-24 on the box: qwen38-iq3s looped ~40 min on one skill
-body (1.5 MB streamed) with no guard firing. Root causes: (1) `CodegenClient`
-sent `temperature 0.0` (greedy) and no penalties while the Modelfile has
-`repeat_penalty 1` (off) + `presence_penalty 0` (now fixed: item 5 ships the
-card-endorsed high `presence_penalty` per-request); (2) the total `timeout`
-check only runs inside the `if not ready:` branch of `_read_stream`, so a
-continuously-streaming runaway never trips it (fixed in item 1). Known model
-facts: qwen38-iq3s
-runtime window `num_ctx=100000` (native `qwen35.context_length=262144`);
-ollama OpenAI-compat `/v1/chat/completions` supports `temperature`, `top_p`,
-`presence_penalty`, `frequency_penalty`, `max_tokens`, `reasoning_effort`, and
-`stream_options.include_usage` (returns exact token `usage`) — but NOT
-`repeat_penalty`/`min_p`/`top_k` (needs a Modelfile edit or native
-`/api/chat`). Degradation tracks ABSOLUTE tokens used (SMART<100K,
-WARN 100–200K, DUMB>200K), so limits are a total-context budget
-(prompt+output), not a fill %.
+The `MessagingBridge` + `simplex.next_message` seed cover the read path and
+outbound sends onto the adapter's queue. Deferred follow-ups:
 
-- [x] **1. Fix the total-timeout stream bug** (`semif_agent/codegen.py`)
-  - Move the `now - start >= self.timeout` check out of the `if not ready:`
-    branch to the top of the `_read_stream` loop so it fires while streaming.
-  - Test: fake SSE server that streams forever → `CodegenError` "total budget"
-    must raise while tokens still flow.
-  - Verify: `python3 -m pytest tests/ -q --ignore=tests/integration`.
-
-- [x] **2. Auto-detect context window + layered token budget** (`codegen.py`, `cli.py`, `config.example.json`)
-  - `CodegenClient` lazily queries `POST /api/show {model}` → `parameters.num_ctx`
-    (fallback `model_info.<arch>.context_length`, then `context_window` config,
-    then default 100000).
-  - Per request: `total_limit = min(smart_limit, window*max_fill_ratio)`;
-    `output_limit = min(max_output, total_limit - prompt_est)`;
-    `warn_point = min(warn_limit, window*warn_fill_ratio)`.
-  - `max_output`: `>=1` = absolute tokens, `0<x<1` = fraction of window,
-    default `0.85`. Enforce in `_read_stream` via chars→tokens estimate
-    (`chars_per_token`). Abort → `CodegenError` → graceful stub. The transport
-    always streams (payload `"stream": true`) so the cap, idle watchdog, and
-    item-1 total budget abort a generation in real time; the `stream` config
-    now gates only the console echo, and non-stream response reading is gone.
-  - Print a start line: context tokens, output cap tokens + %, peak total fill.
-  - Config: `codegen.{context_window=0, smart_limit=250000, warn_limit=500000,
-    max_fill_ratio=0.9, warn_fill_ratio=0.7, max_output=0.85, chars_per_token=4.0}`.
-  - Tests: cap trips at fraction-of-window and absolute forms (fake server +
-    explicit window); `/api/show` parse (real fake server, per the no-mocking
-    rule — the backlog's "mock the fetch" was implemented as a real endpoint).
-  - **Box findings (2026-09-24):** real ollama serves `/api/show`'s
-    `parameters` as a **modelfile string** (`"num_ctx 100000\n..."`), not a
-    dict — a fake server that returned a dict hid the resulting
-    `AttributeError` crash; the parser now handles both shapes (string parses
-    the `num_ctx` line, else falls back to `model_info`). The ORIGINAL
-    defaults were far too tight for qwen38-iq3s: `max_output 0.25` (25k
-    tokens ≈ 100 KB chars) aborted a still-verbosely-reasoning `check_service`
-    body at exactly 100,154 chars — the cap fired correctly but too early.
-    Defaults were relaxed to the values above so a finite-but-verbose write
-    (~100 KB+) can complete while a window-filling degeneration still aborts.
-    **The box codegen integration tests remain flaky for a model reason, not
-    a code one**: qwen38-iq3s's reasoning often exceeds even the relaxed cap
-    before it settles on a body. That is the degeneration items 4–6 fix; the
-    budget is the safety net, not the cure. Window detection + cap firing are
-    both confirmed live on the box (`context window 100000 tokens` start
-    line; abort at the configured cap).
-
-- [x] **3. Exact token accounting via include_usage** (`codegen.py`)
-  - Send `stream_options: {"include_usage": true}`; capture the `usage` chunk
-    in `_consume_frame`; after the stream log real `prompt/completion/total`
-    tokens, % of window, and zone `SMART|WARN|DUMB` (absolute thresholds
-    `smart_limit`/`warn_limit`).
-  - Test: fake server emits a usage chunk; assert it's captured and logged.
-  - Implemented on the dev machine (2026-09-24): `_consume_frame` now also
-    tolerates a usage chunk with an empty `choices` list (OpenAI's shape —
-    previously an `IndexError`) and returns the `usage` dict; both stream
-    readers capture it and `_log_usage` prints real `prompt/completion/total`
-    tokens, % of the detected window, and the zone once the stream ends.
-    `chat` always sends `stream_options: {"include_usage": true}`. Unit-tested
-    (payload carries include_usage; usage captured + zone parametrized
-    SMART/WARN/DUMB; a stream without a usage chunk logs nothing extra).
-
-- [x] **4. SemIf degeneration watchdog** (`codegen.py`, `cli.py`, `scheduler.py`)
-  - Add optional `degeneration_check: Callable[[str], str|None]` to
-    `CodegenClient.chat`/`generate_skill_body`; `_read_stream` calls it every
-    `interval` chars with the last `window` chars (content+reasoning);
-    non-None → `CodegenError`.
-  - Wire in `cli.build_scheduler`: 2-option SemIf decision (continue/stop);
-    `P(stop) >= threshold` aborts. Record as a **trace-only** event
-    (kind `codegen`, with probs) — never in the decision log.
-  - Config: `codegen.degeneration.{enabled, threshold=0.9, interval=8000,
-    window=2000, min_chars=4000}`. Disabled when no engine (keeps
-    `CodegenClient` standalone pure for unit tests).
-  - Tests: a callback returning a reason aborts the stream; not invoked when
-    disabled.
-  - Implemented on the dev machine (2026-09-24): `CodegenClient` gained
-    `degeneration_interval`/`degeneration_window`/`degeneration_min_chars`
-    constructor params and a per-`chat` `degeneration_check`; both stream
-    readers (`_read_stream` and the blocking fallback) poll it against a
-    bounded rolling buffer (content+reasoning), trimming to
-    `window + interval` chars so a long degenerating stream never grows
-    unbounded memory. `cli.build_scheduler` wires a `degeneration_check_factory`
-    (per-run SemIf continue/stop decision; `EngineUnavailable` at call time
-    degrades to "keep going", so a machine without the engine never aborts via
-    this path) into the `Scheduler`, which builds the per-request check with
-    `request.id` and passes it through `generate_skill_body`. Trace event:
-    `kind: "codegen"` carrying state/question/options/probs/stop_prob — not in
-    the decision log. Config block added to `config.example.json` (`enabled`
-    defaults true; the runtime engine check is what disables it off the box).
-    Unit-tested: callback reason aborts the stream (deviation from the "not
-    invoked when disabled" spec: the min_chars gate is covered too), callback
-    returning None continues, no callback completes normally. **Box verified
-    (2026-09-24)**: during a real codegen write the watchdog fired 16 trace-only
-    `codegen` events, `stop_prob` range 0.056–0.693 (max 0.693 < threshold 0.9);
-    the SemIf model occasionally leaned `stop` by argmax but the threshold
-    correctly let the healthy-but-verbose generation continue. No
-    `DegenerationError` fired, no false abort — the watchdog polls and the
-    threshold logic works as designed.
-
-- [x] **5. Sampler params + 3-attempt escalation ladder** (`codegen.py`, `cli.py`)
-  - Send `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`.
-  - `generate_skill_body` escalates on invalid parse: attempts 2–3 use the
-    escalated sampler + a corrective message ("You are looping; emit the final
-    Python now."). Max 3 attempts (config `max_attempts`), then graceful stub.
-    Retry = fresh short prompt, i.e. context resets to SMART.
-  - Tests: payload carries the params; retry uses escalated params.
-  - **Revised values after reading the Qwen3.8-27B model card
-    (unsloth/Qwen3.8-27B-GGUF, 2026-09-24):** the original spec (`temp 0.15 /
-    presence 0.1 / freq 0.2`) kept the model nearly greedy with a near-zero
-    presence penalty — the exact loop recipe already documented on the box.
-    The card's anti-repetition guidance is a HIGH `presence_penalty` ("adjust
-    between 0 and 2 to reduce endless repetition"), recommended
-    `temp 0.7 / top_p 0.80 / presence 1.5` in instruct mode. Implemented
-    defaults: `temperature 0.7, top_p 0.85, presence_penalty 1.5,
-    frequency_penalty 0.2`; escalated (attempts 2+): `temp 0.5, top_p 0.85,
-    presence_penalty 2.0, frequency_penalty 0.3`. `top_k`/`min_p`/`repeat_penalty`
-    from the card are NOT reachable via ollama OpenAI-compat, so they stay
-    unset. **Degeneration does NOT retry**: the item-4 watchdog raises a new
-    `DegenerationError(CodegenError)` subclass that propagates straight to the
-    scheduler's graceful-stub path — retry-on-degeneration is left as an open
-    decision. Unit-tested on the dev machine (payload defaults, escalated retry
-    payload + corrective prompt, max_attempts exhaustion, degeneration and
-    token-budget errors propagate without retry). **Box verified (2026-09-24)**:
-    both codegen writes converged to runnable bodies (`check_service` → 9863
-    bytes, materialized, `test_generate_skill_body_codegen` passed;
-    `track_drone_delivery` → body written + materialized + ran). No 40-min loop,
-    no 1.5 MB stream — the card sampler stopped the degeneration. **But the
-    model is now MORE verbose**: ~28–70k tokens of reasoning per body at
-    ~25–40 tok/s, so writes take 25–45 min and trip the old 1200s default
-    timeout. The box `config.json` now sets `codegen.timeout: 3600`; that
-    timeout, not degeneration or the token cap, is the binding constraint now.
-
-- [x] **6. Box Modelfile anti-loop levers** (guppy; infra, not a code change)
-  - **Superseded by item 5.** The model card calls for `repetition_penalty 1.0`
-    (off) and `min_p 0.0` — the original `repeat_penalty 1.2 / min_p 0.05`
-    plan contradicts it. The card-endorsed cure (high `presence_penalty`,
-    reachable per-request via OpenAI-compat) is already shipped in item 5, so
-    no Modelfile edit is needed. **Box sanity checked (2026-09-24)**:
-    `ollama show --modelfile qwen38-iq3s` still shows `repeat_penalty 1` /
-    `presence_penalty 0` / `min_p 0` / `num_ctx 100000`; the per-request
-    values (presence 1.5 etc.) override them at request time and the writes
-    converged — no long loop.
-
-- [x] **7. SKILL.md auditability** (`codegen.py`, `scheduler.py`, `static/app.js`)
-  - `read_skill_contract` also yields sha256 of SKILL.md; record
-    `contract_sha256` on the `skill_writing` trace event (+ dashboard display).
-  - Test: the actually-sent HTTP payload's system message contains a SKILL.md
-    phrase (harness already records request bodies).
-  - **Reshaped on the dev machine (2026-09-24): commit-ref provenance, not a
-    content hash.** A bare sha256 flags stale bodies but can't revive the old
-    contract; the ref is the revivable pointer. `skill_contract_ref()`
-    (`codegen.py`) returns `{"ref", "dirty"}`: `ref` is the short git commit
-    sha the contract was read under — revive with
-    `git show <ref>:SKILL.md` — and `dirty` records whether the working-tree
-    contract differed from that commit. Both degrade to `None` (never a
-    non-revivable hash) outside a git checkout; only a missing contract
-    raises, mirroring `read_skill_contract`. Recorded as `contract_ref` /
-    `contract_dirty` on the `skill_writing` trace event
-    (`scheduler._create_skill`); the dashboard shows `SKILL.md @ <ref>` with a
-    `*` when dirty. Unit-tested: ref matches the real `git rev-parse --short
-    HEAD` in the repo, degrades off-repo, the sent HTTP payload's system
-    message contains the real SKILL.md text, and the ref fields round-trip
-    through `/api/trace`.
-
-- [x] **8. Config + AGENTS.md docs**
-  - Update `config.example.json` codegen block and the AGENTS.md codegen
-    section with every new key from items 2, 4, 5.
-  - Implemented on the dev machine (2026-09-24): `config.example.json` was
-    already complete — every key from items 2/4/5 landed incrementally with
-    those items and matches `cli.build_scheduler` defaults exactly — so the
-    only real gap was the AGENTS.md "### codegen (skill bodies, box)" section,
-    which gained three bullets (token budget + exact `include_usage` accounting
-    with SMART/WARN/DUMB zone; sampler params + escalation ladder; degeneration
-    watchdog block), all mirroring the `codegen` block of `config.example.json`.
-
-- [x] **9. Codegen prompt: code-for-reuse + self-generated mock data**
-    (`codegen.py`, `SKILL.md`)
-  - The generated body is meant to be REUSED across requests, so the prompt
-    must tell the model to generate its own mock data (its own source of
-    truth) and not assume a human will hand it data at predict/act time. The
-    REPL input path during a run (`needs_input`/`answer`) is for CLARIFYING
-    questions only — never the primary data source.
-  - Root cause (box, 2026-09-24): the generated `track_drone_delivery` body
-    asked the human for `tracking_id`/`status`/`latitude`/`longitude` to
-    function — reasonable for a one-shot exchange, wrong for a persistent
-    skill. `SKILL.md` should encode: skills are reusable modules; prefer an
-    internal/mock data model; ask the human only to disambiguate intent.
-  - Test: prompt/`SKILL.md` contains the reuse + self-mock-data directives;
-    a generated-body parse is unaffected.
-  - Implemented on the dev machine (2026-09-24): SKILL.md gained a hard rule
-    "Reusable module with its own data model" and the old "Request input when
-    data is missing" rule was reworded to "Request input for clarification
-    when requirements are unclear from the prompt" (intent only, never
-    operational data). Both codegen prompt builders (`build_skill_body_prompt`
-    and `_retry_prompt`) now add an explicit user-message line: the body is
-    reused across many requests; give the skill its own internal/mock data
-    model and ask only to clarify intent. Unit-tested (contract + both prompt
-    builders carry the directives; existing body-parse tests unaffected).
-  - **Superseded by BRAINSTORM.md item 1 (Sep 2026).** The "own data model"
-    doctrine was replaced: skills now own NO data — every operational value is
-    requested from the runner via `ctx.config` under a clear snake_case name
-    (no fabrication, no embedded mock data, no runtime asks). Mocking/testing
-    moved to its own contract `TESTGEN.md`, which drives the data contract
-    (`contract.json`) + test (`skill.test.py` with fixtures embedded inline).
-    The change-frequency config-vs-input question is answered behaviorally by
-    the config step at first fire, never in SKILL.md.
+- [ ] **1. Contact-list refresh from the daemon** (`gateway/bridge.py`,
+  `gateway/simplex.py`). The bridge learns contacts only from observed inbound
+  senders, so `/send` cannot address a contact it has never received from.
+  Query `/_contacts <userId>` (active user from `/user` →
+  `activeUser.userId`) at startup and on demand, caching `contactId` +
+  `profile.displayName`. Needs a request/response path (corrId → Future) in the
+  adapter or a bridge-owned short-lived WebSocket client —
+  `scripts/simplex-address.py` already proves a second client can issue
+  correlated commands.
+- [ ] **2. Message history + true unread** (`gateway/bridge.py`). The in-memory
+  inbox is a receive buffer, not the daemon's read state. Use `/_get chats
+  <userId> count=<n> <json(PaginationByTime)>` with a `ChatListQuery` unread
+  filter and `AChat.chatStats{unreadCount, minUnreadItemId}` +
+  `chatItem.meta.itemStatus` (`rcvNew`/`rcvRead`) to expose real unread history.
+  Note: v7 has **no mark-read command**, so acking is via read receipts, not an
+  API call.
+- [ ] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
+  outbound counterpart to `simplex.next_message`: resolve the recipient with a
+  SemIf sub-decision over `/contacts`, send only on explicit user intent, and
+  report the bridge's `contact_id` / errors honestly.
+- [ ] **4. Pull (queue-only) mode as a first-class option.**
+  `gateway.simplex.inbox.dispatch=false` already buffers without dispatching;
+  document it as a supported mode and give senders an ack/UX story (today their
+  message is buffered silently).
 
 ### Code principles
 - **Contain installation artifacts in the repo.** Everything a machine installs
