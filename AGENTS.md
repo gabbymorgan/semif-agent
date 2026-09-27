@@ -156,8 +156,10 @@ Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)
 - Decision rows logged before the `run_id` threading landed show up under
   run_id `"?"` in the dashboard — that's expected, not a bug.
 
-Machine split (Sep 2026): **guppy** is the ollama **model server only**;
-**jarvis** is the staging/test target (semif-agent + SemIf engine + deps).
+Machine split (Sep 2026): **guppy** hosts the remote **codegen** model (the
+12G `qwen38-iq3s`) only; **jarvis** is the staging/test target (semif-agent +
+SemIf engine + deps) and runs its **own local ollama** serving the small
+self-assessment model (`qwen3.5:4b`). Only codegen traffic travels to guppy.
 Provision jarvis with `scripts/bootstrap.sh` (see "### jarvis (staging)").
 Guppy key facts:
 
@@ -292,11 +294,14 @@ unit tests (24) + box integration tests (2).
 - **Dev box**: Python 3.13, GTX 780M (Kepler, useless), ~1.4G disk free. Never
   pip-install heavy deps here.
 - **guppy box**: Python 3.14, AMD RX 6950 XT (gfx1030), 32 cores, 30G RAM,
-  passwordless sudo. SemIf runs via llama.cpp **CPU** backend (its llamacpp
-  backend forces `n_gpu_layers=0`), so the GPU is NOT used by the decision
-  engine — it IS used by ollama.
+  passwordless sudo. Now serves **codegen only** (`qwen38-iq3s`). SemIf runs via
+  llama.cpp **CPU** backend (its llamacpp backend forces `n_gpu_layers=0`), so
+  the GPU is NOT used by the decision engine — it IS used by ollama.
+- **jarvis box**: runs the agent and its **own local ollama** serving the small
+  self-assessment model (`qwen3.5:4b`). `config.json` `llm.base_url` points at
+  `http://127.0.0.1:11434/v1`; only `codegen.base_url` points at guppy.
 - The SemIf tokenizer is fetched from HF (`Qwen/Qwen3.5-4B` at the pinned
-  revision). Set `HF_HOME=/home/abby/hf` or the tokenizer re-downloads.
+  revision), cached under each checkout's `.runtime/hf` (`HF_HOME`).
 
 ### SemIf install (box)
 - **Legacy layout** (predates the `.runtime/` containment rule; kept for the
@@ -325,19 +330,23 @@ unit tests (24) + box integration tests (2).
 - The pinned GGUF: `Qwen3.5-4B-Q4_K_M.gguf` from bartowski (2.8G) at
   `~/models/`. Load ~34s; score ~0.9s/decision on CPU at 8 threads.
 
-### ollama (box)
-- Installed at `/home/abby/ollama/bin/ollama` (not on PATH), systemd service
-  `ollama.service`, ROCm backend with `HSA_OVERRIDE_GFX_VERSION=10.3.0` and KV
-  cache q4_0 + flash attention. This is expected, not a bug.
+### ollama
+- **guppy = codegen host.** Installed at `/home/abby/ollama/bin/ollama` (not on
+  PATH), systemd service `ollama.service`, ROCm backend with
+  `HSA_OVERRIDE_GFX_VERSION=10.3.0` and KV cache q4_0 + flash attention. Serves
+  `qwen38-iq3s` (12G 27B, the codegen model). Binds `OLLAMA_HOST=0.0.0.0`, so
+  jarvis reaches it as a plain remote API at `http://192.168.8.181:11434` (no
+  auth — LAN-visible, same exposure as the old dashboard POST endpoints).
 - `semif-hermes` / `semif-hermes-v3` are for ANOTHER project (hermes agent) —
   ignore them; they spew "token repeat limit" errors.
-- Use `qwen3.5:4b` for self-assessment (works, ~3s). `qwen38-iq3s` (12G 27B)
-  also works but is huge/slow.
 - If generation hangs with no log output, restart the service
   (`sudo systemctl restart ollama`) — the ROCm runner can wedge.
-- Ollama already binds `OLLAMA_HOST=0.0.0.0`, so jarvis reaches it as a plain
-  remote API at `http://192.168.8.181:11434` (no auth — LAN-visible, same
-  exposure as the old dashboard POST endpoints).
+- **jarvis = local small model.** Runs its own ollama (`/usr/local/bin/ollama`,
+  systemd `ollama.service`, `127.0.0.1:11434`) serving `qwen3.5:4b` for
+  self-assessment (assess/elicitation/fidelity, ~3s). `bootstrap.sh` ensures
+  that model is pulled; `config.json` `llm.base_url` points here.
+- `bootstrap.sh` installs **no ollama**: it expects the target box to already
+  run one for `llm` (and pulls `llm.model` into it), while codegen is remote.
 
 ### jarvis (staging)
 
@@ -345,12 +354,15 @@ unit tests (24) + box integration tests (2).
   `semif-agent` to a checkout (jarvis keeps it at `~/repos/semif-agent`; the
   script derives all paths from wherever it is run, so any path works — just
   register its SSH key on Gitea first), then
-  `scripts/bootstrap.sh --peer-ollama http://192.168.8.181:11434`.
+  `scripts/bootstrap.sh --llm-url http://127.0.0.1:11434 --codegen-url http://192.168.8.181:11434`.
   The script must be run from a checkout — it reads pins from that checkout's
   `config.example.json` and never re-clones the agent repo (only the SemIf
   engine and the simplex-chat binary). Idempotent and rerunnable; every stage
   no-ops on existing state, so it also boots an unknown-state machine. It
-  installs **no ollama** — llm + codegen both point at guppy.
+  installs **no ollama**: `llm` is this box's local ollama (bootstrap pulls
+  `llm.model`), only `codegen` points at the peer guppy. It pulls the pinned
+  small model into the local ollama and WARNs (never auto-pulls) if the remote
+  codegen host is missing.
 - **All installation artifacts live inside the checkout under a gitignored
   `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
   `simplex/`, `systemd/`), so an end user can find and debug the whole stack in
@@ -372,10 +384,12 @@ unit tests (24) + box integration tests (2).
   that we intentionally do not install — the llama.cpp CPU path doesn't need
   them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Same as the box;
   do not "fix" them by installing torch.
-- Generates `config.json` with `codegen.timeout: 3600` (codegen now travels the
-  LAN), a repo-relative `.runtime/models` GGUF path, and a backup of any prior
-  file. `--threads N` overrides engine threads; `--copy-data SRC` rsyncs guppy's
-  `data/` for continuity; `--public-dashboard` binds the dashboard to `0.0.0.0`.
+- Generates `config.json` with `llm.base_url` = `--llm-url` (this box, local) and
+  `codegen.base_url` = `--codegen-url` (the remote codegen host; `codegen.timeout:
+  3600` since it travels the LAN), a repo-relative `.runtime/models` GGUF path,
+  and a backup of any prior file. `--threads N` overrides engine threads;
+  `--copy-data SRC` rsyncs guppy's `data/` for continuity; `--public-dashboard`
+  binds the dashboard to `0.0.0.0`.
   It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
   `ws_url` from `simplex_chat.port`) and renders/enables the two user services
   `semif-simplex.service` (the pinned `simplex-chat` bot daemon,

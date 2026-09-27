@@ -2,8 +2,9 @@
 # Provision a new Ubuntu machine into a running semif-agent staging box.
 #
 # Idempotent: safe to rerun; every stage no-ops on already-provisioned state,
-# so it can also bootstrap a machine of unknown state. All LLM traffic points
-# at a peer ollama endpoint (default: guppy) — this script installs NO ollama.
+# so it can also bootstrap a machine of unknown state. The small self-assessment
+# model runs on this machine's local ollama (bootstrap pulls it); only codegen
+# points at a remote ollama host (default: guppy). This script installs NO ollama.
 #
 # Must be run from a semif-agent checkout (it reads pins from this checkout's
 # config.example.json); the checkout is used as-is and never re-cloned — only
@@ -25,15 +26,16 @@
 # truth; bump those and rerun to upgrade.
 #
 # Usage:
-#   scripts/bootstrap.sh [--peer-ollama URL] [--threads N] [--copy-data SRC]
-#                        [--public-dashboard]
+#   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--threads N]
+#                        [--copy-data SRC] [--public-dashboard]
 #                        [--simplex-allowed-users CSV] [--simplex-home-channel X]
 #                        [--simplex-display-name NAME] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
 
-PEER_OLLAMA="http://192.168.8.181:11434"
+LLM_URL="http://127.0.0.1:11434"
+CODEGEN_URL="http://192.168.8.181:11434"
 THREADS=""
 COPY_DATA=""
 PUBLIC_DASHBOARD=0
@@ -42,9 +44,10 @@ SIMPLEX_HOME_CHANNEL=""
 SIMPLEX_DISPLAY_NAME=""
 
 usage() {
-  sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo
-  echo "  --peer-ollama URL            remote ollama API for llm+codegen (default: $PEER_OLLAMA)"
+  echo "  --llm-url URL                ollama API for the small self-assessment model (default: $LLM_URL; this machine)"
+  echo "  --codegen-url URL            ollama API for codegen skill bodies (default: $CODEGEN_URL)"
   echo "  --threads N                  engine threads for config.json (default: config.example value)"
   echo "  --copy-data SRC              rsync SRC (e.g. abby@box:~/repos/semif-agent/data) to data/ — opt-in"
   echo "  --public-dashboard           bind dashboard to 0.0.0.0 instead of 127.0.0.1"
@@ -57,7 +60,8 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --peer-ollama) PEER_OLLAMA="$2"; shift 2 ;;
+    --llm-url) LLM_URL="$2"; shift 2 ;;
+    --codegen-url) CODEGEN_URL="$2"; shift 2 ;;
     --threads) THREADS="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --public-dashboard) PUBLIC_DASHBOARD=1; shift ;;
@@ -91,7 +95,7 @@ fi
 
 # --- read pins from config.example.json ------------------------------------
 read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
-  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY < <(
+  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY LLM_MODEL < <(
   python3 - "$EXAMPLE" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
@@ -110,6 +114,7 @@ print(
             str(s.get("sha256", "")),
             str(s.get("port", "")),
             str(s.get("display_name", "")),
+            str(cfg.get("llm", {}).get("model", "")),
         ]
     )
 )
@@ -130,7 +135,14 @@ if [[ -n "$SIMPLEX_DISPLAY_NAME" ]]; then
 fi
 SIMPLEX_DISPLAY="${SIMPLEX_DISPLAY:-semif}"
 
-echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex-chat sha256 ${SIMPLEX_SHA256:0:12}… | peer $PEER_OLLAMA"
+# Native ollama API bases (no /v1) for tags/pull; the clients use /v1.
+LLM_API="${LLM_URL%/v1}"; LLM_API="${LLM_API%/}"
+CODEGEN_API="${CODEGEN_URL%/v1}"; CODEGEN_API="${CODEGEN_API%/}"
+with_v1() { local u="${1%/}"; [[ "$u" == */v1 ]] && printf '%s' "$u" || printf '%s/v1' "$u"; }
+LLM_V1="$(with_v1 "$LLM_URL")"
+
+echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex-chat sha256 ${SIMPLEX_SHA256:0:12}…"
+echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
 echo "== runtime tree: $RUNTIME"
 
 mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$UNITS" "$USER_UNITS"
@@ -238,12 +250,12 @@ echo "== simplex-chat verified ($SIMPLEX_BIN)"
 if [[ -f "$REPO_ROOT/config.json" ]]; then
   cp "$REPO_ROOT/config.json" "$REPO_ROOT/config.json.bak.$(date +%s)"
 fi
-echo "== writing config.json (llm/codegen -> $PEER_OLLAMA, runtime -> $RUNTIME)"
-python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$PEER_OLLAMA" \
+echo "== writing config.json (llm -> $LLM_URL, codegen -> $CODEGEN_URL, runtime -> $RUNTIME)"
+python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$LLM_URL" "$CODEGEN_URL" \
   "$([ "$PUBLIC_DASHBOARD" = 1 ] && echo 0.0.0.0 || echo 127.0.0.1)" \
   "$REPO_ROOT" "$SIMPLEX_ALLOWED_USERS" "$SIMPLEX_HOME_CHANNEL" "$SIMPLEX_DISPLAY" <<'PY'
 import json, os, sys
-(example, out, threads, peer, dash_host, repo,
+(example, out, threads, llm_url, codegen_url, dash_host, repo,
  allowed_csv, home_channel, display) = sys.argv[1:]
 cfg = json.load(open(example))
 eng = cfg["engine"]
@@ -252,13 +264,12 @@ eng["gguf"] = os.path.join(runtime, "models", os.path.basename(eng["gguf_url"]))
 if threads and threads != "__example__":
     eng["threads"] = int(threads)
 # The clients hit {base_url}/chat/completions on ollama's OpenAI-compat path,
-# which lives under /v1. The native API (/api/tags, /api/show) has no /v1, so
-# the raw `peer` is kept for those; llm/codegen base_url must end in /v1.
-base_url = peer.rstrip("/")
-if not base_url.endswith("/v1"):
-    base_url += "/v1"
-cfg["llm"]["base_url"] = base_url
-cfg["codegen"]["base_url"] = base_url
+# which lives under /v1. The native API (/api/tags, /api/show) has no /v1.
+def v1(url):
+    url = url.rstrip("/")
+    return url if url.endswith("/v1") else url + "/v1"
+cfg["llm"]["base_url"] = v1(llm_url)
+cfg["codegen"]["base_url"] = v1(codegen_url)
 cfg["codegen"]["timeout"] = 3600
 cfg.setdefault("simplex_chat", {})["display_name"] = display
 cfg.setdefault("dashboard", {})["port"] = 8765
@@ -345,28 +356,49 @@ if [[ -n "$COPY_DATA" ]]; then
   rsync -a "$COPY_DATA/" "$REPO_ROOT/data/"
 fi
 
-# --- stage 10: verify -------------------------------------------------------------------
+# --- stage 10: verify + pull the local self-assessment model -------------------------
 echo "== verifying imports"
 "$PYTHON" -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
-echo "== peer ollama check ($PEER_OLLAMA)"
-PEER_TAGS="$(curl -sf --max-time 5 "$PEER_OLLAMA/api/tags" || true)"
-# The OpenAI-compat chat path is what llm/codegen actually hit; a bare reachable
-# root ("Ollama is running") does not prove it. Probe it explicitly.
-PEER_V1="$(curl -sf --max-time 60 "$PEER_OLLAMA/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"qwen3.5:4b","messages":[{"role":"user","content":"hi"}],"stream":false,"options":{"num_predict":1}}' || true)"
-if grep -qE 'chatcmpl|"choices"' <<<"$PEER_V1"; then
-  echo "peer /v1/chat/completions (OpenAI-compat): OK"
+
+# The small self-assessment model runs on this machine's local ollama; ensure it
+# is pulled so assess/elicitation/fidelity work without a remote dependency.
+echo "== llm ollama ($LLM_API), model $LLM_MODEL"
+if ! curl -sf --max-time 5 "$LLM_API/api/tags" >/dev/null 2>&1; then
+  echo "WARN: no local ollama at $LLM_API — install/run ollama and pull $LLM_MODEL" >&2
+  echo "      (bootstrap installs no ollama; only codegen is remote)" >&2
 else
-  echo "WARN: peer /v1/chat/completions returned no completion — llm/codegen will fail" >&2
+  LLM_TAGS="$(curl -sf --max-time 5 "$LLM_API/api/tags" || true)"
+  if grep -qF "\"$LLM_MODEL\"" <<<"$LLM_TAGS"; then
+    echo "llm model $LLM_MODEL: present"
+  else
+    echo "== pulling llm model $LLM_MODEL from $LLM_API"
+    if ! curl -sf --max-time 3600 "$LLM_API/api/pull" -H 'Content-Type: application/json' \
+         -d "{\"model\":\"$LLM_MODEL\",\"stream\":false}" >/dev/null; then
+      echo "WARN: /api/pull failed; trying the ollama CLI" >&2
+      if command -v ollama >/dev/null 2>&1; then
+        ollama pull "$LLM_MODEL" || echo "WARN: could not pull $LLM_MODEL" >&2
+      else
+        echo "WARN: could not pull $LLM_MODEL (no ollama CLI)" >&2
+      fi
+    fi
+  fi
+  # The OpenAI-compat chat path is what llm actually hits; probe it explicitly.
+  LLM_V1_OK="$(curl -sf --max-time 60 "$LLM_V1/chat/completions" -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" || true)"
+  if grep -qE 'chatcmpl|"choices"' <<<"$LLM_V1_OK"; then
+    echo "llm /v1/chat/completions ($LLM_MODEL): OK"
+  else
+    echo "WARN: local llm /v1/chat/completions returned no completion" >&2
+  fi
 fi
-if grep -qE "qwen3\.5:4b" <<<"$PEER_TAGS"; then
-  echo "peer serves qwen3.5:4b (self-assessment): OK"
+
+# Codegen is the remote larger model (e.g. guppy). Warn only — never auto-pull.
+echo "== codegen ollama ($CODEGEN_API)"
+CODEGEN_TAGS="$(curl -sf --max-time 5 "$CODEGEN_API/api/tags" || true)"
+if grep -qE "qwen38-iq3s" <<<"$CODEGEN_TAGS"; then
+  echo "codegen serves qwen38-iq3s: OK"
 else
-  echo "WARN: peer /api/tags shows no qwen3.5:4b" >&2
-fi
-if grep -qE "qwen38-iq3s" <<<"$PEER_TAGS"; then
-  echo "peer serves qwen38-iq3s (codegen): OK"
-else
-  echo "WARN: peer /api/tags shows no qwen38-iq3s" >&2
+  echo "WARN: codegen host $CODEGEN_API serves no qwen38-iq3s (offline? new-skill authoring will fail)" >&2
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
