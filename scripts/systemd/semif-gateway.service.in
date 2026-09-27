@@ -7,6 +7,7 @@ Wants=network-online.target semif-simplex.service
 Type=simple
 WorkingDirectory=@REPO@
 Environment=HF_HOME=@REPO@/.runtime/hf
+Environment=PYTHONUNBUFFERED=1
 ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway
 Restart=always
 RestartSec=5

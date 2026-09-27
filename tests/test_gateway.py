@@ -66,15 +66,26 @@ def test_check_requirements_needs_url():
 # ---- adapter: parsing ----
 
 def direct_item(text="hello", contact_id="4", display="alice", direction="directRcv", kind="text"):
+    # v7 wire shape: the Contact's `displayName` is null and the peer name lives
+    # in `profile.displayName`; `localDisplayName` is auto-suffixed on collision.
+    # Received text is tagged `rcvMsgContent` with the message under `msgContent`.
     return {
         "chatInfo": {
             "type": "direct",
             "chatId": contact_id,
-            "contact": {"contactId": contact_id, "displayName": display},
+            "contact": {
+                "contactId": contact_id,
+                "localDisplayName": display,
+                "displayName": None,
+                "profile": {"displayName": display},
+            },
         },
         "chatItem": {
             "chatDir": {"type": direction},
-            "content": {"type": kind, "text": text},
+            "content": {
+                "type": "rcvMsgContent",
+                "msgContent": {"type": kind, "text": text},
+            },
         },
     }
 
@@ -101,6 +112,54 @@ def test_parse_filters_echo_group_and_non_text():
 def test_parse_filters_unauthorized_contact():
     adapter = SimplexAdapter({"allowed_users": ["9"]})
     assert adapter._parse_chat_item(direct_item(contact_id="4", display="alice")) is None
+
+
+def test_parse_real_v7_payload_with_suffixed_local_name():
+    # Captured live from simplex-chat v7 (`/_get chat @3`): the text is nested
+    # under content.msgContent; Contact.displayName is null, the peer name is in
+    # profile.displayName, and a collision-suffixed localDisplayName must not
+    # defeat the allowlist.
+    adapter = SimplexAdapter({"allowed_users": ["pepper"]})
+    item = {
+        "chatInfo": {
+            "type": "direct",
+            "chatId": 6,
+            "contact": {
+                "contactId": 6,
+                "localDisplayName": "pepper_1",
+                "displayName": None,
+                "profile": {"displayName": "pepper"},
+            },
+        },
+        "chatItem": {
+            "chatDir": {"type": "directRcv"},
+            "content": {
+                "type": "rcvMsgContent",
+                "msgContent": {
+                    "type": "text",
+                    "text": "what is the next thing on my calendar?",
+                },
+            },
+        },
+    }
+    message = adapter._parse_chat_item(item)
+    assert message is not None
+    assert message.text == "what is the next thing on my calendar?"
+    assert message.contact_id == "6"
+    assert message.display_name == "pepper"
+
+
+def test_parse_accepts_aeson_nested_content_shape():
+    # The daemon's DB/Aeson encoding nests under the constructor key instead of
+    # tagging with `type`; the parser tolerates both.
+    adapter = SimplexAdapter({"allow_all_users": True})
+    item = direct_item()
+    item["chatItem"]["content"] = {
+        "rcvMsgContent": {"msgContent": {"type": "text", "text": "hi"}}
+    }
+    message = adapter._parse_chat_item(item)
+    assert message is not None
+    assert message.text == "hi"
 
 
 # ---- adapter: send command ----

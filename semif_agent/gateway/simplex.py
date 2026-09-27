@@ -161,14 +161,33 @@ class SimplexAdapter(GatewayAdapter):
         if direction and "Snd" in direction:
             return None  # own echo
         content = chat_item.get("content") or {}
-        if content.get("type") != "text":
+        # simplex-chat v7 tags the content union by constructor: a received text
+        # message is {"type": "rcvMsgContent", "msgContent": {"type": "text",
+        # "text": ...}}. The daemon's DB/Aeson encoding nests under the
+        # constructor key instead ({"rcvMsgContent": {"msgContent": ...}}), so
+        # accept both shapes.
+        if content.get("type") == "rcvMsgContent":
+            msg_content = content.get("msgContent") or {}
+        elif isinstance(content.get("rcvMsgContent"), dict):
+            msg_content = content["rcvMsgContent"].get("msgContent") or {}
+        else:
             return None
-        text = str(content.get("text", "")).strip()
+        if msg_content.get("type") != "text":
+            return None
+        text = str(msg_content.get("text", "")).strip()
         if not text:
             return None
         contact = chat_info.get("contact") or {}
         contact_id = str(contact.get("contactId") or chat_info.get("chatId") or "")
-        display_name = contact.get("displayName") or contact.get("localDisplayName")
+        profile = contact.get("profile") or {}
+        # v7's Contact has `displayName: null`; the real peer name lives in
+        # `profile.displayName`, and `localDisplayName` is auto-suffixed on
+        # collisions (e.g. a second contact becomes `pepper_1`).
+        display_name = (
+            profile.get("displayName")
+            or contact.get("displayName")
+            or contact.get("localDisplayName")
+        )
         if not contact_id:
             return None
         if not self.is_authorized(contact_id, display_name):
