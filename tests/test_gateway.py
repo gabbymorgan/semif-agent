@@ -340,3 +340,24 @@ def test_service_answered_question_routes_back(tmp_path):
 
     service.handle_inbound(InboundMessage(text="work", chat_id="4", contact_id="4"))
     assert not scheduler.pending_questions()
+
+
+def test_service_observer_sees_authorized_inbound(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    seen = []
+    service.observer = seen.append
+    service.handle_inbound(InboundMessage(text="hi", chat_id="4", contact_id="4"))
+    assert [m.text for m in seen] == ["hi"]
+
+
+def test_service_pull_mode_buffers_without_dispatch(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = GatewayService(scheduler, FakeAdapter(), config={"inbox": {"dispatch": False}})
+    seen = []
+    service.observer = seen.append
+    service.handle_inbound(InboundMessage(text="hi", chat_id="4", contact_id="4"))
+    assert [m.text for m in seen] == ["hi"], "pull mode must still buffer for a read skill"
+    assert drain_outbound(service) == [], "pull mode must not reply or dispatch"
+    assert scheduler.current is None
+    assert scheduler.pending is None

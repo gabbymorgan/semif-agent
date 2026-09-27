@@ -318,6 +318,19 @@ def run_gateway(
     scheduler.on_request_requeued = service.on_request_requeued
     service.start()
 
+    from .gateway.bridge import MessagingBridge
+
+    bridge_cfg = cfg.get("bridge", {}) or {}
+    bridge = None
+    if bridge_cfg.get("enabled", True):
+        bridge = MessagingBridge(service.outbound, config=bridge_cfg)
+        service.observer = bridge.record_inbound
+        port = bridge.start()
+        print(
+            f"messaging bridge listening on http://{bridge.host}:{port} "
+            "(skills use messaging_bridge_url)"
+        )
+
     if serve_dashboard:
         import threading
 
@@ -342,6 +355,8 @@ def run_gateway(
     finally:
         service.stop()
         adapter.close()
+        if bridge is not None:
+            bridge.stop()
     return 0
 
 

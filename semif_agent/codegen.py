@@ -633,6 +633,12 @@ BODY_DIRECTIVES = (
     "body.\n"
     "Declare the integration as a module-level `INTEGRATION` dict exactly as "
     "SKILL.md specifies: service, transport, config_vars.\n"
+    "If this skill sends or reads SimpleX messages, call the messenger "
+    "gateway's local HTTP bridge (the `messaging_bridge_url` value from "
+    "`ctx.config`; endpoints: GET /inbox, GET /inbox/next?contact=, POST "
+    "/send) — never open a WebSocket to the simplex-chat daemon. Resolve which "
+    "contact/conversation with a `ctx.engine` sub-decision, and send only when "
+    "the request or requirements ask for it.\n"
 )
 
 
@@ -1061,6 +1067,7 @@ ELICITATION_EXAMPLES = [
     "How does it authenticate with the service, and should that credential come from the app's config?",
     "What does a successful run look like — what should it report back to you?",
     "If the service is unreachable or refuses the action, should the run fail loudly or record 'could not complete' as the result?",
+    "Should this skill send or read SimpleX messages through the messaging gateway, and if so which conversation (resolved by contact name)?",
 ]
 
 

@@ -74,6 +74,10 @@ A stdlib-only Python script that:
   Assert the server actually received the expected request (method, path,
   headers, body) where practical. The loopback address exists only in the test;
   the body must read its endpoint from config.
+- For a messaging skill (a body that talks to the gateway bridge), stand up a
+  loopback server implementing the bridge endpoints the body uses (`GET /inbox`,
+  `GET /inbox/next?contact=`, `POST /send`) and assert the body built the real
+  requests. Never connect to a real `simplex-chat` daemon or the live bridge.
 - For non-HTTP transports (IMAP, SMTP, subprocess, ...), exercise config
   resolution, argument construction, and error paths (missing or misconfigured
   values) without performing the real I/O.

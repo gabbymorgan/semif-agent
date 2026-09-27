@@ -357,7 +357,7 @@ def _respond_show(handler, body: dict | None = None) -> bool:
     if not handler.path.endswith("/api/show"):
         return False
     encoded = json.dumps(
-        body if body is not None else {"parameters": {"num_ctx": 4242}}
+        body if body is not None else {"parameters": {"num_ctx": 32768}}
     ).encode("utf-8")
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
@@ -369,7 +369,7 @@ def _respond_show(handler, body: dict | None = None) -> bool:
 
 class _FakeOpenAI(BaseHTTPRequestHandler):
     """Single-shot SSE server: the reply arrives as one content delta. The
-    `/api/show` window query is answered too (default num_ctx 4242) but never
+    `/api/show` window query is answered too (default num_ctx 32768) but never
     recorded in `received`, so chat-payload assertions stay unambiguous."""
 
     reply: str = GOOD_BODY
@@ -858,7 +858,7 @@ def test_chat_stream_false_returns_content_without_echo(capsys):
 class _UsageOpenAI(BaseHTTPRequestHandler):
     """Streams a small content delta, then the exact-token usage chunk
     (`choices: []` — OpenAI's shape when include_usage is set) before
-    [DONE]. The `/api/show` window query is answered (default num_ctx 4242)
+    [DONE]. The `/api/show` window query is answered (default num_ctx 32768)
     and never recorded."""
 
     usage: dict = {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15}
@@ -1208,7 +1208,7 @@ def test_degeneration_disabled_no_callback_no_abort():
 class _SequencedOpenAI(BaseHTTPRequestHandler):
     """Returns one reply per chat request, in order; counts chat calls.
 
-    `/api/show` is answered (default num_ctx 4242) and never counted, so chat
+    `/api/show` is answered (default num_ctx 32768) and never counted, so chat
     payload and retry-count assertions stay unambiguous.
     """
 
@@ -1678,6 +1678,19 @@ def test_skill_contract_lists_all_transports():
     text = read_skill_contract()
     for transport in ("caldav", "imap", "smtp", "pop", "compute"):
         assert transport in text
+
+
+def test_skill_contract_documents_messaging_bridge():
+    text = read_skill_contract()
+    assert "messaging_bridge_url" in text
+    assert "/inbox/next" in text
+    assert "/send" in text
+    assert "never opens a WebSocket" in text
+
+
+def test_body_directives_expose_messaging_bridge():
+    assert "messaging_bridge_url" in BODY_DIRECTIVES
+    assert "never open a WebSocket" in BODY_DIRECTIVES
 
 
 def test_body_prompts_require_real_action_and_integration():

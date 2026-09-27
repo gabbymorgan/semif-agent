@@ -150,6 +150,55 @@ talk to. Declaring a transport the body does not use is a broken skill.
 - **Names match the manifest.** The module is imported as its manifest name;
   the functions are `predict` and `act` exactly.
 
+## Messaging through the gateway bridge
+
+The agent can read and send SimpleX messages on the user's behalf. A skill
+never opens a WebSocket to the `simplex-chat` daemon: the running messenger
+gateway exposes a local HTTP bridge, and that is the only messaging surface a
+body touches. Declare it like any other HTTP integration:
+
+```python
+INTEGRATION = {
+    "service": "simplex",
+    "transport": "http",
+    "config_vars": ["messaging_bridge_url", "simplex_default_contact"],
+}
+```
+
+`messaging_bridge_url` is the bridge base URL (e.g. `http://127.0.0.1:5227`),
+supplied by the runner through `ctx.config`. Call it with `urllib.request`:
+
+| Request                                | Purpose                                                            |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| `GET  <base>/health`                   | `{"ok": true}` — the bridge is up.                                 |
+| `GET  <base>/contacts`                 | `{"contacts": [{"id", "display_name"}]}` — known contacts.         |
+| `GET  <base>/inbox`                    | Peek buffered inbound messages; does not consume.                  |
+| `GET  <base>/inbox/next?contact=<id>`  | Pop the oldest unread message (optionally from one contact).       |
+| `POST <base>/send`                     | `{"recipient": "<id\|display_name>", "text": "..."}` — send.        |
+
+`GET /inbox` returns `{"messages": [{"id", "contact_id", "display_name", "text",
+"received_at"}]}`; `GET /inbox/next` returns `{"message": {...} | null}`, where
+`null` means nothing is buffered. `POST /send` returns
+`{"ok": true, "contact_id": "<id>"}`. The bridge owns the read cursor, so a
+read skill needs no state of its own.
+
+Rules:
+
+- **Recipient selection is a SemIf decision.** When more than one conversation
+  is relevant (e.g. several have buffered messages), resolve which one with a
+  `ctx.engine.call(...)` sub-decision over the contacts — mirroring how
+  `calendar.next_event` picks a calendar. Use `simplex_default_contact` only as
+  the configured fallback when the request does not already make it clear.
+- **Sending requires user intent.** Send only because the request (or the
+  requirements) asks for it. Never broadcast, never message a contact the user
+  did not name or confirm, and never fabricate a message body as a working
+  value.
+- **Report real failures.** A bridge error, an unknown recipient, or an empty
+  inbox is reported honestly in `action_log` / `new_state`; never claim a
+  message was sent or read when it was not.
+- The bridge is local-only, but its URL still comes from `ctx.config` — never
+  hardcode a host, port, or bridge address in the body.
+
 ## Conventions
 
 - Single purpose, single file, single module.
@@ -183,6 +232,9 @@ A generated skill is accepted only if:
    and reports real failures honestly.
 8. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
    and is consistent with the body's `ctx.config` reads and behavior.
+9. If it is a messaging skill, it uses the gateway bridge over HTTP (never the
+   daemon WebSocket), resolves recipients with a SemIf sub-decision, and sends
+   only on explicit user intent.
 
 ## Worked example
 

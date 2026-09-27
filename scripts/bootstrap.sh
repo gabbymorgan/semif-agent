@@ -280,6 +280,12 @@ simplex["enabled"] = True
 simplex["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('port', 5226)}"
 simplex["allowed_users"] = allowed
 simplex["home_channel"] = home_channel
+# The gateway serves a localhost HTTP bridge that skills use to send/read
+# SimpleX messages; expose its address as the top-level `messaging_bridge_url`
+# so the data-contract config search auto-populates it.
+bridge_port = int(simplex.get("bridge", {}).get("port", 5227))
+simplex.setdefault("bridge", {})["enabled"] = True
+cfg["messaging_bridge_url"] = f"http://127.0.0.1:{bridge_port}"
 json.dump(cfg, open(out, "w"), indent=2)
 PY
 
@@ -427,4 +433,7 @@ SimpleX gateway:
     gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
     event or the daemon's /contacts) and reply. With an empty allowlist the
     gateway rejects everyone — that is the safe default.
+  - Skills send/read SimpleX messages through the gateway's local HTTP bridge
+    (config.json top-level messaging_bridge_url, default
+    http://127.0.0.1:5227); nothing else is needed while the gateway runs.
 EOF

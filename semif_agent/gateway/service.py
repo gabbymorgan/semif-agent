@@ -59,6 +59,13 @@ class GatewayService:
         self.home_channel = str(cfg.get("home_channel", "") or "")
         self.reply_prefix = str(cfg.get("reply_prefix", "") or "")
         self.poll_interval = float(poll_interval)
+        inbox_cfg = cfg.get("inbox", {}) or {}
+        #: When false the gateway only buffers inbound messages (for a read
+        #: skill to pull) instead of dispatching them as scheduler requests.
+        self.inbox_dispatch = bool(inbox_cfg.get("dispatch", True))
+        #: Optional callback invoked for every authorized inbound message,
+        #: before routing. The bridge uses it to fill its inbox.
+        self.observer = None
         self.outbound: "queue.Queue[OutboundMessage | None]" = queue.Queue()
         self._owners: dict[str, str] = {}
         self._parents: dict[str, str] = {}
@@ -106,6 +113,13 @@ class GatewayService:
     def handle_inbound(self, msg: InboundMessage) -> None:
         """Handle one authorized inbound message. Called by the adapter."""
         with self._route_lock:
+            if self.observer is not None:
+                self.observer(msg)
+            if not self.inbox_dispatch:
+                # Pull mode: buffer only (the observer recorded it); a read
+                # skill will consume it later. No scheduler request, no reply.
+                self.drain()
+                return
             reply_to = msg.chat_id
             pending = self.scheduler.pending
             if pending is not None and self._pending_owner is None:

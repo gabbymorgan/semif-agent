@@ -121,8 +121,13 @@ gateway/        messenger intake/reply. base.py: GatewayAdapter contract +
                 routed back to the origin chat). simplex.py: SimplexAdapter —
                 local simplex-chat daemon over its JSON WebSocket API
                 (lazy `websockets`, allowlist, batching, structured `/_send`).
-                Run with `python -m semif_agent.cli gateway [--dashboard]`;
-                config under `gateway.simplex` in config.json
+                bridge.py: MessagingBridge — a localhost stdlib HTTP API the
+                gateway serves so skills can send/read SimpleX messages without
+                touching the daemon (`/health`, `/contacts`, `/inbox`,
+                `/inbox/next`, `/send`); owns the read cursor (bounded inbox),
+                reuses the adapter's outbound queue. Run with `python -m
+                semif_agent.cli gateway [--dashboard]`; config under
+                `gateway.simplex` in config.json
 ```
 
 ## Run / verify
@@ -644,11 +649,34 @@ unit tests (24) + box integration tests (2).
   = True`; the service routes them by `run_id` → origin, falling back to
   `home_channel`); a chat's plain reply answers the question or picks the
   repair action (`retry`/`repair`/`ask`/`no`).
+- **Messaging bridge (skills send/read SimpleX)** (`gateway/bridge.py`,
+  Sep 2026): the gateway serves a **localhost stdlib HTTP API** so a skill body
+  never opens a WebSocket to the daemon. `run_gateway` starts a `MessagingBridge`
+  (`gateway.simplex.bridge`: `enabled` default true, `host`/`port` default
+  `127.0.0.1:5227`, optional `token` checked as `X-Semif-Token`, `max_inbox`)
+  and wires `service.observer = bridge.record_inbound`. Endpoints: `GET
+  /health`, `GET /contacts`, `GET /inbox` (peek), `GET /inbox/next?contact=<id>`
+  (pop oldest unread — the bridge owns the cursor), `POST /send`
+  `{"recipient": "<id|display_name>", "text"}` (resolves a numeric id or a known
+  display name and enqueues on the adapter's existing outbound queue). The
+  top-level `messaging_bridge_url` config is the skill-facing address (the data
+  contract's config search auto-populates it); bootstrap keeps it in sync with
+  the bridge port. `gateway.simplex.inbox.dispatch` (default true) preserves the
+  current push behavior while buffering every authorized inbound for reads; set
+  false for pull-only mode (buffer without scheduling). Skills reach the bridge
+  with the ordinary `http` transport, so their hermetic tests are loopback HTTP
+  like any other HTTP body. Recipient resolution is a SemIf sub-decision; no
+  mark-read command exists in the v7 API and contact-list refresh from the
+  daemon (`/_contacts`) is a follow-up.
 - **Tests.** `tests/test_gateway.py` (stdlib, dev box): allowlist/auth,
   `newChatItems` parsing + echo/group/non-text filtering, structured send
-  command, batching (real `asyncio`), and `GatewayService` routing against a
-  real `Scheduler` (lazy engine, unreachable LLM). The live `websockets`
-  transport against a real daemon is a jarvis integration concern.
+  command, batching (real `asyncio`), `GatewayService` routing against a
+  real `Scheduler` (lazy engine, unreachable LLM), the observer hook, and
+  pull mode. `tests/test_gateway_bridge.py` exercises the bridge over a real
+  loopback server (peek/pop, recipient resolution, outbound routing, token/body
+  validation). `tests/test_seed_skills.py` hermetically tests every
+  `seeds/<category>/<name>/` package, including `simplex.next_message`. The live
+  `websockets` transport against a real daemon is a jarvis integration concern.
 - **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
   only); the dev box core stays stdlib-only.
 

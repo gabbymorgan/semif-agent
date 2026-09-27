@@ -73,6 +73,7 @@
   },
   "skill_bodies": "data/skills",
   "skill_seeds": "seeds",
+  "messaging_bridge_url": "http://127.0.0.1:5227",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
@@ -95,7 +96,20 @@
       "home_channel": "",
       "reply_prefix": "",
       "text_batch_delay": 0.8,
-      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2},
+      "inbox": {
+        "_comment": "Buffer every authorized inbound DM so a read skill can pull it (see `messaging_bridge_url`). dispatch=true keeps the current behavior (also submit the message as a scheduler request); set dispatch=false for pull-only mode, where inbound messages are buffered and only acted on when the user asks.",
+        "dispatch": true,
+        "max_size": 100
+      },
+      "bridge": {
+        "_comment": "Local HTTP API the gateway serves to skills (send/read SimpleX messages). Skills call it over `http` with the top-level `messaging_bridge_url`; keep that URL in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. Set enabled=false to run the gateway without the bridge.",
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": 5227,
+        "token": "",
+        "max_inbox": 100
+      }
     }
   },
   "dashboard": {"port": 8765, "host": "0.0.0.0"}

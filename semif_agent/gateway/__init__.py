@@ -7,6 +7,16 @@ chat. See `base.py` for the contract.
 """
 
 from .base import GatewayAdapter, InboundMessage, OutboundMessage
+from .bridge import MessagingBridge, MessagingInbox, start_bridge
 from .service import GatewayService
 
-__all__ = ["GatewayAdapter", "InboundMessage", "OutboundMessage", "GatewayService"]
+__all__ = [
+    "GatewayAdapter",
+    "InboundMessage",
+    "OutboundMessage",
+    "GatewayService",
+    "MessagingBridge",
+    "MessagingInbox",
+    "start_bridge",
+]
+

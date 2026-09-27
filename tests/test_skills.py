@@ -92,7 +92,7 @@ def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length).decode("utf-8")
             if self.path.endswith("/api/show"):
-                body = json.dumps({"parameters": {"num_ctx": 4242}}).encode("utf-8")
+                body = json.dumps({"parameters": {"num_ctx": 32768}}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
