@@ -323,7 +323,11 @@ def run_gateway(
     bridge_cfg = cfg.get("bridge", {}) or {}
     bridge = None
     if bridge_cfg.get("enabled", True):
-        bridge = MessagingBridge(service.outbound, config=bridge_cfg)
+        bridge = MessagingBridge(
+            service.outbound,
+            config=bridge_cfg,
+            address_provider=adapter.request_address,
+        )
         service.observer = bridge.record_inbound
         port = bridge.start()
         print(

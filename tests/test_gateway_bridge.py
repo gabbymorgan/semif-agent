@@ -17,9 +17,11 @@ from semif_agent.gateway.base import InboundMessage, OutboundMessage
 from semif_agent.gateway.bridge import MessagingBridge
 
 
-def start_bridge(**config):
+def start_bridge(address_provider=None, **config):
     outbound = queue.Queue()
-    bridge = MessagingBridge(outbound, config=config)
+    bridge = MessagingBridge(
+        outbound, config=config, address_provider=address_provider
+    )
     port = bridge.start()
     return bridge, outbound, f"http://127.0.0.1:{port}"
 
@@ -158,5 +160,37 @@ def test_token_is_required_when_configured():
             post(f"{base}/send", {"recipient": "4", "text": "hi"})
         assert exc.value.code == 401
         assert get(f"{base}/inbox", token="sekret") == {"messages": []}
+    finally:
+        bridge.stop()
+
+
+def test_address_uses_provider():
+    link = {"short_link": "simplex:/abc", "full_link": "https://x", "created": False}
+    bridge, _, base = start_bridge(address_provider=lambda: link)
+    try:
+        assert get(f"{base}/address") == link
+    finally:
+        bridge.stop()
+
+
+def test_address_without_provider_is_unavailable():
+    bridge, _, base = start_bridge()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/address")
+        assert exc.value.code == 503
+    finally:
+        bridge.stop()
+
+
+def test_address_provider_failure_is_reported():
+    def boom():
+        raise RuntimeError("not connected")
+
+    bridge, _, base = start_bridge(address_provider=boom)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/address")
+        assert exc.value.code == 502
     finally:
         bridge.stop()

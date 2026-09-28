@@ -8,6 +8,8 @@ the running gateway serves this small stdlib HTTP API on localhost:
     GET  /inbox                      peek buffered inbound messages
     GET  /inbox/next?contact=<id>    pop the oldest unread message (optionally
                                      for one contact) -> {"message": {...}|null}
+    GET  /address                    the bot's user contact link, creating it if
+                                     needed -> {"short_link", "full_link", "created"}
     POST /send                       {"recipient": "<id|name>", "text": "..."}
 
 The bridge owns the read cursor (a bounded FIFO of authorized inbound DMs), so
@@ -91,6 +93,11 @@ class MessagingBridge:
     `gateway.<platform>.bridge` block: `host` (default 127.0.0.1), `port`
     (default 5227, `0` picks an ephemeral port), `token` (optional shared
     secret checked against the `X-Semif-Token` header), `max_inbox`.
+
+    `address_provider` is an optional zero-arg callable returning
+    `{short_link, full_link, created}` — the gateway wires it to the adapter's
+    contact-address lookup. When absent, `GET /address` answers 503 so a skill
+    reports that the link is unavailable rather than inventing one.
     """
 
     name = "simplex"
@@ -99,6 +106,7 @@ class MessagingBridge:
         self,
         outbound: "queue.Queue[OutboundMessage | None]",
         config: dict | None = None,
+        address_provider=None,
     ):
         cfg = config or {}
         self.host = str(cfg.get("host", "127.0.0.1"))
@@ -106,6 +114,7 @@ class MessagingBridge:
         self.token = str(cfg.get("token", "") or "")
         self.inbox = MessagingInbox(int(cfg.get("max_inbox", 100)))
         self.outbound = outbound
+        self.address_provider = address_provider
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -207,6 +216,20 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         elif url.path == "/inbox/next":
             contact = (parse_qs(url.query).get("contact") or [None])[0]
             self._json(200, {"message": bridge.inbox.pop(contact)})
+        elif url.path == "/address":
+            provider = bridge.address_provider
+            if provider is None:
+                self._json(503, {"error": "address lookup is not available"})
+                return
+            try:
+                link = provider()
+            except Exception as exc:
+                self._json(502, {"error": f"address lookup failed: {exc}"[:300]})
+                return
+            if not isinstance(link, dict):
+                self._json(502, {"error": "address lookup returned no link"})
+                return
+            self._json(200, link)
         else:
             self._json(404, {"error": "not found"})
 
@@ -246,7 +269,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 def start_bridge(
     outbound: "queue.Queue[OutboundMessage | None]",
     config: dict | None = None,
+    address_provider=None,
 ) -> tuple[MessagingBridge, int]:
-    bridge = MessagingBridge(outbound, config=config)
+    bridge = MessagingBridge(outbound, config=config, address_provider=address_provider)
     port = bridge.start()
     return bridge, port

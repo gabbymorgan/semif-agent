@@ -120,12 +120,14 @@ gateway/        messenger intake/reply. base.py: GatewayAdapter contract +
                 pending-run ownership, queue drain, authoring questions/repairs
                 routed back to the origin chat). simplex.py: SimplexAdapter —
                 local simplex-chat daemon over its JSON WebSocket API
-                (lazy `websockets`, allowlist, batching, structured `/_send`).
+                (lazy `websockets`, allowlist, batching, structured `/_send`,
+                corrId→Future request path for `/_show_address`/`/_address`).
                 bridge.py: MessagingBridge — a localhost stdlib HTTP API the
                 gateway serves so skills can send/read SimpleX messages without
                 touching the daemon (`/health`, `/contacts`, `/inbox`,
-                `/inbox/next`, `/send`); owns the read cursor (bounded inbox),
-                reuses the adapter's outbound queue. Run with `python -m
+                `/inbox/next`, `/address`, `/send`); owns the read cursor
+                (bounded inbox), reuses the adapter's outbound queue, and takes
+                an injected `address_provider` for the connect link. Run with `python -m
                 semif_agent.cli gateway [--dashboard]`; config under
                 `gateway.simplex` in config.json
 ```
@@ -452,7 +454,9 @@ unit tests (24) + box integration tests (2).
   at first fire) is written to the runtime store `data/skills/`, so the committed
   seed never holds secrets, and a generated body with the same name replaces the
   seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
-  server-side) is the reference seed; `tests/test_seed_skills.py` keeps it
+  server-side) is the reference seed; `simplex.next_message` (read via the
+  messaging bridge) and `simplex.connect_link` (show/create the bot's contact
+  link) are the messenger seeds; `tests/test_seed_skills.py` keeps them
   honest.
 - **Contract provenance.** Each authored body records the SKILL.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
@@ -675,11 +679,19 @@ unit tests (24) + box integration tests (2).
   never opens a WebSocket to the daemon. `run_gateway` starts a `MessagingBridge`
   (`gateway.simplex.bridge`: `enabled` default true, `host`/`port` default
   `127.0.0.1:5227`, optional `token` checked as `X-Semif-Token`, `max_inbox`)
-  and wires `service.observer = bridge.record_inbound`. Endpoints: `GET
+  and wires `service.observer = bridge.record_inbound` plus
+  `bridge.address_provider = adapter.request_address`. Endpoints: `GET
   /health`, `GET /contacts`, `GET /inbox` (peek), `GET /inbox/next?contact=<id>`
-  (pop oldest unread — the bridge owns the cursor), `POST /send`
-  `{"recipient": "<id|display_name>", "text"}` (resolves a numeric id or a known
-  display name and enqueues on the adapter's existing outbound queue). The
+  (pop oldest unread — the bridge owns the cursor), `GET /address` (show or
+  create the bot's user contact link; `{short_link, full_link, created}`, or
+  503 when no provider is wired and 502 when the daemon lookup fails), `POST
+  /send` `{"recipient": "<id|display_name>", "text"}` (resolves a numeric id or
+  a known display name and enqueues on the adapter's existing outbound queue).
+  The adapter gained a reusable **corrId→Future request path**
+  (`SimplexAdapter._roundtrip` / `request_address`, with `user_id` config,
+  default 1): `_consume` resolves a pending future for any frame whose `corrId`
+  is registered, so `/_show_address` / `/_address` can be called from the bridge
+  thread via `run_coroutine_threadsafe` without touching the event loop. The
   top-level `messaging_bridge_url` config is the skill-facing address (the data
   contract's config search auto-populates it); bootstrap keeps it in sync with
   the bridge port. `gateway.simplex.inbox.dispatch` (default true) preserves the
@@ -688,33 +700,36 @@ unit tests (24) + box integration tests (2).
   with the ordinary `http` transport, so their hermetic tests are loopback HTTP
   like any other HTTP body. Recipient resolution is a SemIf sub-decision; no
   mark-read command exists in the v7 API and contact-list refresh from the
-  daemon (`/_contacts`) is a follow-up.
+  daemon (`/_contacts`) is a follow-up (the corrId request path it needs now
+  exists).
 - **Tests.** `tests/test_gateway.py` (stdlib, dev box): allowlist/auth,
   `newChatItems` parsing + echo/group/non-text filtering, structured send
-  command, batching (real `asyncio`), `GatewayService` routing against a
-  real `Scheduler` (lazy engine, unreachable LLM), the observer hook, and
-  pull mode. `tests/test_gateway_bridge.py` exercises the bridge over a real
-  loopback server (peek/pop, recipient resolution, outbound routing, token/body
-  validation). `tests/test_seed_skills.py` hermetically tests every
-  `seeds/<category>/<name>/` package, including `simplex.next_message`. The live
-  `websockets` transport against a real daemon is a jarvis integration concern.
+  command, batching (real `asyncio`), corrId→Future round-trips and address
+  normalization, `GatewayService` routing against a real `Scheduler` (lazy
+  engine, unreachable LLM), the observer hook, and pull mode.
+  `tests/test_gateway_bridge.py` exercises the bridge over a real loopback
+  server (peek/pop, recipient resolution, outbound routing, token/body
+  validation, `/address` success/503/502). `tests/test_seed_skills.py`
+  hermetically tests every `seeds/<category>/<name>/` package, including
+  `simplex.next_message` and `simplex.connect_link`. The live `websockets`
+  transport against a real daemon is a jarvis integration concern.
 - **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
   only); the dev box core stays stdlib-only.
 
 ## Gateway messaging backlog (one session per item)
 
-The `MessagingBridge` + `simplex.next_message` seed cover the read path and
-outbound sends onto the adapter's queue. Deferred follow-ups:
+The `MessagingBridge` + `simplex.next_message` / `simplex.connect_link` seeds
+cover the read path, outbound sends onto the adapter's queue, and the bot's
+contact-link lookup. Deferred follow-ups:
 
 - [ ] **1. Contact-list refresh from the daemon** (`gateway/bridge.py`,
   `gateway/simplex.py`). The bridge learns contacts only from observed inbound
   senders, so `/send` cannot address a contact it has never received from.
   Query `/_contacts <userId>` (active user from `/user` →
   `activeUser.userId`) at startup and on demand, caching `contactId` +
-  `profile.displayName`. Needs a request/response path (corrId → Future) in the
-  adapter or a bridge-owned short-lived WebSocket client —
-  `scripts/simplex-address.py` already proves a second client can issue
-  correlated commands.
+  `profile.displayName`. The adapter now has the reusable corrId→Future path
+  this needs (`_roundtrip` / `request_address`, used by `GET /address`), so
+  reuse it rather than opening a second WebSocket client.
 - [ ] **2. Message history + true unread** (`gateway/bridge.py`). The in-memory
   inbox is a receive buffer, not the daemon's read state. Use `/_get chats
   <userId> count=<n> <json(PaginationByTime)>` with a `ChatListQuery` unread

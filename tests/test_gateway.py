@@ -361,3 +361,93 @@ def test_service_pull_mode_buffers_without_dispatch(tmp_path):
     assert drain_outbound(service) == [], "pull mode must not reply or dispatch"
     assert scheduler.current is None
     assert scheduler.pending is None
+
+
+# ---- adapter: correlated request/response + contact address ----
+
+
+class FakeWS:
+    """A fake simplex-chat socket that answers correlated commands."""
+
+    def __init__(self, adapter, responses):
+        self.adapter = adapter
+        self.responses = list(responses)
+        self.sent = []
+
+    async def send(self, raw):
+        message = json.loads(raw)
+        self.sent.append(message)
+        response = self.responses.pop(0)
+        await self.adapter._consume(
+            json.dumps({"corrId": message["corrId"], "resp": response}), None, self
+        )
+
+
+def test_correlated_response_resolves_pending_future():
+    adapter = SimplexAdapter({})
+
+    async def scenario():
+        adapter._loop = asyncio.get_running_loop()
+        adapter._ws = FakeWS(adapter, [])
+        future = adapter._loop.create_future()
+        adapter._pending["req-9"] = future
+        await adapter._consume(
+            json.dumps({"corrId": "req-9", "resp": {"type": "ok", "value": 1}}), None, adapter._ws
+        )
+        assert "req-9" not in adapter._pending, "a resolved request must be dropped"
+        return future.result()
+
+    assert asyncio.run(scenario()) == {"type": "ok", "value": 1}
+
+
+def test_address_returns_existing_link():
+    adapter = SimplexAdapter({"user_id": 3})
+
+    async def scenario():
+        adapter._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            adapter,
+            [
+                {
+                    "type": "userContactLink",
+                    "contactLink": {"connShortLink": "simplex:/a", "connFullLink": "https://a"},
+                }
+            ],
+        )
+        adapter._ws = ws
+        return await adapter.address(timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert result == {"short_link": "simplex:/a", "full_link": "https://a", "created": False}
+    assert [m["cmd"] for m in ws.sent] == ["/_show_address 3"]
+
+
+def test_address_creates_when_missing():
+    adapter = SimplexAdapter({"user_id": 1})
+
+    async def scenario():
+        adapter._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            adapter,
+            [
+                {"type": "userContactLink", "contactLink": None},
+                {
+                    "type": "userContactLinkCreated",
+                    "connLinkContact": {"connShortLink": "simplex:/new", "connFullLink": ""},
+                },
+            ],
+        )
+        adapter._ws = ws
+        return await adapter.address(timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert result == {"short_link": "simplex:/new", "full_link": "", "created": True}
+    assert [m["cmd"] for m in ws.sent] == ["/_show_address 1", "/_address 1"]
+
+
+def test_request_address_without_connection_raises():
+    import pytest
+
+    adapter = SimplexAdapter({})
+    with pytest.raises(RuntimeError):
+        adapter.request_address(timeout=1)

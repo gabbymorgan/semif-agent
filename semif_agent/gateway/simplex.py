@@ -13,6 +13,7 @@ dependency; `check_requirements()` gates the gateway off with an install hint.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import queue
 import random
@@ -32,12 +33,16 @@ class SimplexAdapter(GatewayAdapter):
         self.allow_all_users = bool(cfg.get("allow_all_users", False))
         self.auto_accept = bool(cfg.get("auto_accept", True))
         self.batch_delay = float(cfg.get("text_batch_delay", 0.8))
+        self.user_id = int(cfg.get("user_id", 1))
         reconnect = cfg.get("reconnect", {}) or {}
         self.reconnect_initial = float(reconnect.get("initial", 1.0))
         self.reconnect_max = float(reconnect.get("max", 60.0))
         self.reconnect_jitter = float(reconnect.get("jitter", 0.2))
         self.trace = trace
         self._corr = 0
+        self._pending: dict[str, asyncio.Future] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ws = None
         self._buffers: dict[str, str] = {}
         self._buffered: dict[str, InboundMessage] = {}
         self._flush_tasks: dict[str, asyncio.Task] = {}
@@ -81,10 +86,12 @@ class SimplexAdapter(GatewayAdapter):
     async def _serve(self, on_inbound, outbound: "queue.Queue") -> None:
         import websockets
 
+        self._loop = asyncio.get_running_loop()
         backoff = self.reconnect_initial
         while not self._stop.is_set():
             try:
                 async with websockets.connect(self.ws_url, max_size=None) as ws:
+                    self._ws = ws
                     backoff = self.reconnect_initial
                     self._event("gateway_connected", url=self.ws_url)
                     sender = asyncio.create_task(self._outbound_loop(ws, outbound))
@@ -95,6 +102,9 @@ class SimplexAdapter(GatewayAdapter):
                         sender.cancel()
             except Exception as exc:  # reconnect on any transport failure
                 self._event("gateway_error", message=str(exc)[:300])
+            finally:
+                self._ws = None
+                self._fail_pending("simplex gateway disconnected")
             delay = min(backoff, self.reconnect_max)
             delay *= 1 + random.random() * self.reconnect_jitter
             try:
@@ -133,12 +143,82 @@ class SimplexAdapter(GatewayAdapter):
         composed = [{"msgContent": {"type": "text", "text": text}}]
         return f"/_send @{chat_id} json {json.dumps(composed)}"
 
+    # ---- request/response + address ----
+
+    async def _roundtrip(self, command: str, timeout: float) -> dict:
+        """Send a command and await its correlated `resp` from the event loop."""
+        ws = self._ws
+        if ws is None or self._loop is None:
+            raise RuntimeError("simplex gateway is not connected")
+        self._corr += 1
+        corr = f"req-{self._corr}"
+        future = self._loop.create_future()
+        self._pending[corr] = future
+        await ws.send(json.dumps({"corrId": corr, "cmd": command}))
+        try:
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending.pop(corr, None)
+
+    def _fail_pending(self, reason: str) -> None:
+        pending, self._pending = self._pending, {}
+        for future in pending.values():
+            if not future.done():
+                future.set_exception(RuntimeError(reason))
+
+    async def address(self, timeout: float = 20.0) -> dict:
+        """Show the bot's user contact address, creating it on first call.
+
+        Mirrors `scripts/simplex-address.py`: `/_show_address <userId>` returns an
+        existing link; when there is none, `/_address <userId>` creates one.
+        Returns `{short_link, full_link, created}`.
+        """
+        resp = await self._roundtrip(f"/_show_address {self.user_id}", timeout)
+        link: dict = {}
+        created = False
+        if resp.get("type") == "userContactLink":
+            link = resp.get("contactLink") or {}
+        if not (link.get("connShortLink") or link.get("connFullLink")):
+            resp = await self._roundtrip(f"/_address {self.user_id}", timeout)
+            link = resp.get("connLinkContact") or {}
+            created = True
+        return {
+            "short_link": link.get("connShortLink") or "",
+            "full_link": link.get("connFullLink") or "",
+            "created": created,
+        }
+
+    def request_address(self, timeout: float = 20.0) -> dict:
+        """Thread-safe address lookup for callers off the event loop (the bridge).
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated link.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(self.address(timeout=timeout), loop)
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex address request timed out") from exc
+
     # ---- inbound ----
 
     async def _consume(self, raw: Any, on_inbound, ws) -> None:
         try:
             data = json.loads(raw)
         except (TypeError, ValueError):
+            return
+        corr_id = data.get("corrId")
+        if corr_id is not None:
+            # A correlated command response (round-trip): resolve the waiting
+            # requester. Fire-and-forget commands (`_send`, `_accept`) never
+            # register a future, so their responses are dropped here as before.
+            future = self._pending.pop(corr_id, None)
+            if future is not None and not future.done():
+                future.set_result(data.get("resp") or {})
             return
         resp = data.get("resp") or {}
         kind = resp.get("type")
