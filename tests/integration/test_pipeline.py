@@ -57,6 +57,19 @@ def require_real(config: dict):
         pytest.fail(f"real engine unavailable: {exc}")
 
 
+def _isolate_runtime(config: dict, tmp_path) -> None:
+    """Point every runtime artifact at tmp_path.
+
+    Without this, persisted authoring output in the box's `data/categories.json`
+    and `data/skills/` leaks into the tree and navigation routes to a stale stub
+    instead of the injected fixture — an environment-dependent failure.
+    """
+    config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
+    config["category_registry"] = str(tmp_path / "categories.json")
+    config["skill_bodies"] = str(tmp_path / "skills")
+
+
 def _install_tracking_fixture(scheduler):
     """A deterministic runnable leaf for end-to-end runs.
 
@@ -89,8 +102,7 @@ def _install_tracking_fixture(scheduler):
 def test_pipeline_end_to_end(tmp_path):
     config = load_config()
     require_real(config)
-    config["log"] = str(tmp_path / "decisions.jsonl")
-    config["trace"] = str(tmp_path / "runs.jsonl")
+    _isolate_runtime(config, tmp_path)
     scheduler, config = build_scheduler(config)
     _install_tracking_fixture(scheduler)
 
@@ -137,8 +149,7 @@ def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
     """
     config = load_config()
     require_real(config)
-    config["log"] = str(tmp_path / "decisions.jsonl")
-    config["trace"] = str(tmp_path / "runs.jsonl")
+    _isolate_runtime(config, tmp_path)
     scheduler, config = build_scheduler(config)
 
     lookups = [
@@ -165,8 +176,7 @@ def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
 def test_busy_choice_path(tmp_path):
     config = load_config()
     require_real(config)
-    config["log"] = str(tmp_path / "decisions.jsonl")
-    config["trace"] = str(tmp_path / "runs.jsonl")
+    _isolate_runtime(config, tmp_path)
     scheduler, config = build_scheduler(config)
     _install_tracking_fixture(scheduler)
 
