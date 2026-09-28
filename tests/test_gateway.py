@@ -410,7 +410,14 @@ def test_address_returns_existing_link():
             [
                 {
                     "type": "userContactLink",
-                    "contactLink": {"connShortLink": "simplex:/a", "connFullLink": "https://a"},
+                    "user": {"userId": 3},
+                    "contactLink": {
+                        "userContactLinkId": 1,
+                        "connLinkContact": {
+                            "connShortLink": "simplex:/a",
+                            "connFullLink": "https://a",
+                        },
+                    },
                 }
             ],
         )

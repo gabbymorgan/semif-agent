@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from semif_agent.cli import REPO_ROOT, load_config
 from semif_agent.codegen import CodegenClient
 from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
@@ -436,6 +437,61 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
     assert calendar[0].description.startswith("Report the next")
     assert calendar[0].status == "ready"
     assert calendar[0].integration["transport"] == "caldav"
+
+
+def test_load_config_anchors_runtime_paths_to_checkout(tmp_path):
+    """Path-valued config keys resolve against the checkout, not the cwd, so a
+    fresh clone finds its committed seeds from anywhere; absolute paths pass
+    through untouched."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "skill_seeds": "seeds",
+                "skill_bodies": "data/skills",
+                "log": "/absolute/decisions.jsonl",
+            }
+        )
+    )
+    config = load_config(str(config_file))
+    assert config["skill_seeds"] == str(REPO_ROOT / "seeds")
+    assert config["skill_bodies"] == str(REPO_ROOT / "data/skills")
+    assert config["category_registry"] == str(REPO_ROOT / "data/categories.json")
+    assert config["log"] == "/absolute/decisions.jsonl"
+    assert config["trace"] == str(REPO_ROOT / "data/runs.jsonl")
+
+
+def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
+    """A fresh checkout's seeds come from the anchored `seeds/` path even when
+    the process runs from an unrelated directory (the zero-skills regression:
+    relative paths resolved against cwd, so the tree was only response.reject
+    and navigation fell into the codegen loop)."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "skill_seeds": "seeds",
+                "skill_bodies": str(tmp_path / "skills"),
+                "category_registry": str(tmp_path / "categories.json"),
+                "log": str(tmp_path / "decisions.jsonl"),
+                "trace": str(tmp_path / "runs.jsonl"),
+            }
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+    config = load_config(str(config_file))
+    scheduler = Scheduler(
+        engine=SemIfEngine(EngineConfig()),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(config["log"]),
+        config=config,
+        trace=TraceLog(config["trace"]),
+    )
+    assert [s.name for s in scheduler.tree["simplex"]] == [
+        "connect_link",
+        "next_message",
+    ]
+    assert [s.name for s in scheduler.tree["calendar"]] == ["next_event"]
 
 
 def test_navigate_empty_tree_short_circuits(tmp_path):

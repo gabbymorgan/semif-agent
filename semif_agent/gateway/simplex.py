@@ -23,6 +23,27 @@ from typing import Any
 from .base import GatewayAdapter, InboundMessage, OutboundMessage
 
 
+def contact_link(resp: dict) -> dict:
+    """Pull `{connShortLink, connFullLink}` out of a daemon address response.
+
+    `/_show_address` nests it as `contactLink.connLinkContact`; `/_address`
+    returns it directly as `connLinkContact`. Tolerate both (and a flat
+    `contactLink`) so the adapter reads the real daemon shape rather than
+    calling `/_address` again on an existing link and reporting nothing.
+    """
+    for candidate in (
+        (resp.get("contactLink") or {}).get("connLinkContact"),
+        resp.get("connLinkContact"),
+        resp.get("contactLink"),
+        resp,
+    ):
+        if isinstance(candidate, dict) and (
+            candidate.get("connShortLink") or candidate.get("connFullLink")
+        ):
+            return candidate
+    return {}
+
+
 class SimplexAdapter(GatewayAdapter):
     name = "simplex"
 
@@ -177,10 +198,10 @@ class SimplexAdapter(GatewayAdapter):
         link: dict = {}
         created = False
         if resp.get("type") == "userContactLink":
-            link = resp.get("contactLink") or {}
+            link = contact_link(resp)
         if not (link.get("connShortLink") or link.get("connFullLink")):
             resp = await self._roundtrip(f"/_address {self.user_id}", timeout)
-            link = resp.get("connLinkContact") or {}
+            link = contact_link(resp)
             created = True
         return {
             "short_link": link.get("connShortLink") or "",

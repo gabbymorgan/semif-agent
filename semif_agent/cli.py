@@ -24,12 +24,39 @@ from .engine import EngineConfig, EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
 from .scheduler import Scheduler
-from .skills import build_skills, build_tree, tree_summary
+from .skills import tree_summary
 from .trace import TraceLog
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_PATH_KEYS = ("skill_seeds", "skill_bodies", "category_registry", "log", "trace")
+_PATH_DEFAULTS = {
+    "skill_seeds": "seeds",
+    "skill_bodies": "data/skills",
+    "category_registry": "data/categories.json",
+    "log": "data/decisions.jsonl",
+    "trace": "data/runs.jsonl",
+}
+
+
+def _anchor_path(value: str) -> str:
+    path = Path(value)
+    return str(path if path.is_absolute() else REPO_ROOT / path)
+
+
 def load_config(path: str = "config.json") -> dict:
-    return json.loads(Path(path).read_text())
+    """Load config.json and anchor its runtime paths to the checkout root.
+
+    Path-valued keys (`skill_seeds`, `skill_bodies`, `category_registry`, `log`,
+    `trace`) resolve against REPO_ROOT, not the process cwd, so a fresh clone
+    loads its committed seeds and writes runtime artifacts into the checkout no
+    matter where the CLI is invoked from. Absolute values pass through untouched.
+    """
+    config = json.loads(Path(path).read_text())
+    for key in _PATH_KEYS:
+        config[key] = _anchor_path(config.get(key) or _PATH_DEFAULTS[key])
+    return config
 
 
 def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
@@ -221,7 +248,7 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             print(scheduler.status())
             continue
         if lower == "skills":
-            print(tree_summary(build_tree(build_skills(config))))
+            print(tree_summary(scheduler.tree))
             continue
         if lower == "dream":
             print(run_dream(scheduler.log).render())
@@ -414,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "dream":
         print(run_dream(scheduler.log).render())
     elif args.command == "skills":
-        print(tree_summary(build_tree(build_skills(config))))
+        print(tree_summary(scheduler.tree))
     elif args.command == "status":
         print(scheduler.status())
     elif args.command == "relabel":
