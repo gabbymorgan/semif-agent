@@ -317,7 +317,11 @@ def test_fidelity_gate_is_a_real_semif_decision(tmp_path):
     config["log"] = str(tmp_path / "decisions.jsonl")
     config["trace"] = str(tmp_path / "runs.jsonl")
     scheduler, config = build_scheduler(config)
-    scheduler.codegen = None  # no rewrite; this test only exercises the gate
+    # The gate needs codegen configured to run; point it at a dead endpoint so
+    # a reconsider can't complete a rewrite (the gate still logs its decision).
+    scheduler.codegen = CodegenClient(
+        base_url="http://127.0.0.1:1/v1", model="test", timeout=2
+    )
 
     job = SkillWrite(
         request=Request("tell me if my package was delivered"),
