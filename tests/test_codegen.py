@@ -1639,20 +1639,21 @@ def test_run_skill_test_missing_script(tmp_path):
     assert "no skill.test.py" in output
 
 
-def test_regenerate_skill_body_rewrites(tmp_path):
+def test_regenerate_skill_body_rewrites_from_raw_evidence(tmp_path):
     httpd, base = _sequenced_server([GOOD_BODY])
     try:
         client = CodegenClient(base_url=base, model="test", timeout=10)
         draft = SkillDraft(name="probe", description="Probe the service.")
         code = regenerate_skill_body(
             client, Request("is the service up?"), "tracking", draft, GOOD_BODY,
-            "test failed with an error",
+            {"test_output": "test failed with an error", "previous_body": GOOD_BODY},
         )
         assert "def predict" in code and "def act" in code
         sent = httpd.RequestHandlerClass.received[0]
         joined = " ".join(m["content"] for m in sent["messages"])
         assert "test failed with an error" in joined
         assert "Previous body" in joined
+        assert "Evidence:" in joined
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1728,24 +1729,48 @@ def test_retry_prompt_carries_requirements():
     assert "Which service? -> Nextcloud" in joined
 
 
-def test_regen_prompt_carries_requirements_and_kind():
-    from semif_agent.codegen import _regen_body_prompt
+def test_regen_prompt_hands_raw_evidence_bundle():
+    from semif_agent.codegen import _regen_body_prompt, render_evidence
 
     draft = SkillDraft(name="probe", description="Probe the service.")
+    evidence = {
+        "request": "send the report",
+        "description": "Probe the service.",
+        "requirements": {"Should it really send?": "yes"},
+        "INTEGRATION": {"service": "mail", "transport": "smtp"},
+        "findings": ["INTEGRATION declares transport 'smtp' but the body shows no smtp calls"],
+        "verdict": "reconsider",
+        "probabilities": {"accept": 0.1, "reconsider": 0.9},
+        "previous_body": GOOD_BODY,
+    }
     messages = _regen_body_prompt(
         Request("send the report"),
         "tracking",
         draft,
         "THE CONTRACT",
         GOOD_BODY,
-        "act returned a canned result",
-        requirements={"Should it really send?": "yes"},
+        evidence,
         reason_kind="fidelity",
     )
     joined = messages[1]["content"]
-    assert "does not really perform the requested action" in joined
-    assert "Should it really send? -> yes" in joined
-    assert "Review finding" in joined
+    assert "Evidence:" in joined
+    assert "previous_body" in joined
+    assert "reconsider" in joined
+    assert "INTEGRATION" in joined
+    assert "smtp" in joined
+    # The bundle is rendered as-is, no prose diagnosis headers.
+    assert "Review finding" not in joined
+    assert render_evidence(evidence).startswith("request: send the report")
+
+
+def test_render_evidence_is_deterministic_and_handles_missing():
+    from semif_agent.codegen import render_evidence
+
+    bundle = {"error": None, "summary": "boom", "previous_body": "x = 1"}
+    first = render_evidence(bundle)
+    assert first == render_evidence(bundle)
+    assert "error: null" in first
+    assert "previous_body:\n```python\nx = 1\n```" in first
 
 
 def test_parse_integration_valid_declaration():

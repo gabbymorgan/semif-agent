@@ -1,7 +1,11 @@
 """The skill execution loop: observe -> predict -> act -> observe -> assess.
 
-Every SemIf decision made during a run is logged as a training row; the
-assessment outcome is kept on the row so the dream pass can weigh failed runs.
+Assessment is a SemIf decision, not generation: `assess:outcome` decides
+success/failure (P(success) >= tau) and, on failure, `assess:requeue` decides
+complete/retry. The run summary is deterministic — same inputs, same string —
+built from the category, skill, outcome flag, and action log. Every SemIf
+decision made during a run is logged as a training row; the assessment outcome
+is kept on the row so the dream pass can weigh failed runs.
 
 A skill with a data contract (contract.json) may need variables collected from
 the human before it runs. Those are asked pre-predict, runner-driven: `run`
@@ -14,11 +18,9 @@ the resolution continues.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .decisions import DecisionRequest, Option, Request
-from .engine import EngineUnavailable
-from .llm import Assessment, LLMClient
 from .log import DecisionLog
 from .skills import (
     ActionContext,
@@ -28,6 +30,18 @@ from .skills import (
     resolve_skill_config,
     unresolved_variables,
 )
+
+
+def deterministic_summary(category: str, name: str, success: bool, action_log: str, new_state: str) -> str:
+    """The run summary, computed without generation.
+
+    Same inputs always produce the same string. Feeds both `RunResult.summary`
+    and `assessment_summary`; consumers keep reading whichever field they read
+    before.
+    """
+    outcome = "ok" if success else "failed"
+    detail = (action_log or new_state or "").strip()
+    return f"{category}.{name}: {outcome} — {detail}"
 
 
 @dataclass
@@ -48,12 +62,16 @@ class RunResult:
 
 class SkillRunner:
     def __init__(
-        self, ctx: ActionContext, llm: LLMClient, log: DecisionLog, store: SkillStore | None = None
+        self,
+        ctx: ActionContext,
+        log: DecisionLog,
+        store: SkillStore | None = None,
+        tau: float = 0.6,
     ):
         self.ctx = ctx
-        self.llm = llm
         self.log = log
         self.store = store
+        self.tau = tau
 
     # ---- contract resolution ----
 
@@ -88,7 +106,8 @@ class SkillRunner:
 
     def _decide_record(self, skill: Skill, request: Request, variable: str, value: str) -> bool:
         """SemIf choice: record this answer as skill config, or ask again each
-        fire. Degrades to ask-again (no persist) when the engine is down."""
+        fire. The engine is always real; an unavailable engine propagates and
+        the scheduler marks the app fatal."""
         decision = DecisionRequest(
             state=(
                 f"[config] skill {skill.category}.{skill.name} got "
@@ -103,10 +122,7 @@ class SkillRunner:
                 Option("ask_again", "Ask again each time the skill fires."),
             ],
         )
-        try:
-            result = self.ctx.engine.call(decision)
-        except EngineUnavailable:
-            return False
+        result = self.ctx.engine.call(decision)
         self.log.append(
             decision,
             result,
@@ -226,24 +242,67 @@ class SkillRunner:
             )
         return self._finish(skill, request, prediction, action)
 
+    def _assess(self, skill: Skill, request: Request, action) -> tuple[bool, str | None]:
+        """SemIf assessment: did the run succeed, and should it run again?
+
+        `assess:outcome` decides success (`P(success) >= tau`); a failure is
+        then offered to `assess:requeue`, which picks complete/retry. On retry
+        the original request text is re-dispatched (the scheduler bounds it by
+        `max_reentries`). Both are real logged decision rows. The engine is
+        always real: EngineUnavailable propagates to the scheduler, which marks
+        the app fatal.
+        """
+        label = f"{skill.category}.{skill.name}"
+        outcome = DecisionRequest(
+            state=(
+                f"skill: {label}\n"
+                f"goal: {request.text}\n"
+                f"action log:\n{action.action_log}"
+            ),
+            question="Did the skill achieve the user's goal?",
+            options=[
+                Option("success", "Yes — the goal was met."),
+                Option("failure", "No — the goal was not met."),
+            ],
+        )
+        result = self.ctx.engine.call(outcome)
+        self.log.append(
+            outcome,
+            result,
+            extra={"phase": "assess:outcome", "run_id": request.id, "skill": label},
+        )
+        success = result.prob("success") >= self.tau
+        if success:
+            return True, None
+
+        requeue = DecisionRequest(
+            state=(
+                f"skill: {label}\n"
+                f"goal: {request.text}\n"
+                f"action log:\n{action.action_log}\n"
+                "outcome: failed"
+            ),
+            question="Is the request complete, or should it run again?",
+            options=[
+                Option("complete", "It is complete; do nothing further."),
+                Option("retry", "Run the original request again."),
+            ],
+        )
+        requeue_result = self.ctx.engine.call(requeue)
+        self.log.append(
+            requeue,
+            requeue_result,
+            extra={"phase": "assess:requeue", "run_id": request.id, "skill": label},
+        )
+        updated = request.text if requeue_result.prob("retry") >= self.tau else None
+        return False, updated
+
     def _finish(
         self, skill: Skill, request: Request, prediction: Prediction | None, action
     ) -> RunResult:
-        baseline = request.text
         observed = action.new_state
-        try:
-            assessment: Assessment = self.llm.assess(skill.name, baseline, action.action_log)
-        except Exception as exc:
-            return RunResult(
-                skill=skill.name,
-                success=False,
-                summary="",
-                action_log="",
-                new_state=observed,
-                error=str(exc),
-            )
+        success, updated_request = self._assess(skill, request, action)
 
-        run_ok = assessment.success
         decisions = getattr(prediction, "decisions", [])
         for decision, result in decisions:
             self.log.append(
@@ -252,19 +311,22 @@ class SkillRunner:
                 extra={
                     "phase": "predict",
                     "skill": skill.name,
-                    "run_ok": run_ok,
+                    "run_ok": success,
                     "run_id": request.id,
                 },
             )
 
+        summary = deterministic_summary(
+            skill.category, skill.name, success, action.action_log, observed
+        )
         return RunResult(
             skill=skill.name,
-            success=assessment.success,
-            summary=action.action_log.strip() or assessment.summary,
+            success=success,
+            summary=summary,
             action_log=action.action_log,
             new_state=observed,
-            updated_request=assessment.updated_request,
+            updated_request=updated_request,
             decisions_logged=len(decisions),
-            assessment_summary=assessment.summary,
+            assessment_summary=summary,
             prediction=prediction,
         )

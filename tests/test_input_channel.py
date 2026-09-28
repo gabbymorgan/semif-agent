@@ -2,24 +2,25 @@
 
 A skill can pause its run by returning ActionResult(..., needs_input="<q>");
 the scheduler keeps the run pending, and `answer` resumes it by re-invoking
-only `act` with the human's answer on request.user_input. No mocking: the
-scheduler uses the lazy engine (never loaded) and a real-but-unreachable LLM
-endpoint, so assessments degrade to failure — which is fine for these tests.
+only `act` with the human's answer on request.user_input. Assessment is now a
+SemIf decision, so these mechanics tests drive the loop with a deterministic
+scripted engine (see conftest) rather than loading the real GGUF.
 """
 
 from semif_agent.decisions import DecisionRequest, DecisionResult, Option, Request
-from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import Scheduler
 from semif_agent.skills import ActionResult, Prediction, Skill
 from semif_agent.trace import TraceLog
 
+from tests.conftest import ScriptedEngine
 
-def build_scheduler(tmp_path):
+
+def build_scheduler(tmp_path, choices=None):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = SemIfEngine(EngineConfig())
+    engine = ScriptedEngine(choices=choices, default="success")
     llm = LLMClient(base_url="http://localhost:1/v1", model="test")
     return Scheduler(
         engine=engine,
@@ -109,16 +110,21 @@ def test_predict_decisions_logged_on_completion(tmp_path):
         )
 
     skill = Skill(name="t.x", category="t", description="", predict=predict, act=act)
-    scheduler = build_scheduler(tmp_path)
+    scheduler = build_scheduler(
+        tmp_path,
+        choices={"achieve the user's goal": "failure", "complete, or should it run again": "complete"},
+    )
 
     scheduler._run_skill(skill, Request("x"))
     assert scheduler.log.read() == []
 
     scheduler.answer("yes")
     rows = scheduler.log.read()
-    assert len(rows) == 1
-    assert rows[0]["extra"]["phase"] == "predict"
-    assert rows[0]["extra"]["run_ok"] is False
+    predict_rows = [r for r in rows if r.get("extra", {}).get("phase") == "predict"]
+    assert len(predict_rows) == 1
+    assert predict_rows[0]["extra"]["run_ok"] is False
+    phases = [r.get("extra", {}).get("phase") for r in rows]
+    assert "assess:outcome" in phases and "assess:requeue" in phases
 
 
 def test_busy_abandons_pending(tmp_path):

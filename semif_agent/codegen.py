@@ -937,7 +937,7 @@ def integration_findings(integration: dict, source: str, code: str) -> list[str]
     """Static mismatches between the declaration and the body.
 
     Empty list means the declaration is consistent with what the code does;
-    findings feed the fidelity review's corrective regen reason.
+    findings feed the fidelity gate's reconsider regen evidence.
     """
     findings: list[str] = []
     if source != "declared":
@@ -1481,49 +1481,51 @@ def generate_skill_tests(
     raise ValueError(f"testgen reply rejected {attempts} times: {last_error}")
 
 
+def render_evidence(evidence: dict) -> str:
+    """Render a raw evidence bundle as-is for a corrective prompt.
+
+    The codegen model gets the raw bundle verbatim — no prose diagnosis and no
+    `or`-chain collapse of the failure fields. Nested dict/list values are
+    JSON-serialized with sorted keys so the rendering is deterministic;
+    `previous_body` is fenced Python. A missing value renders as `null` rather
+    than disappearing, so the model can see the absence.
+    """
+    lines: list[str] = []
+    for key, value in evidence.items():
+        if key == "previous_body":
+            lines.append(f"previous_body:\n```python\n{value}\n```")
+        elif isinstance(value, (dict, list)):
+            lines.append(
+                f"{key}: {json.dumps(value, sort_keys=True, ensure_ascii=False)}"
+            )
+        elif value is None:
+            lines.append(f"{key}: null")
+        else:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
 def _regen_body_prompt(
     request: Request,
     category: str,
     draft: SkillDraft,
     contract: str,
     previous_code: str,
-    note: str,
-    requirements: dict[str, str] | None = None,
+    evidence: dict,
     reason_kind: str = "test",
 ) -> list[dict]:
+    """Fresh corrective prompt carrying the raw evidence bundle, not a prose
+    diagnosis. `reason_kind` labels the corrective context in one word."""
     system = (
         "You write runnable skill bodies for a local agent. The contract below "
         "is authoritative: follow it exactly.\n\n"
         f"{contract}"
     )
-    headers = {
-        "test": (
-            f"The auto-run test for {category}.{draft.name} failed. Rewrite "
-            "the body so it passes."
-        ),
-        "fidelity": (
-            f"A review of {category}.{draft.name} rejected the body: it does "
-            "not really perform the requested action. Rewrite it so `act` "
-            "performs the real operation against the configured service."
-        ),
-        "run_failure": (
-            f"A real run of {category}.{draft.name} failed against the "
-            "service. Rewrite the body so it handles the observed failure "
-            "correctly."
-        ),
-    }
-    failure_labels = {
-        "fidelity": "Review finding",
-        "run_failure": "Run failure",
-    }
-    header = headers.get(reason_kind, headers["test"])
-    failure_label = failure_labels.get(reason_kind, "Test failure")
     user = (
-        f"{header}\n"
+        f"Correct a skill body for {category}.{draft.name} ({reason_kind}).\n"
         f"Request: {request.text}\n"
         f"Skill description: {draft.description}\n"
-        f"{_requirements_block(requirements)}"
-        f"{failure_label}: {note}\n"
+        f"Evidence:\n{render_evidence(evidence)}\n"
         f"Previous body:\n```python\n{previous_code}\n```\n"
         f"{BODY_DIRECTIVES}"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
@@ -1541,27 +1543,29 @@ def regenerate_skill_body(
     category: str,
     draft: SkillDraft,
     previous_code: str,
-    reason: str,
+    evidence: dict,
     contract: str | None = None,
-    requirements: dict[str, str] | None = None,
     reason_kind: str = "test",
 ) -> str:
     """Rewrite a skill body whose test, review, or real run failed.
 
-    Fresh prompt (context resets) carrying the failure and the previous body;
-    escalation ladder identical to generate_skill_body. `reason_kind` picks the
-    corrective framing (`test`, `fidelity`, or `run_failure`); the elicitation
-    answers ride along so the repair cannot regress to a toy. A
+    Fresh prompt (context resets) carrying the raw evidence bundle and the
+    previous body; escalation ladder identical to generate_skill_body.
+    `reason_kind` labels the corrective context (`test`, `fidelity`, or
+    `run_failure`). The bundle is handed through as-is — the caller includes
+    requirements and the raw failure fields, never a paraphrase. A
     DegenerationError or other CodegenError propagates immediately.
     """
     contract_text = contract if contract is not None else read_skill_contract()
     attempts = max(client.max_attempts, 1)
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
-        note = reason if attempt == 1 else str(last_error)
+        attempt_evidence = dict(evidence)
+        if attempt > 1:
+            attempt_evidence["previous_parse_error"] = str(last_error)
         messages = _regen_body_prompt(
-            request, category, draft, contract_text, previous_code, note,
-            requirements=requirements, reason_kind=reason_kind,
+            request, category, draft, contract_text, previous_code,
+            attempt_evidence, reason_kind=reason_kind,
         )
         try:
             raw = client.chat(

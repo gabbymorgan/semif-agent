@@ -22,6 +22,7 @@ from semif_agent.codegen import (
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable
+from semif_agent.scheduler import SkillWrite
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
@@ -304,46 +305,48 @@ def test_generate_skill_body_codegen(tmp_path):
     assert skill.integration["transport"] in ("http", "caldav")
 
 
-def test_review_skill_body_real_llm():
-    """The real self-assessment model must flag a simulated body and accept a
-    body that really performs the action."""
-    from semif_agent.llm import LLMClient
+def test_fidelity_gate_is_a_real_semif_decision(tmp_path):
+    """The fidelity gate is a real logged SemIf decision (`authoring:fidelity`).
 
+    A body with no valid INTEGRATION declaration produces static findings, which
+    force `reconsider` regardless of the model's probability; a clean,
+    declared body is accepted. Both verdicts are recorded as decision rows.
+    """
     config = load_config()
-    llm_cfg = config.get("llm", {})
-    client = LLMClient(
-        base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
-        model=llm_cfg.get("model", "qwen3.5:4b"),
-        timeout=120.0,
-    )
-    toy = '''\
-INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_id"]}
+    require_real(config)
+    config["log"] = str(tmp_path / "decisions.jsonl")
+    config["trace"] = str(tmp_path / "runs.jsonl")
+    scheduler, config = build_scheduler(config)
+    scheduler.codegen = None  # no rewrite; this test only exercises the gate
 
+    job = SkillWrite(
+        request=Request("tell me if my package was delivered"),
+        category="tracking",
+        draft=SkillDraft(
+            name="track_delivery", description="Check a package's delivery status."
+        ),
+        weight=0.5,
+    )
+    undeclared = '''\
 def predict(ctx, request):
     return Prediction(text="ok", decisions=[])
 
 def act(ctx, request, prediction):
-    return ActionResult(
-        action_log=f"Package {ctx.config['tracking_id']} is delivered.",
-        new_state="delivered",
-    )
+    return ActionResult(action_log="delivered", new_state="delivered")
 '''
-    review = client.review_skill_body(
-        "tell me if my package was delivered",
-        "Check a package's delivery status.",
-        toy,
-        integration={"service": "carrier", "transport": "http", "config_vars": ["tracking_id"]},
+    gated = scheduler._fidelity_gate(job, undeclared)
+    rows = [r for r in scheduler.log.read() if r.get("extra", {}).get("phase") == "authoring:fidelity"]
+    assert rows, "the fidelity gate must be a logged decision row"
+    print(f"undeclared reconsider: {rows[-1]['extra']['reconsider']} {rows[-1]['predicted_probs']}")
+    assert rows[-1]["extra"]["reconsider"] is True, (
+        "an undeclared body must be reconsidered"
     )
-    print(f"toy verdict: {review.performs_real_action} — {review.reason}")
-    assert review.performs_real_action is False, (
-        "a canned status with no real lookup must be rejected"
-    )
+    assert gated == undeclared, "no codegen means the gate returns the body unchanged"
 
-    real = '''\
+    declared = '''
+INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]}
 import json
 import urllib.request
-
-INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]}
 
 def predict(ctx, request):
     return Prediction(text="ok", decisions=[])
@@ -356,16 +359,10 @@ def act(ctx, request, prediction):
         new_state=payload["status"],
     )
 '''
-    review = client.review_skill_body(
-        "tell me if my package was delivered",
-        "Check a package's delivery status.",
-        real,
-        integration={"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]},
-    )
-    print(f"real verdict: {review.performs_real_action} — {review.reason}")
-    assert review.performs_real_action is True, (
-        "a body that really calls the carrier API must be accepted"
-    )
+    scheduler._fidelity_gate(job, declared)
+    rows = [r for r in scheduler.log.read() if r.get("extra", {}).get("phase") == "authoring:fidelity"]
+    print(f"declared reconsider: {rows[-1]['extra']['reconsider']} {rows[-1]['predicted_probs']}")
+    assert rows[-1]["extra"]["findings"] == [], "a consistent declaration has no findings"
 
 
 def test_create_skill_empty_category_does_not_wedge(tmp_path):

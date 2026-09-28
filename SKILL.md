@@ -215,8 +215,8 @@ Rules:
   sub-decisions, mirroring how `calendar.next_event` resolves which calendar
   to read.
 - `act` performs the concrete real action and writes a human-readable
-  `action_log` that the self-assessment LLM can judge. Include what the service
-  actually returned.
+  `action_log` that the SemIf assessment step can judge. Include what the
+  service actually returned.
 - Act like a developer eliciting requirements from a product owner: when the
   prompt leaves a behavioral or integration choice open, prefer a clarifying
   `needs_input` over guessing — a clarifying question is cheaper than a wrong

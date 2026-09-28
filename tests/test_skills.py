@@ -55,6 +55,8 @@ from semif_agent.skills import (
 )
 from semif_agent.trace import TraceLog
 
+from tests.conftest import ScriptedEngine
+
 
 GOOD_BODY = """\
 from semif_agent.decisions import DecisionRequest, Option
@@ -123,9 +125,12 @@ def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
 
-def _scheduler(tmp_path, codegen=None):
+def _scheduler(tmp_path, codegen=None, choices=None, default="success"):
+    """A scheduler driven by the deterministic scripted engine (conftest) so
+    scheduling/authoring mechanics are testable without a GGUF. Assessment is a
+    SemIf decision now, so a run needs the engine to answer `assess:*`."""
     return Scheduler(
-        engine=SemIfEngine(EngineConfig()),
+        engine=ScriptedEngine(choices=choices, default=default),
         llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
         log=DecisionLog(str(tmp_path / "decisions.jsonl")),
         config={
@@ -143,11 +148,11 @@ def test_action_result_needs_input_defaults_none():
     assert ActionResult("log", "state").needs_input is None
 
 
-def test_run_summary_surfaces_real_action_log(tmp_path):
-    """The user sees the skill's actual result, not the LLM's brief assessment.
+def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
+    """The summary is computed, not generated: same inputs, same string.
 
-    The assessment endpoint is unreachable here, so a summary taken from the
-    assessment would read "assessment failed"; the real action log must win.
+    It names the category and skill, the ok/failed flag from the SemIf
+    assessment, and the skill's real action log. No LLM prose is involved.
     """
     scheduler = _scheduler(tmp_path)
 
@@ -170,13 +175,35 @@ def test_run_summary_surfaces_real_action_log(tmp_path):
 
     result = scheduler._run_skill(skill, Request("what is my next event?"))
     assert result.kind == "ran"
-    assert "Team sync" in result.summary
-    assert "assessment failed" not in result.summary
 
+    expected = (
+        "calendar.next_event: ok — Next event on 'personal': Team sync — 2026-09-27 10:00 CEST"
+    )
     assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
     assert assessed, "the run must be traced"
-    assert "Team sync" in assessed[-1]["summary"]
-    assert assessed[-1]["assessment_summary"].startswith("assessment failed")
+    assert assessed[-1]["summary"] == expected
+    assert assessed[-1]["assessment_summary"] == expected
+
+
+def test_run_summary_failure_uses_new_state_when_no_action_log(tmp_path):
+    """A failed run with an empty action log falls back to the new state."""
+    scheduler = _scheduler(
+        tmp_path, choices={"achieve the user's goal": "failure",
+                           "complete, or should it run again": "complete"}
+    )
+
+    def predict(ctx, request):
+        return Prediction(text="", decisions=[])
+
+    def act(ctx, request, prediction):
+        return ActionResult(action_log="", new_state="service unreachable")
+
+    skill = Skill(name="probe", category="tracking", description="Probe.",
+                  predict=predict, act=act)
+    scheduler._run_skill(skill, Request("probe it"))
+    assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
+    assert assessed[-1]["success"] is False
+    assert assessed[-1]["summary"] == "tracking.probe: failed — service unreachable"
 
 
 
@@ -531,9 +558,9 @@ def test_gate_decision_empty_tree_still_builds():
     assert decision.options[0].id == "yes"
 
 
-def test_dispatch_create_category_without_engine_returns_error(tmp_path):
+def test_dispatch_create_category_without_engine_is_fatal(tmp_path):
     """An empty tree short-circuits to CreateCategory; without an engine the
-    category authoring fails gracefully instead of leaving the scheduler wedged."""
+    category authoring is fatal — the app is marked and the caller stops."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     scheduler = Scheduler(
@@ -549,9 +576,10 @@ def test_dispatch_create_category_without_engine_returns_error(tmp_path):
         trace=trace,
     )
     scheduler.tree = {}
-    result = scheduler._dispatch(Request("anything"))
-    assert result.kind == "error"
-    assert "create_category failed" in result.summary
+    with pytest.raises(EngineUnavailable):
+        scheduler._dispatch(Request("anything"))
+    assert scheduler.fatal is not None
+    assert "not available" in scheduler.fatal
 
 
 def test_skill_status_reflects_writing_and_noop():
@@ -708,7 +736,7 @@ def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
     """A contract variable the runner cannot satisfy pauses BEFORE predict;
     the answer is recorded (engine unavailable -> ask-again, per-fire), then the
     run continues. A second pause comes from the skill's own needs_input."""
-    scheduler = _scheduler(tmp_path)
+    scheduler = _scheduler(tmp_path, choices={"ask again each time": "ask_again"})
     scheduler.tree["tracking"] = []
     store = scheduler.body_store
     store.write_contract("tracking", "track_live", {"token": "The tracking token."})

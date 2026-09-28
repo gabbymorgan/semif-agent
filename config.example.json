@@ -16,7 +16,7 @@
     "threads": 8
   },
   "llm": {
-    "_comment": "Small self-assessment model (assess/elicitation/fidelity review). Runs on THIS machine's local ollama; bootstrap sets base_url from --llm-url (default http://127.0.0.1:11434) and pulls `model` if it is missing. This is deliberately local — only codegen travels to a remote host.",
+    "_comment": "Dormant OpenAI-compatible endpoint. Assessment and fidelity are SemIf decisions now, so the LLM is out of every decision path; this block is retained for backlogged retirement and only `_parse_json` is still borrowed by the authoring parsers. Runs on THIS machine's local ollama; bootstrap sets base_url from --llm-url (default http://127.0.0.1:11434) and pulls `model` if it is missing. Only codegen travels to a remote host.",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen3.5:4b"
   },
@@ -47,7 +47,7 @@
       "wait_timeout": 900
     },
     "fidelity": {
-      "_comment": "After the body lands, the small self-assessment model reviews whether it really performs the action vs simulates it (canned result, fabricated data, draft-by-default). Static INTEGRATION checks (declaration vs code) run alongside. A rejected body is regenerated with the finding, bounded by max_attempts; a still-fake body is accepted but traced/badged, never a hard authoring failure. A missing reviewer degrades to accept.",
+      "_comment": "After the body lands, an authoring:fidelity SemIf decision (accept/reconsider, P(reconsider) >= tau or any static finding) checks whether it really performs the action vs simulates it (canned result, fabricated data, draft-by-default). Static INTEGRATION checks (declaration vs code) run alongside. The gate never diagnoses: a rejected body is regenerated with the raw evidence bundle, bounded by max_attempts; a still-fake body is accepted but traced/badged, never a hard authoring failure.",
       "enabled": true,
       "max_attempts": 1
     },

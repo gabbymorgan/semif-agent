@@ -20,11 +20,13 @@ from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler
 from semif_agent.skills import ActionResult, Prediction, Skill
 from semif_agent.trace import TraceLog
 
+from tests.conftest import ScriptedEngine
 
-def build_scheduler(tmp_path):
+
+def build_scheduler(tmp_path, engine=None):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = SemIfEngine(EngineConfig())
+    engine = engine if engine is not None else ScriptedEngine(default="success")
     llm = LLMClient(base_url="http://localhost:1/v1", model="test")
     scheduler = Scheduler(
         engine=engine,
@@ -142,14 +144,17 @@ def test_trace_endpoint_empty(tmp_path):
         server.close()
 
 
-def test_submit_without_engine_returns_error_json(tmp_path):
-    scheduler = build_scheduler(tmp_path)
+def test_submit_without_engine_returns_fatal_json(tmp_path):
+    """The decision engine is always real; if it is unavailable the app is
+    fatal, and the dashboard reports it instead of a soft error."""
+    scheduler = build_scheduler(tmp_path, engine=SemIfEngine(EngineConfig()))
     server = Server(scheduler)
     try:
         status, payload = server.post("/api/submit", {"text": "do something"})
         assert status == 200
-        assert payload["status"] == "error"
-        assert "engine" in payload["detail"]
+        assert payload["status"] == "fatal"
+        assert "not available" in payload["detail"]
+        assert scheduler.fatal is not None
     finally:
         server.close()
 

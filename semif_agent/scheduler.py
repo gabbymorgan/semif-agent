@@ -7,6 +7,7 @@ state preserved; a deferred input is scored and queued by urgency.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -17,7 +18,6 @@ from typing import Callable
 from .codegen import (
     CodegenClient,
     CodegenError,
-    ElicitationResult,
     extract_integration,
     generate_data_contract,
     generate_elicitation,
@@ -29,7 +29,7 @@ from .codegen import (
     skill_contract_ref,
 )
 from .decisions import DecisionRequest, Option, Request
-from .engine import SemIfEngine
+from .engine import EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
 from .queue import UrgencyQueue
@@ -139,7 +139,7 @@ class SkillWrite:
     category: str
     draft: SkillDraft
     weight: float
-    repair_reason: str | None = None
+    repair_evidence: dict | None = None
 
 
 @dataclass
@@ -183,6 +183,7 @@ class RepairOffer:
     reason: str
     request_text: str
     failure: str
+    evidence: dict = field(default_factory=dict)
     status: str = "offered"
     created_at: float = field(default_factory=time.time)
 
@@ -258,7 +259,10 @@ class Scheduler:
         merge_seed_store(self.tree, self.seed_store, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
         self.ctx = ActionContext(engine=self.engine, config=config)
-        self.runner = SkillRunner(self.ctx, self.llm, self.log, store=self.body_store)
+        self.runner = SkillRunner(
+            self.ctx, self.log, store=self.body_store, tau=self.tau
+        )
+        self._fatal: str | None = None
         self.current: Process | None = None
         self.pending: PendingRun | None = None
         self._lock = threading.RLock()
@@ -269,6 +273,22 @@ class Scheduler:
         self.questions: list[PendingQuestion] = []
         self.repairs: list[RepairOffer] = []
         self._repair_counts: dict[str, int] = {}
+
+    # ---- fatal handling ----
+
+    @property
+    def fatal(self) -> str | None:
+        """A fatal error (the decision engine went unavailable), or None.
+
+        The app cannot run without real SemIf, so every EngineUnavailable is
+        fatal: callers stop dispatching and the CLI exits non-zero.
+        """
+        return self._fatal
+
+    def _mark_fatal(self, exc: Exception) -> str:
+        with self._lock:
+            self._fatal = f"decision engine not available: {exc}"
+            return self._fatal
 
     # ---- decision templates (all real SemIf, all logged) ----
 
@@ -323,14 +343,13 @@ class Scheduler:
         """Feed one input, also returning the request id.
 
         The id lets out-of-band interfaces (the messenger gateway) map a run
-        back to the chat that originated it.
+        back to the chat that originated it. The decision engine is real, so an
+        EngineUnavailable is fatal: it is recorded and the caller exits.
         """
-        from .engine import EngineUnavailable
-
         try:
             return self._submit(text, source)
         except EngineUnavailable as exc:
-            return "error", f"decision engine unavailable: {exc}", ""
+            return "fatal", self._mark_fatal(exc), ""
 
     def _submit(self, text: str, source: str = "typed") -> tuple[str, str, str]:
         with self._lock:
@@ -406,17 +425,19 @@ class Scheduler:
             return self._run_queue_locked()
 
     def _run_queue_locked(self) -> list[tuple[str, str]]:
-        from .engine import EngineUnavailable
-
         results = []
         while self.current is None and len(self.queue) > 0:
+            if self._fatal is not None:
+                break
             request = self.queue.pop()
             self.trace.append("dequeued", request.id)
             self.current = Process(request=request, skill="(scheduling)", weight=0.0)
             try:
                 outcome = self._dispatch(request, weight=0.0)
             except EngineUnavailable as exc:
-                outcome = DispatchResult(kind="error", summary=f"engine unavailable: {exc}")
+                self._mark_fatal(exc)
+                results.append(("fatal", self._fatal))
+                break
             except Exception as exc:
                 self.trace.append("error", request.id, phase="dispatch", message=str(exc))
                 outcome = DispatchResult(kind="error", summary=f"dispatch failed: {exc}")
@@ -638,13 +659,30 @@ class Scheduler:
         Executing a repair is user-confirmed (a codegen write takes tens of
         minutes), so the offer is recorded and surfaced in REPL/dashboard. The
         choice is logged as a real decision (phase `repair:choice`); the offer
-        lifecycle is traced.
+        lifecycle is traced. The raw failure evidence bundle is captured as-is —
+        error, action log, new state, and summary — so a repair hands the codegen
+        model the observed failure verbatim, never a paraphrase and never
+        credentials.
         """
-        from .engine import EngineUnavailable
-
         if not self.repair_enabled or skill.is_noop():
             return
-        failure = outcome.error or outcome.action_log or outcome.summary or "run failed"
+        evidence = {
+            "error": outcome.error,
+            "action_log": outcome.action_log,
+            "new_state": outcome.new_state,
+            "summary": outcome.summary,
+            "request": request.text,
+            "description": skill.description,
+            "requirements": self._skill_requirements(skill),
+            "previous_body": self._read_body(skill.category, skill.name),
+        }
+        failure = (
+            outcome.error
+            or outcome.action_log
+            or outcome.new_state
+            or outcome.summary
+            or "run failed"
+        )
         decision = DecisionRequest(
             state=(
                 f"skill {skill.name} failed a real run for {request.text!r}. "
@@ -659,10 +697,7 @@ class Scheduler:
                 Option("no_repair", "Do nothing; just report the failure."),
             ],
         )
-        try:
-            result = self.engine.call(decision)
-        except EngineUnavailable:
-            return
+        result = self.engine.call(decision)
         self.log.append(
             decision,
             result,
@@ -677,6 +712,7 @@ class Scheduler:
             reason=failure[:400],
             request_text=request.text,
             failure=failure[:2000],
+            evidence=evidence,
         )
         with self._lock:
             self.repairs.append(offer)
@@ -839,6 +875,17 @@ class Scheduler:
             return "ok", f"declined repair for {offer.category}.{offer.skill}"
         return self._start_repair(offer, detail=answer)
 
+    def _skill_requirements(self, skill: Skill) -> dict[str, str]:
+        row = next(
+            (
+                s
+                for s in self.registry.read().get(skill.category, {}).get("skills", [])
+                if s.get("name") == skill.name
+            ),
+            {},
+        )
+        return dict(row.get("requirements") or {})
+
     def _start_repair(self, offer: RepairOffer, detail: str | None) -> tuple[str, str]:
         draft = self._stub_draft(offer.category, offer.skill)
         if detail:
@@ -848,7 +895,7 @@ class Scheduler:
             offer.status = "done"
         request = Request(offer.request_text, source="repair")
         self._start_skill_write(
-            request, offer.category, draft, 0.5, repair_reason=offer.failure
+            request, offer.category, draft, 0.5, repair_evidence=offer.evidence
         )
         self.trace.append(
             "repair_executed",
@@ -871,12 +918,17 @@ class Scheduler:
         )
 
     def _create_category(self, request: Request) -> DispatchResult:
-        """Author a new category stub with the decision model in generation mode."""
-        from .engine import EngineUnavailable
+        """Author a new category stub with the decision model in generation mode.
 
+        The engine is always real, so an EngineUnavailable is fatal: it is
+        recorded and re-raised for the caller to stop on.
+        """
         try:
             draft = generate_category(self.engine, request, self.tree)
-        except (EngineUnavailable, ValueError) as exc:
+        except EngineUnavailable as exc:
+            self._mark_fatal(exc)
+            raise
+        except ValueError as exc:
             self.trace.append("error", request.id, phase="create_category", message=str(exc))
             return DispatchResult(kind="error", summary=f"create_category failed: {exc}")
         if draft.name in self.tree:
@@ -912,13 +964,16 @@ class Scheduler:
         codegen is configured, the runnable body is written asynchronously (see
         _start_skill_write) and the request is re-dispatched once the body
         lands; the returned result carries the draft so _dispatch_skill can
-        launch that write. Without codegen the stub is final.
+        launch that write. Without codegen the stub is final. The engine is
+        always real, so an EngineUnavailable is fatal: it is recorded and
+        re-raised for the caller to stop on.
         """
-        from .engine import EngineUnavailable
-
         try:
             draft = generate_skill(self.engine, request, category, self.tree)
-        except (EngineUnavailable, ValueError) as exc:
+        except EngineUnavailable as exc:
+            self._mark_fatal(exc)
+            raise
+        except ValueError as exc:
             self.trace.append("error", request.id, phase="create_skill", message=str(exc))
             return DispatchResult(kind="error", summary=f"create_skill failed: {exc}")
         existing = {s.name for s in self.tree.get(category, [])}
@@ -974,7 +1029,7 @@ class Scheduler:
         category: str,
         draft: SkillDraft,
         weight: float,
-        repair_reason: str | None = None,
+        repair_evidence: dict | None = None,
     ) -> None:
         """Mark the leaf in-progress and queue the body write for the worker.
 
@@ -982,8 +1037,9 @@ class Scheduler:
         at a time, the 12G codegen model can't run twice) writes the body in the
         background. On completion the original request is re-queued and re-runs
         navigation onto the new leaf; on failure the leaf stays a restartable
-        stub and only the user is notified. `repair_reason` makes the write a
-        repair: the existing body is rewritten from the observed failure.
+        stub and only the user is notified. `repair_evidence` makes the write a
+        repair: the existing body is rewritten from the raw observed-failure
+        bundle.
         """
         with self._lock:
             leaf = next(
@@ -1003,7 +1059,7 @@ class Scheduler:
                 model=self.codegen.model if self.codegen else None,
                 contract_ref=contract["ref"],
                 contract_dirty=contract["dirty"],
-                repair=repair_reason is not None,
+                repair=repair_evidence is not None,
             )
             self._writes.append(
                 SkillWrite(
@@ -1011,7 +1067,7 @@ class Scheduler:
                     category=category,
                     draft=draft,
                     weight=weight,
-                    repair_reason=repair_reason,
+                    repair_evidence=repair_evidence,
                 )
             )
             if self._write_thread is None or not self._write_thread.is_alive():
@@ -1026,18 +1082,24 @@ class Scheduler:
         )
 
     def _write_worker(self) -> None:
-        """Drain the skill-write queue one body at a time."""
+        """Drain the skill-write queue one body at a time.
+
+        A fatal engine failure stops the worker: `_write_skill_body` sets
+        `_fatal` and the loop exits so the main loop can observe it and quit.
+        """
         while True:
             with self._write_notify:
-                while not self._writes:
+                while not self._writes and self._fatal is None:
                     self._write_notify.wait()
+                if self._fatal is not None:
+                    return
                 job = self._writes.popleft()
             self._write_skill_body(job)
 
     def _write_skill_body(self, job: SkillWrite) -> None:
         """Run the full authoring pipeline for one queued write (no scheduler
         lock held here): deferred elicitation -> codegen body (or repair
-        rewrite) -> fidelity review -> data contract -> test -> auto-run test
+        rewrite) -> fidelity gate -> data contract -> test -> auto-run test
         (with a SemIf regen ladder on failure).
 
         The tree is snapshotted under the lock so the prompt build reads a
@@ -1045,18 +1107,23 @@ class Scheduler:
         """
         with self._lock:
             tree_snapshot = {category: list(skills) for category, skills in self.tree.items()}
-        if job.repair_reason is None and not job.draft.requirements:
+        if job.repair_evidence is None and not job.draft.requirements:
             self._deferred_elicit(job, tree_snapshot)
         try:
-            if job.repair_reason is not None:
+            if job.repair_evidence is not None:
+                evidence = dict(job.repair_evidence)
+                evidence.update({
+                    "description": job.draft.description,
+                    "requirements": job.draft.requirements,
+                    "previous_body": self._read_body(job.category, job.draft.name),
+                })
                 code = regenerate_skill_body(
                     self.codegen,
                     job.request,
                     job.category,
                     job.draft,
                     self._read_body(job.category, job.draft.name),
-                    job.repair_reason,
-                    requirements=job.draft.requirements,
+                    evidence,
                     reason_kind="run_failure",
                 )
             else:
@@ -1073,19 +1140,27 @@ class Scheduler:
                         else None
                     ),
                 )
-            code = self._review_fidelity(job, code)
+            code = self._fidelity_gate(job, code)
             contract = generate_data_contract(
                 self.codegen, job.request, job.category, job.draft, code
             )
+        except EngineUnavailable as exc:
+            self._mark_fatal(exc)
+            self._fail_skill_write(job, exc)
+            return
         except (CodegenError, ValueError) as exc:
             self._fail_skill_write(job, exc)
             return
         self.body_store.write_body(job.category, job.draft.name, code)
         self.body_store.write_contract(job.category, job.draft.name, contract)
-        if self.contract_search:
-            self._config_search(job, contract)
         try:
+            if self.contract_search:
+                self._config_search(job, contract)
             self._test_and_fix(job, code, contract)
+        except EngineUnavailable as exc:
+            self._mark_fatal(exc)
+            self._fail_skill_write(job, exc)
+            return
         except (CodegenError, ValueError) as exc:
             self._fail_skill_write(job, exc)
             return
@@ -1195,14 +1270,17 @@ class Scheduler:
             requirements=job.draft.requirements,
         )
 
-    def _review_fidelity(self, job: SkillWrite, code: str) -> str:
-        """Check the body really performs the action; regen once when it does not.
+    def _fidelity_gate(self, job: SkillWrite, code: str) -> str:
+        """Rapid SemIf sanity gate on the body; regen once only on reconsider.
 
-        Static findings (declaration vs. code) plus the small-model review both
-        have to pass. A rejected body is rewritten with the finding as context,
-        bounded by `codegen.fidelity.max_attempts`; a still-fake body is
-        accepted (never hard-fail authoring) but traced as `performs=False` and
-        badged in the dashboard. A missing/failed reviewer degrades to accept.
+        `authoring:fidelity` (accept/reconsider) runs beside static findings
+        (declaration vs. code). A non-empty findings list forces reconsider.
+        The gate never diagnoses: it only triggers a rewrite, which is handed
+        the raw evidence bundle as-is. Bounded by
+        `codegen.fidelity.max_attempts`; a body that still fails is accepted
+        (never hard-fail authoring) but traced and badged `unverified`. The
+        engine is real: an EngineUnavailable propagates and the worker marks
+        the app fatal.
         """
         if not self.fidelity_enabled or self.codegen is None:
             return code
@@ -1211,12 +1289,37 @@ class Scheduler:
         attempts = max(self.fidelity_max_attempts, 0)
         reviewed = code
         for attempt in range(attempts + 1):
-            review = self.llm.review_skill_body(
-                job.request.text,
-                job.draft.description,
-                reviewed,
-                requirements=job.draft.requirements,
-                integration=integration,
+            decision = DecisionRequest(
+                state=(
+                    f"[authoring fidelity] skill {job.category}.{job.draft.name}\n"
+                    f"request: {job.request.text}\n"
+                    f"description: {job.draft.description}\n"
+                    f"INTEGRATION: {json.dumps(integration, sort_keys=True)}\n"
+                    f"findings: {json.dumps(findings)}\n"
+                    f"body:\n{reviewed[:4000]}"
+                ),
+                question=(
+                    "Does this skill body really perform the requested action "
+                    "against the user's service, or does it simulate it?"
+                ),
+                options=[
+                    Option("accept", "It really performs the action."),
+                    Option("reconsider", "It does not; rewrite it."),
+                ],
+            )
+            result = self.engine.call(decision)
+            reconsider = result.prob("reconsider") >= self.tau or bool(findings)
+            self.log.append(
+                decision,
+                result,
+                extra={
+                    "phase": "authoring:fidelity",
+                    "run_id": job.request.id,
+                    "skill": f"{job.category}.{job.draft.name}",
+                    "attempt": attempt,
+                    "reconsider": reconsider,
+                    "findings": findings,
+                },
             )
             self.trace.append(
                 "fidelity_review",
@@ -1224,19 +1327,26 @@ class Scheduler:
                 category=job.category,
                 skill=job.draft.name,
                 attempt=attempt,
-                performs_real_action=review.performs_real_action,
-                reason=review.reason,
+                performs_real_action=not reconsider,
+                reconsider=reconsider,
                 findings=findings,
                 integration=integration,
                 integration_source=source,
             )
-            if review.performs_real_action and not findings:
+            if not reconsider:
                 return reviewed
             if attempt >= attempts:
                 return reviewed
-            reason = "; ".join(
-                part for part in [review.reason, *findings] if part
-            ) or "the body does not perform the requested action"
+            evidence = {
+                "request": job.request.text,
+                "description": job.draft.description,
+                "requirements": job.draft.requirements,
+                "INTEGRATION": integration,
+                "findings": findings,
+                "verdict": result.selected,
+                "probabilities": result.probs,
+                "previous_body": reviewed,
+            }
             try:
                 reviewed = regenerate_skill_body(
                     self.codegen,
@@ -1244,8 +1354,7 @@ class Scheduler:
                     job.category,
                     job.draft,
                     reviewed,
-                    reason,
-                    requirements=job.draft.requirements,
+                    evidence,
                     reason_kind="fidelity",
                 )
             except (CodegenError, ValueError) as exc:
@@ -1280,8 +1389,13 @@ class Scheduler:
                     job.category,
                     job.draft,
                     code,
-                    reason,
-                    requirements=job.draft.requirements,
+                    {
+                        "test_output": reason,
+                        "description": job.draft.description,
+                        "requirements": job.draft.requirements,
+                        "previous_body": code,
+                    },
+                    reason_kind="test",
                 )
                 self.body_store.write_body(job.category, job.draft.name, code)
             if target == "regen_contract":
@@ -1330,9 +1444,9 @@ class Scheduler:
     def _config_search(self, job: SkillWrite, contract: dict) -> None:
         """Auto-populate the skill config: a SemIf choice per contract variable
         maps it against candidate values from the global config and the
-        category config. Unmatched variables are left to the first-fire ask."""
-        from .engine import EngineUnavailable
-
+        category config. Unmatched variables are left to the first-fire ask.
+        The engine is always real: an EngineUnavailable propagates to the
+        worker, which marks the app fatal."""
         merged: dict = {}
         merged.update(self.config)
         merged.update(self.body_store.read_category_config(job.category))
@@ -1365,7 +1479,7 @@ class Scheduler:
                     current = self.body_store.read_config(job.category, job.draft.name)
                     current[key] = merged[result.selected]
                     self.body_store.write_config(job.category, job.draft.name, current)
-        except (EngineUnavailable, ValueError, TypeError):
+        except (ValueError, TypeError):
             return
 
     def _complete_skill_write(self, job: SkillWrite, code: str) -> None:

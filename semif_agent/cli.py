@@ -225,7 +225,19 @@ def _print_repairs(scheduler: Scheduler) -> None:
         )
 
 
-def repl(scheduler: Scheduler, config: dict) -> None:
+def _fatal_exit(scheduler: Scheduler) -> int | None:
+    """If the scheduler hit a fatal engine failure, print it and return non-zero.
+
+    The decision engine is always real; if it goes unavailable mid-run the app
+    cannot make decisions and must exit rather than degrade.
+    """
+    if scheduler.fatal is None:
+        return None
+    print(scheduler.fatal, file=sys.stderr)
+    return 1
+
+
+def repl(scheduler: Scheduler, config: dict) -> int:
     scheduler.asker = lambda question: input(f"{question} ")
     print(try_warm(scheduler))
     print(
@@ -295,22 +307,34 @@ def repl(scheduler: Scheduler, config: dict) -> None:
             continue
         status, detail = scheduler.submit(line)
         print(f"[{status}] {detail}")
+        if _fatal_exit(scheduler) is not None:
+            return 1
         while scheduler.pending is not None:
             answer = input(f"{scheduler.pending.question} ")
             status, detail = scheduler.answer(answer)
             print(f"[{status}] {detail}")
+            if _fatal_exit(scheduler) is not None:
+                return 1
         for result_status, result_detail in scheduler.run_queue():
             print(f"[{result_status}] {result_detail}")
+        if _fatal_exit(scheduler) is not None:
+            return 1
         _answer_questions(scheduler)
         _print_repairs(scheduler)
+    return _fatal_exit(scheduler) or 0
 
 
-def scripted(scheduler: Scheduler, path: str) -> None:
+def scripted(scheduler: Scheduler, path: str) -> int:
     print(try_warm(scheduler))
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     for row in rows:
         status, detail = scheduler.submit(str(row["text"]), source=row.get("source", "scripted"))
         print(f"[{status}] {detail}")
+        if _fatal_exit(scheduler) is not None:
+            return 1
+    for result_status, result_detail in scheduler.run_queue():
+        print(f"[{result_status}] {result_detail}")
+    return _fatal_exit(scheduler) or 0
 
 
 def run_gateway(
@@ -438,9 +462,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         if args.script:
-            scripted(scheduler, args.script)
-        else:
-            repl(scheduler, config)
+            return scripted(scheduler, args.script)
+        return repl(scheduler, config)
     elif args.command == "dream":
         print(run_dream(scheduler.log).render())
     elif args.command == "skills":

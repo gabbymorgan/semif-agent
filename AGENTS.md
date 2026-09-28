@@ -25,11 +25,12 @@ recorded in tiered config; bodies read them from `ctx.config`.
 
 Two boundaries must never blur:
 
-- **SemIf routes, gates, scores, and automates; the LLM only generates and
-  self-assesses.** Skills are not chat responses.
-- **"No mocking" means the decision engine and LLM are always real.** Skill
-  tests are hermetic mechanics checks with fixtures; passing one is not proof
-  the real integration works. Only a real run against the user's service is.
+- **SemIf routes, gates, scores, assesses, and automates; an LLM only
+  generates.** Skills are not chat responses. Assessment and fidelity are SemIf
+  decisions, never model prose.
+- **"No mocking" means the decision engine is always real.** Skill tests are
+  hermetic mechanics checks with fixtures; passing one is not proof the real
+  integration works. Only a real run against the user's service is.
 
 When requirements or connection details are unclear, the agent asks the user.
 Guessing, inventing data, or shipping a toy is always the wrong answer.
@@ -45,7 +46,7 @@ agent is for; this section is the machinery.
 
 The design spec is `IDEA.md`. The key point: **semantic ifs, not text
 generation, do the routing.** SemIf returns probabilities conditional on the
-supplied options; an LLM is used only for generation and self-assessment.
+supplied options; an LLM is used only for generation.
 
 **Gateway isolation is non-negotiable.** The command gateway (`gateway/`) exists
 only to take commands and send replies. Everything that is messaging *UX* —
@@ -70,7 +71,7 @@ scheduler.py    gate (handle/ignore; state carries the user's expectation +
                 worker (stub authored sync, write queued, gate stays free, the
                 original request is re-queued and re-runs the new leaf when the
                 body lands); the worker runs the full pipeline: elicitation ->
-                codegen body -> fidelity review -> data contract -> test ->
+                codegen body -> fidelity gate -> data contract -> test ->
                 auto-run test (3-option SemIf regen ladder on failure); config
                 search auto-populates the skill config from global/category
                 config; elicitation asks implementation questions (REPL inline;
@@ -94,7 +95,11 @@ skills.py    tree + registry (hardcoded built-in: response.reject, service-free
                 resolve_skill_config / unresolved_variables drive the tiered
                 config merge (global -> category -> skill) + pre-predict
                 contract collection
-skill.py        loop: observe -> predict -> act -> observe -> assess (LLM);
+skill.py        loop: observe -> predict -> act -> observe -> assess;
+                assess is a SemIf decision (`assess:outcome` success/failure at
+                tau; on failure `assess:requeue` complete/retry) and the run
+                summary is deterministic (no generation), built from
+                category.skill + ok/failed + action_log;
                 a run paused for input is resumed by re-invoking act with the
                 answer on request.user_input (predict is never re-run); a
                 contract variable the runner cannot satisfy pauses BEFORE
@@ -113,8 +118,9 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 test: inline fixtures, loopback http.server for HTTP bodies, no
                 external network, no mock_data.json); run_skill_test executes
                 the test as a subprocess
-llm.py          OpenAI-compatible client for self-assessment + skill fidelity
-                review (real-action vs simulated), stdlib urllib
+llm.py          dormant OpenAI-compatible client (stdlib urllib); the small
+                LLM is out of every decision path — assessment/fidelity are
+                SemIf — only `_parse_json` is still borrowed by the parsers
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
@@ -236,9 +242,9 @@ Guppy key facts:
 ## Roadmap
 
 ### v1 (done)
-Core loop, urgency queue, skill tree, skill loop with real SemIf + real LLM
-self-assessment, decision logging, `dream` cost pass, REPL + JSONL CLI,
-unit tests (24) + box integration tests (2).
+Core loop, urgency queue, skill tree, skill loop with real SemIf assessment
+(decision, not generation), decision logging, `dream` cost pass, REPL + JSONL
+CLI, unit tests (24) + box integration tests (2).
 
 ### v2
 - Real fine-tuning from `decisions.jsonl` at a regular interval ("dreaming"):
@@ -271,13 +277,14 @@ unit tests (24) + box integration tests (2).
   (`/api/questions`, worker waits `codegen.elicitation.wait_timeout`). Bodies
   must perform the real action via stdlib transports with values from
   `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
-  fidelity review (small self-assessment model + static declaration checks)
-  regenerates a simulated body once, then accepts it badged `unverified`. A
-  failed real run logs a SemIf repair choice (retry / repair_skill / ask_user /
-  no_repair) surfaced in REPL/dashboard; repair writes carry the observed
-  failure and are bounded by `codegen.repair.max_attempts`. Tests are hermetic
-  mechanics checks (loopback `http.server` for HTTP bodies) and never certify
-  the live integration — only a real run does.
+  fidelity gate (`authoring:fidelity`, a SemIf accept/reconsider decision) plus
+  static declaration checks regenerates a simulated body once with the raw
+  evidence bundle, then accepts it badged `unverified`. A failed real run logs a
+  SemIf repair choice (retry / repair_skill / ask_user / no_repair) surfaced in
+  REPL/dashboard; repair writes carry the raw observed-failure bundle and are
+  bounded by `codegen.repair.max_attempts`. Tests are hermetic mechanics checks
+  (loopback `http.server` for HTTP bodies) and never certify the live
+  integration — only a real run does.
 - Queue persistence (durable across restarts).
 - Event/timer intake sources beyond typed input.
 - Concurrency: SemIf shared-state mode (`score_shared` / `SerialPrefixScorer`)
@@ -531,10 +538,12 @@ unit tests (24) + box integration tests (2).
      repair): SKILL.md + request + tree + requirements answers; the body reads
      every operational value from `ctx.config`, performs the real action, and
      declares `INTEGRATION`.
-  3. **fidelity review** (`llm.review_skill_body` + `integration_findings`): is
-     the action real or simulated/declared-but-unused? One corrective regen
-     (`codegen.fidelity.max_attempts`), then accept with a trace + `unverified`
-     badge rather than hard-failing authoring.
+  3. **fidelity gate** (`authoring:fidelity` SemIf decision +
+     `integration_findings`): a rapid sanity check (accept/reconsider) — is the
+     action real or simulated/declared-but-unused? It only triggers a rewrite,
+     never a diagnosis. One corrective regen with the raw evidence bundle
+     (`codegen.fidelity.max_attempts`), then accept with a trace rather than
+     hard-failing authoring.
   4. **data contract** (`generate_data_contract`): a separate call sharing
      TESTGEN.md + `skill.py` context derives `contract.json` — a single flat
      object of snake_case variable name -> semantic description, for user input
@@ -584,15 +593,17 @@ unit tests (24) + box integration tests (2).
   registry so a `restart` does not ask again. The prompt keeps an explicit
   anti-pattern block: never config-vs-input cadence questions ("should the
   sender address change?"), never operational data values, never trivia.
-- **Fidelity review.** After the body lands, `llm.review_skill_body` (the small
-  self-assessment model) plus static `integration_findings` (declared transport
-  backed by real calls? declared config_vars actually read?) decide whether the
-  body really performs the action. A rejected body is rewritten once with the
-  finding (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a body that
-  still fails is accepted but traced (`fidelity_review`,
-  `performs_real_action=false`) and badged `unverified` in the dashboard — the
-  reviewer never hard-fails authoring, and a missing reviewer degrades to
-  accept.
+- **Fidelity gate.** After the body lands, `authoring:fidelity` — a real SemIf
+  accept/reconsider decision (`P(reconsider) >= tau` or any static
+  `integration_findings` from the declared transport vs. real calls and declared
+  config_vars actually read) decides whether the body really performs the
+  action. The gate never diagnoses: it only triggers a rewrite, which is handed
+  the raw evidence bundle as-is (request, description, requirements, raw
+  INTEGRATION, findings, SemIf verdict+probs, previous body). A rejected body is
+  rewritten once (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a
+  body that still fails is accepted (never hard-fail authoring) but traced
+  (`fidelity_review`, `performs_real_action=false`) and badged `unverified` in
+  the dashboard. A decision row is logged under phase `authoring:fidelity`.
 - **Repair loop.** A failed real run (assessment failure or a raised skill
   error) logs a SemIf choice (phase `repair:choice`) offering
   `retry` / `repair_skill` / `ask_user` / `no_repair`, recorded as a
@@ -823,9 +834,10 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   (`~/.ssh/id_ed25519`; the real systemd user dir + linger, which the repo units
   are symlinked into). `scripts/bootstrap.sh` owns this layout; derive paths from
   the checkout, never hardcode `$HOME`.
-- **No mocking.** The decision engine is always real SemIf; the LLM is always a
-  real endpoint. Pure unit tests touch data-structure math only (queue ordering,
-  dream cost, contract serialization). Engine-dependent behavior is verified by
+- **No mocking.** The decision engine is always real SemIf. Pure unit tests
+  touch data-structure math only (queue ordering, dream cost, contract
+  serialization) or drive scheduling mechanics through the `ScriptedEngine`
+  double in `tests/conftest.py`; decisions themselves are verified by
   integration tests on the box.
 - Engine import is **lazy** (`engine.py`) so the rest of the package stays pure
   stdlib and testable without SemIf installed. Keep it that way.
@@ -838,8 +850,9 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
 - Queue ordering: urgency desc, then FIFO (`seq`). Recency is stored but is NOT
   in the sort key (it's anti-correlated with FIFO). Ageing pulls weights toward
   the max (1.0) so low items catch up; uniform additive boosts do nothing.
-- CLI subcommands must not crash when the engine is unavailable — `submit`
-  catches `EngineUnavailable` and returns `("error", ...)`.
+- The decision engine is always real and every `EngineUnavailable` is **fatal**:
+  `submit` records it (`("fatal", ...)`), the scheduler exposes `fatal`, and the
+  CLI prints it and exits non-zero. There is no degraded/soft-error path.
 - Keep deps stdlib-only in the core; heavy deps live on the staging venv
   (`.runtime/venv`, provisioned by `scripts/bootstrap.sh`).
 
@@ -850,7 +863,9 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   up the stdlib HTTP server on an ephemeral port with the engine never loaded;
   `tests/test_codegen.py` for prompt/parse/validate, integration
   extraction/findings, and body store round-trips; and `tests/test_llm.py` for
-  the fidelity review against a throwaway OpenAI-compatible endpoint.
+  the retained `_parse_json` helper. `tests/conftest.py``s `ScriptedEngine`
+  drives scheduling mechanics (assessment is now a SemIf decision) without a
+  GGUF.
 - `tests/integration/` — jarvis only (staging); requires real SemIf + real
   ollama (guppy serves the models over the LAN).
 - After touching scheduler/skills/codegen/engine, re-run both; the integration
