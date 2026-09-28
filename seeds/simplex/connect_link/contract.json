@@ -1,3 +1,3 @@
 {
-  "messaging_bridge_url": "Base URL of the messenger gateway's local HTTP bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed)."
+  "simplex_bridge_url": "Base URL of the standalone SimpleX forwarding bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed)."
 }

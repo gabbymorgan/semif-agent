@@ -95,7 +95,8 @@ fi
 
 # --- read pins from config.example.json ------------------------------------
 read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
-  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY LLM_MODEL < <(
+  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY \
+  SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY LLM_MODEL < <(
   python3 - "$EXAMPLE" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
@@ -114,6 +115,8 @@ print(
             str(s.get("sha256", "")),
             str(s.get("port", "")),
             str(s.get("display_name", "")),
+            str(s.get("forward_port", "")),
+            str(s.get("forward_display_name", "")),
             str(cfg.get("llm", {}).get("model", "")),
         ]
     )
@@ -145,7 +148,7 @@ echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex
 echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
 echo "== runtime tree: $RUNTIME"
 
-mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$UNITS" "$USER_UNITS"
+mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$UNITS" "$USER_UNITS"
 
 # --- stage 0: system prereqs + linger ----------------------------------------
 PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake util-linux)
@@ -280,12 +283,16 @@ simplex["enabled"] = True
 simplex["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('port', 5226)}"
 simplex["allowed_users"] = allowed
 simplex["home_channel"] = home_channel
-# The gateway serves a localhost HTTP bridge that skills use to send/read
-# SimpleX messages; expose its address as the top-level `messaging_bridge_url`
-# so the data-contract config search auto-populates it.
-bridge_port = int(simplex.get("bridge", {}).get("port", 5227))
-simplex.setdefault("bridge", {})["enabled"] = True
-cfg["messaging_bridge_url"] = f"http://127.0.0.1:{bridge_port}"
+# The standalone SimpleX forwarding bridge owns its own daemon/profile
+# (simplex_chat.forward_port), separate from the command gateway, and serves the
+# invite-link / read / send HTTP API skills use. Expose its URL as the top-level
+# `simplex_bridge_url` so the data-contract config search auto-populates it.
+bridge = cfg.setdefault("bridges", {}).setdefault("simplex", {})
+bridge_port = int(bridge.get("port", 5227))
+bridge["enabled"] = True
+bridge["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('forward_port', 5228)}"
+cfg["simplex_bridge_url"] = f"http://127.0.0.1:{bridge_port}"
+simplex.pop("bridge", None)  # legacy key; forwarding is a separate service now
 json.dump(cfg, open(out, "w"), indent=2)
 PY
 
@@ -294,12 +301,14 @@ render_unit() {
   local src="$1" dst="$2"
   sed -e "s|@REPO@|$REPO_ROOT|g" \
       -e "s|@PORT@|$SIMPLEX_PORT|g" \
-      -e "s|@DISPLAY_NAME@|$SIMPLEX_DISPLAY|g" "$src" > "$dst"
+      -e "s|@DISPLAY_NAME@|$SIMPLEX_DISPLAY|g" \
+      -e "s|@FORWARD_PORT@|$SIMPLEX_FORWARD_PORT|g" \
+      -e "s|@FORWARD_DISPLAY@|$SIMPLEX_FORWARD_DISPLAY|g" "$src" > "$dst"
 }
 echo "== rendering systemd user units into $UNITS"
 UNIT_CHANGED=0
 ACTIVE_BEFORE=""
-for unit in semif-simplex.service semif-gateway.service; do
+for unit in semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service; do
   tmp="$UNITS/$unit.new"
   render_unit "$REPO_ROOT/scripts/systemd/$unit.in" "$tmp"
   if [[ ! -f "$UNITS/$unit" ]] || ! cmp -s "$tmp" "$UNITS/$unit"; then
@@ -318,9 +327,9 @@ done
 if command -v systemctl >/dev/null 2>&1; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   if systemctl --user daemon-reload 2>/dev/null; then
-    systemctl --user enable --now semif-simplex.service semif-gateway.service 2>/dev/null \
-      && echo "== enabled semif-simplex.service semif-gateway.service" \
-      || echo "WARN: could not enable user services (run: systemctl --user enable --now semif-simplex semif-gateway)" >&2
+    systemctl --user enable --now semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service 2>/dev/null \
+      && echo "== enabled semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service" \
+      || echo "WARN: could not enable user services (run: systemctl --user enable --now semif-simplex semif-simplex-forward semif-gateway semif-bridge)" >&2
     # Apply a changed unit to services that were already running (enable --now
     # leaves active units untouched). A daemon restart is safe: the simplex
     # profile persists and the gateway reconnects.
@@ -352,6 +361,32 @@ if command -v systemctl >/dev/null 2>&1; then
     if [[ -z "$SIMPLEX_ADDRESS" ]]; then
       echo "WARN: bot address not ready; run: $PYTHON scripts/simplex-address.py" >&2
     fi
+  fi
+fi
+
+# --- stage 8c: forwarding bridge contact address --------------------------------------
+# The forwarding bridge owns a second daemon/profile; its own contact link is the
+# one `simplex.connect_link` shows. Print it too so the user can share it.
+BRIDGE_FORWARD_WS="$("$PYTHON" - "$REPO_ROOT/config.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+print(cfg.get("bridges", {}).get("simplex", {}).get("ws_url", "") or "")
+PY
+)"
+if [[ -n "$BRIDGE_FORWARD_WS" ]] && command -v systemctl >/dev/null 2>&1; then
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if systemctl --user is-active --quiet semif-simplex-forward.service 2>/dev/null; then
+    echo "== ensuring the forwarding bridge contact address exists"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if FORWARD_ADDRESS="$("$PYTHON" "$REPO_ROOT/scripts/simplex-address.py" --ws-url "$BRIDGE_FORWARD_WS" 2>/dev/null)"; then
+        printf '%s\n' "$FORWARD_ADDRESS" | sed 's/^/  /'
+        break
+      fi
+      sleep 2
+    done
   fi
 fi
 
@@ -408,9 +443,11 @@ else
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-  echo "== gateway services"
+  echo "== gateway + bridge services"
   systemctl --user is-active semif-simplex.service 2>/dev/null | sed 's/^/  semif-simplex: /' || true
   systemctl --user is-active semif-gateway.service 2>/dev/null | sed 's/^/  semif-gateway: /' || true
+  systemctl --user is-active semif-simplex-forward.service 2>/dev/null | sed 's/^/  semif-simplex-forward: /' || true
+  systemctl --user is-active semif-bridge.service 2>/dev/null | sed 's/^/  semif-bridge: /' || true
 fi
 
 cat <<EOF
@@ -421,8 +458,8 @@ Done. Next steps:
   HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli dashboard --port 8765
 
-SimpleX gateway:
-  - The bot runs as systemd user services 'semif-simplex' (bot daemon, port $SIMPLEX_PORT) and
+SimpleX command gateway (commands only):
+  - Runs as systemd user services 'semif-simplex' (bot daemon, port $SIMPLEX_PORT) and
     'semif-gateway' (agent). Check them with:
       systemctl --user status semif-simplex semif-gateway
       journalctl --user -u semif-gateway -f
@@ -433,7 +470,15 @@ SimpleX gateway:
     gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
     event or the daemon's /contacts) and reply. With an empty allowlist the
     gateway rejects everyone — that is the safe default.
-  - Skills send/read SimpleX messages through the gateway's local HTTP bridge
-    (config.json top-level messaging_bridge_url, default
-    http://127.0.0.1:5227); nothing else is needed while the gateway runs.
+  - The gateway takes commands and replies. It never reads history, shows invite
+    links, or composes messages: that is the forwarding bridge's job.
+
+SimpleX forwarding bridge (messaging UX for skills):
+  - Runs as 'semif-simplex-forward' (a second bot daemon/profile, port $SIMPLEX_FORWARD_PORT)
+    and 'semif-bridge' (the standalone bridge API). Its contact address is printed
+    above; re-print with:
+      "$PYTHON" scripts/simplex-address.py --ws-url ws://127.0.0.1:$SIMPLEX_FORWARD_PORT
+  - Skills reach it over HTTP via the top-level simplex_bridge_url
+    (default http://127.0.0.1:5227); simplex.connect_link shows its address and
+    simplex.next_message reads messages sent to it.
 EOF

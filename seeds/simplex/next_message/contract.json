@@ -1,4 +1,4 @@
 {
-  "messaging_bridge_url": "Base URL of the messenger gateway's local HTTP bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
+  "simplex_bridge_url": "Base URL of the standalone SimpleX forwarding bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
   "simplex_default_contact": "Optional display name or contact id to read from by default when the conversation is not otherwise clear; leave blank to always choose among the conversations with unread messages."
 }

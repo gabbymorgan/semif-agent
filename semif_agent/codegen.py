@@ -24,6 +24,7 @@ from typing import Callable, NamedTuple
 
 from .decisions import Request
 from .skills import SkillDraft, tree_summary
+from .bridges.registry import describe_bridges
 
 DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "SKILL.md"
 DEFAULT_CONTEXT_WINDOW = 100000
@@ -633,12 +634,12 @@ BODY_DIRECTIVES = (
     "body.\n"
     "Declare the integration as a module-level `INTEGRATION` dict exactly as "
     "SKILL.md specifies: service, transport, config_vars.\n"
-    "If this skill sends or reads SimpleX messages, call the messenger "
-    "gateway's local HTTP bridge (the `messaging_bridge_url` value from "
-    "`ctx.config`; endpoints: GET /inbox, GET /inbox/next?contact=, POST "
-    "/send) — never open a WebSocket to the simplex-chat daemon. Resolve which "
-    "contact/conversation with a `ctx.engine` sub-decision, and send only when "
-    "the request or requirements ask for it.\n"
+    "If this skill interacts with one of the available bridge services listed "
+    "below, call that bridge over HTTP with the URL from its config variable — "
+    "never speak the service's native protocol directly (no WebSocket to "
+    "simplex-chat, no direct daemon access). Resolve which contact or "
+    "conversation with a `ctx.engine` sub-decision, and send only when the "
+    "request or requirements ask for it.\n"
 )
 
 
@@ -682,6 +683,7 @@ def build_skill_body_prompt(
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
         f"{req_block}"
+        f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Write the Python module body now. Reply with ONLY valid Python code "
         "defining `predict` and `act`. No prose, no markdown fences, no JSON."
@@ -995,6 +997,7 @@ def _retry_prompt(
         f"Skill name: {draft.name}\n"
         f"Skill description: {draft.description}\n"
         f"{_requirements_block(requirements)}"
+        f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
         "no markdown fences, no JSON."
@@ -1067,7 +1070,7 @@ ELICITATION_EXAMPLES = [
     "How does it authenticate with the service, and should that credential come from the app's config?",
     "What does a successful run look like — what should it report back to you?",
     "If the service is unreachable or refuses the action, should the run fail loudly or record 'could not complete' as the result?",
-    "Should this skill send or read SimpleX messages through the messaging gateway, and if so which conversation (resolved by contact name)?",
+    "Should this skill send or read SimpleX messages through the simplex bridge, and if so which conversation (resolved by contact name)?",
 ]
 
 
@@ -1122,6 +1125,7 @@ def build_elicitation_prompt(
         f"Skill description: {draft.description}\n"
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
+        f"{describe_bridges()}\n"
     )
     return [
         {"role": "system", "content": system},

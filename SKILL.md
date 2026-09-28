@@ -150,23 +150,29 @@ talk to. Declaring a transport the body does not use is a broken skill.
 - **Names match the manifest.** The module is imported as its manifest name;
   the functions are `predict` and `act` exactly.
 
-## Messaging through the gateway bridge
+## Bridge services
 
-The agent can read and send SimpleX messages on the user's behalf. A skill
-never opens a WebSocket to the `simplex-chat` daemon: the running messenger
-gateway exposes a local HTTP bridge, and that is the only messaging surface a
-body touches. Declare it like any other HTTP integration:
+Some real systems are reached through a **bridge service**: a standalone local
+process that stands up a small, token-guarded HTTP API in front of the system
+and owns its native protocol and credentials. The concrete catalog of bridges
+available to you is injected into the prompt at authoring time (render it with
+`semif_agent.bridges.describe_bridges()`); read it rather than guessing.
+
+A body must never speak a service's native protocol directly — no WebSocket to
+`simplex-chat`, no direct daemon access. It calls the bridge's HTTP API with the
+base URL from the bridge's config variable, exactly like any other HTTP
+integration:
 
 ```python
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
-    "config_vars": ["messaging_bridge_url", "simplex_default_contact"],
+    "config_vars": ["simplex_bridge_url", "simplex_default_contact"],
 }
 ```
 
-`messaging_bridge_url` is the bridge base URL (e.g. `http://127.0.0.1:5227`),
-supplied by the runner through `ctx.config`. Call it with `urllib.request`:
+For example, the `simplex` bridge (SimpleX messaging) exposes, at the base URL
+in `simplex_bridge_url`:
 
 | Request                                | Purpose                                                            |
 | -------------------------------------- | ------------------------------------------------------------------ |
@@ -174,11 +180,13 @@ supplied by the runner through `ctx.config`. Call it with `urllib.request`:
 | `GET  <base>/contacts`                 | `{"contacts": [{"id", "display_name"}]}` — known contacts.         |
 | `GET  <base>/inbox`                    | Peek buffered inbound messages; does not consume.                  |
 | `GET  <base>/inbox/next?contact=<id>`  | Pop the oldest unread message (optionally from one contact).       |
+| `GET  <base>/address`                  | The agent's contact link; creates it on first call.                |
 | `POST <base>/send`                     | `{"recipient": "<id\|display_name>", "text": "..."}` — send.        |
 
 `GET /inbox` returns `{"messages": [{"id", "contact_id", "display_name", "text",
 "received_at"}]}`; `GET /inbox/next` returns `{"message": {...} | null}`, where
-`null` means nothing is buffered. `POST /send` returns
+`null` means nothing is buffered. `GET /address` returns
+`{"short_link", "full_link", "created"}`. `POST /send` returns
 `{"ok": true, "contact_id": "<id>"}`. The bridge owns the read cursor, so a
 read skill needs no state of its own.
 
@@ -232,9 +240,9 @@ A generated skill is accepted only if:
    and reports real failures honestly.
 8. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
    and is consistent with the body's `ctx.config` reads and behavior.
-9. If it is a messaging skill, it uses the gateway bridge over HTTP (never the
-   daemon WebSocket), resolves recipients with a SemIf sub-decision, and sends
-   only on explicit user intent.
+9. If it is a messaging skill, it uses a bridge service over HTTP (never a
+   service's native protocol), resolves recipients with a SemIf sub-decision,
+   and sends only on explicit user intent.
 
 ## Worked example
 

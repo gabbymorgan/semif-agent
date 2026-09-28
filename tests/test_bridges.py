@@ -1,35 +1,60 @@
-"""Pure-stdlib tests for the gateway's local messaging bridge.
+"""Pure-stdlib tests for the standalone bridge services.
 
-The bridge is exercised over a real loopback HTTP server (no mocking of its
-transport); the decision engine and LLM are never involved. These prove the
+The SimpleX bridge is exercised over a real loopback HTTP server (no mocking of
+its HTTP transport) with a fake daemon standing in for the `simplex-chat`
+connection — the decision engine and LLM are never involved. These prove the
 mechanics a skill depends on: peek/pop of buffered inbound messages, recipient
-resolution, outbound routing onto the adapter queue, and token/body validation.
+resolution, outbound routing, address lookup, and token/body validation.
 """
 
 import json
-import queue
 import urllib.error
 import urllib.request
 
 import pytest
 
-from semif_agent.gateway.base import InboundMessage, OutboundMessage
-from semif_agent.gateway.bridge import MessagingBridge
+from semif_agent.bridges.registry import describe_bridges, known_infos
+from semif_agent.bridges.simplex import SimplexBridge
 
 
-def start_bridge(address_provider=None, **config):
-    outbound = queue.Queue()
-    bridge = MessagingBridge(
-        outbound, config=config, address_provider=address_provider
-    )
+class FakeDaemon:
+    """Stands in for the bridge's own simplex-chat connection."""
+
+    def __init__(self, link=None, error=None):
+        self.link = link
+        self.error = error
+        self.sent = []
+        self.closed = False
+        self.on_message = None
+
+    def check_requirements(self):
+        return True, None
+
+    def run(self, on_message):
+        self.on_message = on_message
+
+    def enqueue(self, chat_id, text=""):
+        if chat_id is not None:
+            self.sent.append((chat_id, text))
+
+    def request_address(self, timeout=20.0):
+        if self.error is not None:
+            raise self.error
+        return self.link
+
+    def close(self):
+        self.closed = True
+
+
+def start_bridge(daemon=None, **config):
+    daemon = daemon or FakeDaemon()
+    bridge = SimplexBridge(config, daemon=daemon)
     port = bridge.start()
-    return bridge, outbound, f"http://127.0.0.1:{port}"
+    return bridge, daemon, f"http://127.0.0.1:{port}"
 
 
 def inbound(text, contact_id="4", display_name="Alice"):
-    return InboundMessage(
-        text=text, chat_id=contact_id, contact_id=contact_id, display_name=display_name
-    )
+    return {"text": text, "contact_id": contact_id, "display_name": display_name}
 
 
 def get(url, token=None):
@@ -53,7 +78,7 @@ def test_health_and_contacts():
     bridge, _, base = start_bridge()
     try:
         assert get(f"{base}/health") == {"ok": True, "platform": "simplex"}
-        bridge.record_inbound(inbound("hi", contact_id="4", display_name="Alice"))
+        bridge._on_message(inbound("hi", contact_id="4", display_name="Alice"))
         assert get(f"{base}/contacts") == {
             "contacts": [{"id": "4", "display_name": "Alice"}]
         }
@@ -64,8 +89,8 @@ def test_health_and_contacts():
 def test_inbox_peek_then_pop_consumes_oldest():
     bridge, _, base = start_bridge()
     try:
-        bridge.record_inbound(inbound("first", contact_id="4", display_name="Alice"))
-        bridge.record_inbound(inbound("second", contact_id="7", display_name="Bob"))
+        bridge._on_message(inbound("first", contact_id="4", display_name="Alice"))
+        bridge._on_message(inbound("second", contact_id="7", display_name="Bob"))
         peeked = get(f"{base}/inbox")["messages"]
         assert [m["text"] for m in peeked] == ["first", "second"]
         assert get(f"{base}/inbox")["messages"] == peeked, "peek must not consume"
@@ -82,8 +107,8 @@ def test_inbox_peek_then_pop_consumes_oldest():
 def test_inbox_next_filters_by_contact():
     bridge, _, base = start_bridge()
     try:
-        bridge.record_inbound(inbound("first", contact_id="4", display_name="Alice"))
-        bridge.record_inbound(inbound("second", contact_id="7", display_name="Bob"))
+        bridge._on_message(inbound("first", contact_id="4", display_name="Alice"))
+        bridge._on_message(inbound("second", contact_id="7", display_name="Bob"))
         popped = get(f"{base}/inbox/next?contact=7")["message"]
         assert popped["text"] == "second"
         assert get(f"{base}/inbox/next?contact=7")["message"] is None
@@ -92,60 +117,69 @@ def test_inbox_next_filters_by_contact():
         bridge.stop()
 
 
+def test_inbox_buffers_any_sender():
+    # No allowlist: a brand-new contact who reached the bot via its invite link
+    # must be visible, which is the whole point of the forwarding bridge.
+    bridge, _, base = start_bridge()
+    try:
+        bridge._on_message(inbound("who are you?", contact_id="99", display_name="stranger"))
+        messages = get(f"{base}/inbox")["messages"]
+        assert [m["text"] for m in messages] == ["who are you?"]
+    finally:
+        bridge.stop()
+
+
 def test_inbox_is_bounded():
     bridge, _, base = start_bridge(max_inbox=2)
     try:
         for text in ("one", "two", "three"):
-            bridge.record_inbound(inbound(text))
+            bridge._on_message(inbound(text))
         messages = get(f"{base}/inbox")["messages"]
         assert [m["text"] for m in messages] == ["two", "three"], "oldest must be dropped"
     finally:
         bridge.stop()
 
 
-def test_send_routes_to_outbound_queue():
-    bridge, outbound, base = start_bridge()
+def test_send_routes_to_daemon():
+    bridge, daemon, base = start_bridge()
     try:
         result = post(f"{base}/send", {"recipient": "7", "text": "on my way"})
         assert result == {"ok": True, "contact_id": "7"}
-        message = outbound.get_nowait()
-        assert isinstance(message, OutboundMessage)
-        assert message.chat_id == "7"
-        assert message.text == "on my way"
+        assert daemon.sent == [("7", "on my way")]
     finally:
         bridge.stop()
 
 
 def test_send_resolves_known_display_name():
-    bridge, outbound, base = start_bridge()
+    bridge, daemon, base = start_bridge()
     try:
-        bridge.record_inbound(inbound("hi", contact_id="4", display_name="Alice"))
+        bridge._on_message(inbound("hi", contact_id="4", display_name="Alice"))
         result = post(f"{base}/send", {"recipient": "Alice", "text": "hello"})
         assert result["contact_id"] == "4"
-        assert outbound.get_nowait().chat_id == "4"
+        assert daemon.sent == [("4", "hello")]
     finally:
         bridge.stop()
 
 
 def test_send_rejects_unknown_recipient():
-    bridge, outbound, base = start_bridge()
+    bridge, daemon, base = start_bridge()
     try:
         with pytest.raises(urllib.error.HTTPError) as exc:
             post(f"{base}/send", {"recipient": "ghost", "text": "hello"})
         assert exc.value.code == 400
-        assert outbound.empty(), "a rejected send must not enqueue anything"
+        assert daemon.sent == [], "a rejected send must not enqueue anything"
     finally:
         bridge.stop()
 
 
 def test_send_validates_body():
-    bridge, outbound, base = start_bridge()
+    bridge, daemon, base = start_bridge()
     try:
         for payload in ({"recipient": "", "text": "hi"}, {"recipient": "4", "text": " "}):
             with pytest.raises(urllib.error.HTTPError) as exc:
                 post(f"{base}/send", payload)
             assert exc.value.code == 400
-        assert outbound.empty()
+        assert daemon.sent == []
     finally:
         bridge.stop()
 
@@ -164,17 +198,19 @@ def test_token_is_required_when_configured():
         bridge.stop()
 
 
-def test_address_uses_provider():
+def test_address_returns_daemon_link():
     link = {"short_link": "simplex:/abc", "full_link": "https://x", "created": False}
-    bridge, _, base = start_bridge(address_provider=lambda: link)
+    bridge, _, base = start_bridge(daemon=FakeDaemon(link=link))
     try:
         assert get(f"{base}/address") == link
     finally:
         bridge.stop()
 
 
-def test_address_without_provider_is_unavailable():
-    bridge, _, base = start_bridge()
+def test_address_without_connection_is_unavailable():
+    bridge, _, base = start_bridge(
+        daemon=FakeDaemon(error=RuntimeError("not connected"))
+    )
     try:
         with pytest.raises(urllib.error.HTTPError) as exc:
             get(f"{base}/address")
@@ -183,14 +219,33 @@ def test_address_without_provider_is_unavailable():
         bridge.stop()
 
 
-def test_address_provider_failure_is_reported():
-    def boom():
-        raise RuntimeError("not connected")
-
-    bridge, _, base = start_bridge(address_provider=boom)
+def test_address_lookup_failure_is_reported():
+    bridge, _, base = start_bridge(daemon=FakeDaemon(error=TimeoutError("slow")))
     try:
         with pytest.raises(urllib.error.HTTPError) as exc:
             get(f"{base}/address")
         assert exc.value.code == 502
     finally:
         bridge.stop()
+
+
+def test_stop_closes_the_daemon():
+    bridge, daemon, _ = start_bridge()
+    bridge.stop()
+    assert daemon.closed is True
+
+
+# ---- catalog / codegen surface ----
+
+def test_known_infos_include_simplex():
+    infos = {info.name: info for info in known_infos()}
+    assert "simplex" in infos
+    assert infos["simplex"].url_config_var == "simplex_bridge_url"
+
+
+def test_describe_bridges_names_the_service_and_config_var():
+    text = describe_bridges()
+    assert "simplex" in text
+    assert "simplex_bridge_url" in text
+    assert "/inbox/next" in text
+    assert "never speak" in text

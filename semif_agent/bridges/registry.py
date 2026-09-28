@@ -1,0 +1,111 @@
+"""The bridge catalog: discovery, prompt description, and standalone runner.
+
+Every known bridge class is listed in `CATALOG`. `known_infos()` exposes their
+static metadata, `describe_bridges()` renders the catalog block injected into
+the code-generation prompts, and `run_bridges()` starts the enabled ones as a
+standalone process (`python -m semif_agent.cli bridge`). Adding a bridge means
+adding its class here and a `config.example.json` block; the gateway is never
+touched.
+"""
+
+from __future__ import annotations
+
+import threading
+
+from .base import BridgeInfo, BridgeService
+from .simplex import SimplexBridge
+
+#: Known bridge services. Order is presentation order.
+CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge,)
+
+
+def _class_for(name: str) -> type[BridgeService] | None:
+    for bridge_class in CATALOG:
+        if bridge_class.INFO.name == name:
+            return bridge_class
+    return None
+
+
+def known_infos() -> list[BridgeInfo]:
+    return [bridge_class.INFO for bridge_class in CATALOG]
+
+
+def describe_bridges() -> str:
+    """A prompt block describing every available bridge service.
+
+    Injected into the skill-body and elicitation prompts so codegen knows which
+    real services it may build a skill against, how to reach each one, and which
+    `ctx.config` variable carries its URL. Static — no bridge needs to be
+    running or enabled.
+    """
+    lines = [
+        "Available bridge services (call these over HTTP with urllib.request; "
+        "never speak a service's native protocol directly):",
+    ]
+    for info in known_infos():
+        lines.append(f"- {info.name}: {info.description}")
+        lines.append(f"    config var: {info.url_config_var}")
+        if info.config_vars:
+            other = [v for v in info.config_vars if v != info.url_config_var]
+            if other:
+                lines.append(f"    other config vars: {', '.join(other)}")
+        for endpoint in info.endpoints:
+            lines.append(f"    {endpoint}")
+    return "\n".join(lines) + "\n"
+
+
+def build_bridge(config: dict, name: str, trace=None) -> BridgeService:
+    """Instantiate one bridge from the top-level `bridges.<name>` config block."""
+    bridge_class = _class_for(name)
+    if bridge_class is None:
+        raise KeyError(f"unknown bridge: {name!r}")
+    block = (config.get("bridges", {}) or {}).get(name, {}) or {}
+    return bridge_class(block, trace=trace)
+
+
+def run_bridges(
+    config: dict,
+    names: list[str] | None = None,
+    trace=None,
+) -> int:
+    """Run the selected (+ enabled) bridges until interrupted.
+
+    With explicit `names`, a bridge runs even if disabled is not set; with no
+    names, only `enabled` bridges run. Returns a process exit code.
+    """
+    blocks = config.get("bridges", {}) or {}
+    selected: list[BridgeService] = []
+    for bridge_class in CATALOG:
+        name = bridge_class.INFO.name
+        if names and name not in names:
+            continue
+        block = blocks.get(name, {}) or {}
+        if not names and not block.get("enabled", False):
+            continue
+        bridge = bridge_class(block, trace=trace)
+        ok, hint = bridge.check_requirements()
+        if not ok:
+            print(f"bridge {name} unavailable: {hint}")
+            for running in selected:
+                running.stop()
+            return 1
+        port = bridge.start()
+        selected.append(bridge)
+        print(
+            f"bridge {name} listening on http://{bridge.host}:{port} "
+            f"(skills use the {bridge_class.INFO.url_config_var} config var)"
+        )
+    if not selected:
+        print("no bridge services enabled (set bridges.<name>.enabled)")
+        return 1
+
+    stop = threading.Event()
+    try:
+        while not stop.wait(0.5):
+            pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for bridge in selected:
+            bridge.stop()
+    return 0

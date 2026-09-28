@@ -1,11 +1,11 @@
 """Hermetic mechanics test for simplex.next_message.
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
-http.server plays the messenger gateway's bridge. This proves the body peeks the
+http.server plays the standalone SimpleX forwarding bridge. This proves the body peeks the
 inbox, resolves the conversation through a SemIf sub-decision (or a configured
 default), pops the real `next` message, and fails honestly when the bridge is
 unreachable. It does NOT prove the live integration — only a real run against
-the gateway and a real contact does.
+the bridge and a real contact does.
 """
 
 import json
@@ -89,7 +89,7 @@ def message(identifier, contact, name, text):
 
 
 def config(url, default=""):
-    return {"messaging_bridge_url": url, "simplex_default_contact": default}
+    return {"simplex_bridge_url": url, "simplex_default_contact": default}
 
 
 def test_multiple_senders_uses_semif_decision():

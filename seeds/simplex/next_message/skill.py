@@ -1,11 +1,11 @@
-"""Read the next unread SimpleX message through the messenger gateway.
+"""Read the next unread SimpleX message through the forwarding bridge.
 
-Real integration: the running messenger gateway serves a local HTTP bridge
-(`messaging_bridge_url`) that buffers every inbound DM and forwards outbound
-sends. `predict` peeks that inbox, finds which conversations have unread
-messages, and resolves which one to read with a SemIf sub-decision when more
-than one does (honoring a configured default contact); `act` pops and reports
-the oldest unread message for that conversation.
+Real integration: the standalone SimpleX forwarding bridge
+(`simplex_bridge_url`) buffers every inbound DM and forwards outbound sends.
+`predict` peeks that inbox, finds which conversations have unread messages, and
+resolves which one to read with a SemIf sub-decision when more than one does
+(honoring a configured default contact); `act` pops and reports the oldest
+unread message for that conversation.
 
 The bridge owns the read cursor, so this skill keeps no state of its own. It
 never opens a WebSocket to the `simplex-chat` daemon — the bridge is the only
@@ -25,20 +25,20 @@ from semif_agent.skills import ActionResult, Prediction
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
-    "config_vars": ["messaging_bridge_url", "simplex_default_contact"],
+    "config_vars": ["simplex_bridge_url", "simplex_default_contact"],
 }
 
 TIMEOUT_SECONDS = 20
 
 
 class BridgeError(Exception):
-    """The local messaging bridge is unreachable or returned an error."""
+    """The SimpleX forwarding bridge is unreachable or returned an error."""
 
 
 def _base(ctx):
-    url = str(ctx.config.get("messaging_bridge_url", "") or "").strip().rstrip("/")
+    url = str(ctx.config.get("simplex_bridge_url", "") or "").strip().rstrip("/")
     if not url:
-        raise BridgeError("messaging_bridge_url is not configured")
+        raise BridgeError("simplex_bridge_url is not configured")
     return url
 
 

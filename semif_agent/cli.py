@@ -345,23 +345,6 @@ def run_gateway(
     scheduler.on_request_requeued = service.on_request_requeued
     service.start()
 
-    from .gateway.bridge import MessagingBridge
-
-    bridge_cfg = cfg.get("bridge", {}) or {}
-    bridge = None
-    if bridge_cfg.get("enabled", True):
-        bridge = MessagingBridge(
-            service.outbound,
-            config=bridge_cfg,
-            address_provider=adapter.request_address,
-        )
-        service.observer = bridge.record_inbound
-        port = bridge.start()
-        print(
-            f"messaging bridge listening on http://{bridge.host}:{port} "
-            "(skills use messaging_bridge_url)"
-        )
-
     if serve_dashboard:
         import threading
 
@@ -386,9 +369,20 @@ def run_gateway(
     finally:
         service.stop()
         adapter.close()
-        if bridge is not None:
-            bridge.stop()
     return 0
+
+
+def run_bridge(scheduler: Scheduler, config: dict, name: str | None = None) -> int:
+    """Run standalone third-party API bridges (SimpleX first).
+
+    Bridges are their own processes so generated skills never touch a system's
+    native protocol and the command gateway never grows read/send surface. See
+    `semif_agent.bridges`.
+    """
+    from .bridges.registry import run_bridges
+
+    names = [name] if name else None
+    return run_bridges(config, names=names, trace=scheduler.trace)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -430,6 +424,15 @@ def main(argv: list[str] | None = None) -> int:
         help="also serve the browser dashboard from the same process",
     )
 
+    bridge_p = sub.add_parser(
+        "bridge", help="run standalone third-party API bridges (SimpleX first)"
+    )
+    bridge_p.add_argument(
+        "--name",
+        default=None,
+        help="bridge service to run (default: all enabled)",
+    )
+
     args = parser.parse_args(argv)
     scheduler, config = build_scheduler(config)
 
@@ -461,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
             platform=args.platform,
             serve_dashboard=args.dashboard,
         )
+    elif args.command == "bridge":
+        return run_bridge(scheduler, config, name=args.name)
     else:
         parser.print_help()
     return 0

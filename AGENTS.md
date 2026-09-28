@@ -47,11 +47,20 @@ The design spec is `IDEA.md`. The key point: **semantic ifs, not text
 generation, do the routing.** SemIf returns probabilities conditional on the
 supplied options; an LLM is used only for generation and self-assessment.
 
+**Gateway isolation is non-negotiable.** The command gateway (`gateway/`) exists
+only to take commands and send replies. Everything that is messaging *UX* —
+invite links, reading a contact's messages, composing/sending on the user's
+behalf — belongs to the standalone bridge services (`semif_agent.bridges`),
+which run as their own processes against their own service daemons/profiles.
+Never widen the gateway's surface for convenience: a new read/send/address
+capability is a new bridge, not a gateway feature.
+
 ## Architecture map
 
 ```
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
-                dashboard
+                dashboard, gateway (command intake), bridge (standalone
+                third-party API bridges)
 scheduler.py    gate (handle/ignore; state carries the user's expectation +
                 the available skills, so lookups are not read as small talk)
                 -> choice(tau) -> score -> queue; preempt + requeue;
@@ -96,7 +105,9 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 data from the runner via ctx.config, never embedded; bodies
                 declare INTEGRATION service/transport/config_vars);
                 parse/validate (compile + predict/act) + parse_integration /
-                infer_integration / integration_findings; elicitation questions
+                infer_integration / integration_findings; the bridge catalog
+                (describe_bridges()) is injected into the body + elicitation
+                prompts; elicitation questions
                 + integration hint; TESTGEN.md drives two shared-context calls
                 producing contract.json then skill.test.py (hermetic mechanics
                 test: inline fixtures, loopback http.server for HTTP bodies, no
@@ -114,22 +125,32 @@ decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
 dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status/
                 questions/repairs + POST submit/answer/questions/repair/restart/
                 relabel); static/ frontend served at /
-gateway/        messenger intake/reply. base.py: GatewayAdapter contract +
-                Inbound/OutboundMessage. service.py: GatewayService maps chats
-                onto the single-slot scheduler (submit_request, owner maps,
-                pending-run ownership, queue drain, authoring questions/repairs
-                routed back to the origin chat). simplex.py: SimplexAdapter —
-                local simplex-chat daemon over its JSON WebSocket API
-                (lazy `websockets`, allowlist, batching, structured `/_send`,
-                corrId→Future request path for `/_show_address`/`/_address`).
-                bridge.py: MessagingBridge — a localhost stdlib HTTP API the
-                gateway serves so skills can send/read SimpleX messages without
-                touching the daemon (`/health`, `/contacts`, `/inbox`,
-                `/inbox/next`, `/address`, `/send`); owns the read cursor
-                (bounded inbox), reuses the adapter's outbound queue, and takes
-                an injected `address_provider` for the connect link. Run with `python -m
+gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
+                GatewayAdapter contract + Inbound/OutboundMessage. service.py:
+                GatewayService maps chats onto the single-slot scheduler
+                (submit_request, owner maps, pending-run ownership, queue
+                drain, authoring questions/repairs routed back to the origin
+                chat). simplex.py: SimplexAdapter — command simplex-chat daemon
+                over its JSON WebSocket API (lazy `websockets`, allowlist,
+                batching, structured `/_send`). Run with `python -m
                 semif_agent.cli gateway [--dashboard]`; config under
-                `gateway.simplex` in config.json
+                `gateway.simplex`. The gateway MUST NOT read history, show/create
+                invite links, or compose messages — see "gateway isolation"
+                below.
+bridges/        standalone third-party API bridges (SimpleX first). base.py:
+                BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
+                `X-Semif-Token` guard). inbox.py: MessagingInbox (bounded FIFO +
+                contacts, bridge-owned read cursor). simplex.py: SimplexBridge —
+                owns its OWN simplex-chat daemon/profile (separate from the
+                gateway's), buffers every inbound DM, serves invite-link/read/
+                send. registry.py: CATALOG, describe_bridges() (catalog injected
+                into the codegen prompts), run_bridges(). Run with `python -m
+                semif_agent.cli bridge [--name NAME]`; config under `bridges`.
+simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
+                adapter and the bridge (parse direct text across v7 shapes,
+                structured `/_send`, corrId→Future round-trips, contact-address
+                `/_show_address`/`/_address`, contact-request accept). Knows
+                nothing about the scheduler or either front end.
 ```
 
 ## Run / verify
@@ -168,6 +189,19 @@ Machine split (Sep 2026): **guppy** hosts the remote **codegen** model (the
 SemIf engine + deps) and runs its **own local ollama** serving the small
 self-assessment model (`qwen3.5:4b`). Only codegen traffic travels to guppy.
 Provision jarvis with `scripts/bootstrap.sh` (see "### jarvis (staging)").
+
+**Connecting to jarvis (`ssh jarvis@192.168.8.130`)**: this is a plain `ssh`
+call. The key `~/.ssh/id_ed25519` is passphrase-protected and Linux Mint pops an
+askpass dialog for it; the flatpak overlay
+(`SSH_AUTH_SOCK=/run/flatpak/ssh-auth`) blocks the user's password locker, so
+they cannot paste from it and must type the passphrase by hand. **Warn the user
+right before running the command** ("about to ssh to jarvis — be ready to type
+your passphrase") so they can enter it, then just run `ssh`. Do **not** burn
+tokens on ssh-agent/askpass/fixed-socket workarounds — once the user types the
+passphrase at the prompt, plain `ssh` works for the session. The `agent refused
+operation` error from the flatpak socket is exactly this prompt, not a broken
+key.
+
 Guppy key facts:
 
 - ssh key `~/.ssh/id_ed25519` is passphrase-protected. Load it into an agent at
@@ -287,6 +321,14 @@ unit tests (24) + box integration tests (2).
   rapid-message batching, structured `/_send`). DMs only for the first cut;
   groups/attachments/reactions are future work. See "### gateway (messenger
   intake)".
+- **Bridge services (SimpleX first)** (Sep 2026): messaging *UX* — invite links,
+  reading incoming messages, composing sends — is decoupled from the command
+  gateway. `semif_agent.bridges` is a folder of standalone third-party API
+  bridges, each its own process (`cli bridge`) against its own service daemon.
+  `SimplexBridge` owns a second simplex-chat profile and serves a token-guarded
+  localhost HTTP API; `registry.describe_bridges()` injects the catalog into the
+  codegen prompts. Gateway isolation is non-negotiable: the gateway must never
+  grow read/send/address surface. See "### bridges (third-party API services)".
 
 ### Later / open questions
 - Safety/authority: which inputs may interrupt high-stakes processes; is
@@ -398,15 +440,20 @@ unit tests (24) + box integration tests (2).
   `--copy-data SRC` rsyncs guppy's `data/` for continuity; `--public-dashboard`
   binds the dashboard to `0.0.0.0`.
   It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
-  `ws_url` from `simplex_chat.port`) and renders/enables the two user services
-  `semif-simplex.service` (the pinned `simplex-chat` bot daemon,
-  `--create-bot-display-name` on `simplex_chat.port`) and `semif-gateway.service`
-  (`.runtime/venv/bin/python -m semif_agent.cli gateway`). `--simplex-allowed-users
+  `ws_url` from `simplex_chat.port`) and the standalone forwarding bridge
+  (`bridges.simplex.enabled = true`, `ws_url` from `simplex_chat.forward_port`,
+  top-level `simplex_bridge_url`), rendering/enabling four user services:
+  `semif-simplex.service` (the command `simplex-chat` bot daemon,
+  `--create-bot-display-name` on `simplex_chat.port`), `semif-gateway.service`
+  (`.runtime/venv/bin/python -m semif_agent.cli gateway`),
+  `semif-simplex-forward.service` (the bridge's **own** daemon/profile on
+  `simplex_chat.forward_port`) and `semif-bridge.service`
+  (`.runtime/venv/bin/python -m semif_agent.cli bridge`). `--simplex-allowed-users
   CSV` / `--simplex-home-channel ID` / `--simplex-display-name NAME` populate
-  the allowlist/fallback/identity; with an empty allowlist the gateway denies
-  everyone (the safe default until the human adds their contact id). Bootstrap
-  then runs `scripts/simplex-address.py` to create/print the bot's contact
-  address.
+  the gateway allowlist/fallback/identity; with an empty allowlist the gateway
+  denies everyone (the safe default until the human adds their contact id).
+  Bootstrap then runs `scripts/simplex-address.py` to create/print the command
+  bot's contact address (and the forwarding bot's, via `--ws-url`).
 - Run / verify on jarvis:
   ```sh
   REPO=~/repos/semif-agent && cd "$REPO" && export HF_HOME="$REPO/.runtime/hf"
@@ -414,7 +461,7 @@ unit tests (24) + box integration tests (2).
   "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dream            # cost report
   "$REPO/.runtime/venv/bin/python" -m pytest tests/integration -q -s   # ~100s, background+poll
   "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dashboard --port 8765
-  systemctl --user status semif-simplex semif-gateway                  # gateway stack
+  systemctl --user status semif-simplex semif-gateway semif-simplex-forward semif-bridge   # gateway + bridge stack
   ```
 - First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
   (~10 min on 6 cores); reruns are fast no-ops.
@@ -455,9 +502,9 @@ unit tests (24) + box integration tests (2).
   seed never holds secrets, and a generated body with the same name replaces the
   seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
   server-side) is the reference seed; `simplex.next_message` (read via the
-  messaging bridge) and `simplex.connect_link` (show/create the bot's contact
-  link) are the messenger seeds; `tests/test_seed_skills.py` keeps them
-  honest.
+  forwarding bridge) and `simplex.connect_link` (show/create the forwarding
+  bot's contact link) are the messenger seeds; `tests/test_seed_skills.py` keeps
+  them honest.
 - **Contract provenance.** Each authored body records the SKILL.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
   `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read
@@ -659,7 +706,9 @@ unit tests (24) + box integration tests (2).
   flushed after `text_batch_delay`. Outbound uses the **structured** command
   `/_send @<contactId> json [{"msgContent":{"type":"text","text":...}}]` — the
   `@<id> <text>` shortcut is silently rejected over WebSocket. Groups,
-  attachments, reactions, and typing are out of scope for this cut.
+  attachments, reactions, and typing are out of scope for this cut. The wire
+  protocol itself lives in the neutral `semif_agent/simplex_ws.py`
+  (`SimplexDaemon`); this adapter adds only the allowlist and batching on top.
 - **Scheduler glue** (`gateway/service.py`): inbound text →
   `Scheduler.submit_request(text, source=f"simplex:<chat_id>")`; the returned
   request id maps to the chat (`owners`), and `Scheduler.on_request_requeued`
@@ -674,63 +723,82 @@ unit tests (24) + box integration tests (2).
   = True`; the service routes them by `run_id` → origin, falling back to
   `home_channel`); a chat's plain reply answers the question or picks the
   repair action (`retry`/`repair`/`ask`/`no`).
-- **Messaging bridge (skills send/read SimpleX)** (`gateway/bridge.py`,
-  Sep 2026): the gateway serves a **localhost stdlib HTTP API** so a skill body
-  never opens a WebSocket to the daemon. `run_gateway` starts a `MessagingBridge`
-  (`gateway.simplex.bridge`: `enabled` default true, `host`/`port` default
-  `127.0.0.1:5227`, optional `token` checked as `X-Semif-Token`, `max_inbox`)
-  and wires `service.observer = bridge.record_inbound` plus
-  `bridge.address_provider = adapter.request_address`. Endpoints: `GET
-  /health`, `GET /contacts`, `GET /inbox` (peek), `GET /inbox/next?contact=<id>`
-  (pop oldest unread — the bridge owns the cursor), `GET /address` (show or
-  create the bot's user contact link; `{short_link, full_link, created}`, or
-  503 when no provider is wired and 502 when the daemon lookup fails), `POST
-  /send` `{"recipient": "<id|display_name>", "text"}` (resolves a numeric id or
-  a known display name and enqueues on the adapter's existing outbound queue).
-  The adapter gained a reusable **corrId→Future request path**
-  (`SimplexAdapter._roundtrip` / `request_address`, with `user_id` config,
-  default 1): `_consume` resolves a pending future for any frame whose `corrId`
-  is registered, so `/_show_address` / `/_address` can be called from the bridge
-  thread via `run_coroutine_threadsafe` without touching the event loop. The
-  top-level `messaging_bridge_url` config is the skill-facing address (the data
-  contract's config search auto-populates it); bootstrap keeps it in sync with
-  the bridge port. `gateway.simplex.inbox.dispatch` (default true) preserves the
-  current push behavior while buffering every authorized inbound for reads; set
-  false for pull-only mode (buffer without scheduling). Skills reach the bridge
-  with the ordinary `http` transport, so their hermetic tests are loopback HTTP
-  like any other HTTP body. Recipient resolution is a SemIf sub-decision; no
-  mark-read command exists in the v7 API and contact-list refresh from the
-  daemon (`/_contacts`) is a follow-up (the corrId request path it needs now
-  exists).
-- **Tests.** `tests/test_gateway.py` (stdlib, dev box): allowlist/auth,
-  `newChatItems` parsing + echo/group/non-text filtering, structured send
-  command, batching (real `asyncio`), corrId→Future round-trips and address
-  normalization, `GatewayService` routing against a real `Scheduler` (lazy
-  engine, unreachable LLM), the observer hook, and pull mode.
-  `tests/test_gateway_bridge.py` exercises the bridge over a real loopback
-  server (peek/pop, recipient resolution, outbound routing, token/body
-  validation, `/address` success/503/502). `tests/test_seed_skills.py`
-  hermetically tests every `seeds/<category>/<name>/` package, including
-  `simplex.next_message` and `simplex.connect_link`. The live `websockets`
-  transport against a real daemon is a jarvis integration concern.
+- **Gateway isolation (non-negotiable).** The gateway exists only to take
+  commands and send replies. It MUST NOT read a contact's history, show/create
+  invite links, or compose messages on the user's behalf: no `observer`, no
+  inbound buffering/pull mode, no `/address`, no `/inbox`, no `/send`. Those are
+  messaging-UX concerns and live in the standalone bridges
+  (`semif_agent.bridges`) against their own daemons/profiles. Letting them bleed
+  into the always-connected command bot enlarges its attack surface for nothing.
+  If you are tempted to add read/send/address functionality to `gateway/`, add a
+  bridge instead.
+- **Neutral SimpleX transport** (`semif_agent/simplex_ws.py`): the wire protocol
+  both front ends share — parsing a direct text item across the v7 wire shapes,
+  the structured `/_send`, `/_accept`, and the corrId→Future round-trip used by
+  `/_show_address` / `/_address` (`SimplexDaemon.request_address`, thread-safe
+  via `run_coroutine_threadsafe`). It carries no policy: no allowlist, no
+  scheduler, no HTTP.
+- **Tests.** `tests/test_gateway.py` (stdlib, dev box): adapter allowlist/auth,
+  structured send command, batching (real `asyncio`), and `GatewayService`
+  routing against a real `Scheduler` (lazy engine, unreachable LLM).
+  `tests/test_simplex_ws.py` covers the neutral protocol layer (parse shapes,
+  accept ids, corrId round-trips, address show/create). `tests/test_bridges.py`
+  exercises `SimplexBridge` over a real loopback server (peek/pop, recipient
+  resolution, outbound routing, token/body validation, `/address` success/503/502,
+  daemon close on stop, catalog/`describe_bridges()`).
+  `tests/test_seed_skills.py` hermetically tests every
+  `seeds/<category>/<name>/` package, including `simplex.next_message` and
+  `simplex.connect_link`. The live `websockets` transport against a real daemon
+  is a jarvis integration concern.
 - **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
   only); the dev box core stays stdlib-only.
 
-## Gateway messaging backlog (one session per item)
+### bridges (third-party API services)
 
-The `MessagingBridge` + `simplex.next_message` / `simplex.connect_link` seeds
-cover the read path, outbound sends onto the adapter's queue, and the bot's
-contact-link lookup. Deferred follow-ups:
+- **What they are.** A bridge service is a standalone process that stands up a
+  simple, secure localhost HTTP layer in front of one third-party system so a
+  codegen-authored skill body never speaks that system's native protocol.
+  SimpleX is the first; adding a service means adding a class to
+  `bridges/registry.py` `CATALOG` and a `config.example.json` block. The catalog
+  (`BridgeInfo`: name, description, URL config var, endpoints) is injected into
+  the codegen prompts via `describe_bridges()`, so the model knows what it can
+  build against and how.
+- **Run mode.** `python -m semif_agent.cli bridge [--name simplex]` builds the
+  scheduler (engine lazy, used only for trace) and runs the selected + enabled
+  bridges until interrupted. Each bridge owns its service daemon: `SimplexBridge`
+  connects to a **second** simplex-chat daemon/profile (`bridges.simplex.ws_url`,
+  default port 5228, pinning `simplex_chat.forward_port`), separate from the
+  command gateway's. On a bootstrap-provisioned box, `scripts/bootstrap.sh`
+  renders and enables `semif-simplex-forward.service` (the second daemon) and
+  `semif-bridge.service` (`cli bridge`) alongside the gateway units.
+- **HTTP surface** (`bridges/base.py` + `bridges/simplex.py`): JSON in/out,
+  localhost-bound, optional shared-secret `X-Semif-Token` header. `SimplexBridge`
+  buffers **every** inbound DM (no allowlist — the user wants to see who reached
+  the bot through its invite link) in a bounded `MessagingInbox` that owns the
+  read cursor, and serves `GET /health`, `GET /contacts`, `GET /inbox` (peek),
+  `GET /inbox/next?contact=<id>` (pop oldest), `GET /address` (show/create the
+  forwarding bot's contact link; 503 when the daemon is not connected, 502 when
+  the lookup fails), and `POST /send` `{"recipient","text"}` (resolves a numeric
+  id or a known display name and enqueues on the bridge's own daemon).
+- **Skill-facing config.** The top-level `simplex_bridge_url` is the address a
+  body calls (the data-contract config search auto-populates it); bootstrap keeps
+  it in sync with the bridge port. Skills reach a bridge with the ordinary `http`
+  transport, so their hermetic tests are loopback HTTP like any other HTTP body.
+  `simplex.next_message` and `simplex.connect_link` are the seeds.
 
-- [ ] **1. Contact-list refresh from the daemon** (`gateway/bridge.py`,
-  `gateway/simplex.py`). The bridge learns contacts only from observed inbound
+## Bridge backlog (one session per item)
+
+The bridge read path (`simplex.next_message`) and contact-link lookup
+(`simplex.connect_link`) are covered. Deferred follow-ups:
+
+- [ ] **1. Contact-list refresh from the daemon** (`bridges/simplex.py`,
+  `simplex_ws.py`). The bridge learns contacts only from observed inbound
   senders, so `/send` cannot address a contact it has never received from.
   Query `/_contacts <userId>` (active user from `/user` →
   `activeUser.userId`) at startup and on demand, caching `contactId` +
-  `profile.displayName`. The adapter now has the reusable corrId→Future path
-  this needs (`_roundtrip` / `request_address`, used by `GET /address`), so
-  reuse it rather than opening a second WebSocket client.
-- [ ] **2. Message history + true unread** (`gateway/bridge.py`). The in-memory
+  `profile.displayName`. Reuse the daemon's corrId→Future path
+  (`SimplexDaemon._roundtrip`) rather than opening a second WebSocket client.
+- [ ] **2. Message history + true unread** (`bridges/simplex.py`). The in-memory
   inbox is a receive buffer, not the daemon's read state. Use `/_get chats
   <userId> count=<n> <json(PaginationByTime)>` with a `ChatListQuery` unread
   filter and `AChat.chatStats{unreadCount, minUnreadItemId}` +
@@ -741,10 +809,9 @@ contact-link lookup. Deferred follow-ups:
   outbound counterpart to `simplex.next_message`: resolve the recipient with a
   SemIf sub-decision over `/contacts`, send only on explicit user intent, and
   report the bridge's `contact_id` / errors honestly.
-- [ ] **4. Pull (queue-only) mode as a first-class option.**
-  `gateway.simplex.inbox.dispatch=false` already buffers without dispatching;
-  document it as a supported mode and give senders an ack/UX story (today their
-  message is buffered silently).
+- [ ] **4. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
+  + config block + `CATALOG` entry; the codegen prompts pick it up automatically
+  through `describe_bridges()`.
 
 ### Code principles
 - **Contain installation artifacts in the repo.** Everything a machine installs

@@ -1,10 +1,10 @@
 """Hermetic mechanics test for simplex.connect_link.
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
-http.server plays the messenger gateway's bridge. This proves the body health-
+http.server plays the standalone SimpleX forwarding bridge. This proves the body health-
 checks the bridge, fetches the contact link, reports a freshly created link, and
 fails honestly when the bridge has no provider or is unreachable. It does NOT
-prove the live integration — only a real run against the gateway and a real
+prove the live integration — only a real run against the bridge and a real
 simplex-chat daemon does.
 """
 
@@ -59,7 +59,7 @@ def start_server(address=None, address_status=200):
 
 
 def config(url):
-    return {"messaging_bridge_url": url}
+    return {"simplex_bridge_url": url}
 
 
 def test_reports_existing_link():

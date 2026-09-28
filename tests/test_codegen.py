@@ -1680,17 +1680,17 @@ def test_skill_contract_lists_all_transports():
         assert transport in text
 
 
-def test_skill_contract_documents_messaging_bridge():
+def test_skill_contract_documents_bridge_services():
     text = read_skill_contract()
-    assert "messaging_bridge_url" in text
+    assert "simplex_bridge_url" in text
     assert "/inbox/next" in text
     assert "/send" in text
-    assert "never opens a WebSocket" in text
+    assert "never speak a service's native protocol" in text
 
 
-def test_body_directives_expose_messaging_bridge():
-    assert "messaging_bridge_url" in BODY_DIRECTIVES
-    assert "never open a WebSocket" in BODY_DIRECTIVES
+def test_body_directives_expose_bridge_services():
+    assert "bridge services" in BODY_DIRECTIVES
+    assert "never speak the service's native protocol" in BODY_DIRECTIVES
 
 
 def test_body_prompts_require_real_action_and_integration():

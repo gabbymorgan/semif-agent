@@ -1,0 +1,148 @@
+"""SimpleX forwarding bridge: invite links, reading, and sending for skills.
+
+The first third-party API bridge. It stands up a small HTTP API that a skill
+body calls instead of talking to `simplex-chat` directly, and it owns its **own**
+SimpleX daemon/profile — separate from the command gateway's. That separation is
+the point: the gateway takes commands; this bridge forwards the user's messaging
+UX (show/create the contact link, read the next message, compose a send).
+
+It buffers every inbound direct message (no allowlist — the user wants to see
+who reached the bot through its invite link), and it never runs inside the
+gateway process.
+"""
+
+from __future__ import annotations
+
+import threading
+
+from semif_agent.simplex_ws import SimplexDaemon
+
+from .base import BridgeInfo, BridgeService
+from .inbox import MessagingInbox
+
+
+class SimplexBridge(BridgeService):
+    name = "simplex"
+    INFO = BridgeInfo(
+        name="simplex",
+        service="simplex",
+        description=(
+            "Read and send SimpleX messages on the user's behalf, and show or "
+            "create the contact link others use to reach this agent."
+        ),
+        url_config_var="simplex_bridge_url",
+        endpoints=(
+            "GET /health -> {\"ok\": true} — the bridge is up",
+            "GET /contacts -> {\"contacts\": [{\"id\", \"display_name\"}]}",
+            "GET /inbox -> peek buffered inbound messages (does not consume)",
+            "GET /inbox/next?contact=<id> -> pop the oldest unread message for a "
+            "contact (or any contact) -> {\"message\": {...}|null}",
+            "GET /address -> the agent's SimpleX contact link "
+            "(creates it on first call) -> {\"short_link\", \"full_link\", "
+            "\"created\"}",
+            "POST /send {\"recipient\": \"<id|display_name>\", \"text\": \"...\"} "
+            "-> {\"ok\", \"contact_id\"}",
+        ),
+        config_vars=("simplex_bridge_url", "simplex_default_contact"),
+    )
+
+    def __init__(self, config: dict | None = None, trace=None, daemon=None):
+        super().__init__(config, trace)
+        cfg = config or {}
+        self.inbox = MessagingInbox(int(cfg.get("max_inbox", 100)))
+        self.daemon = daemon or SimplexDaemon(
+            cfg.get("ws_url", "ws://127.0.0.1:5228"),
+            user_id=int(cfg.get("user_id", 1)),
+            auto_accept=bool(cfg.get("auto_accept", True)),
+            reconnect=cfg.get("reconnect", {}) or {},
+            trace=trace,
+            name=self.name,
+        )
+        self._daemon_thread: threading.Thread | None = None
+
+    # ---- lifecycle ----
+
+    def check_requirements(self) -> tuple[bool, str | None]:
+        return self.daemon.check_requirements()
+
+    def start(self) -> int:
+        port = super().start()
+        self._daemon_thread = threading.Thread(
+            target=self.daemon.run,
+            args=(self._on_message,),
+            name="bridge-simplex-daemon",
+            daemon=True,
+        )
+        self._daemon_thread.start()
+        return port
+
+    def _stop_transport(self) -> None:
+        self.daemon.close()
+
+    def _on_message(self, message: dict) -> None:
+        self.inbox.record(message)
+
+    # ---- routes ----
+
+    def handle_get(self, path: str, query: dict) -> tuple[int, dict]:
+        if path == "/health":
+            return 200, {"ok": True, "platform": self.name}
+        if path == "/contacts":
+            return 200, {"contacts": self.inbox.contacts()}
+        if path == "/inbox":
+            return 200, {"messages": self.inbox.peek()}
+        if path == "/inbox/next":
+            contact = (query.get("contact") or [None])[0]
+            return 200, {"message": self.inbox.pop(contact)}
+        if path == "/address":
+            return self._address()
+        return 404, {"error": "not found"}
+
+    def handle_post(self, path: str, payload: dict) -> tuple[int, dict]:
+        if path != "/send":
+            return 404, {"error": "not found"}
+        recipient = payload.get("recipient")
+        text = payload.get("text")
+        if not isinstance(recipient, str) or not recipient.strip():
+            return 400, {"error": "recipient is required"}
+        if not isinstance(text, str) or not text.strip():
+            return 400, {"error": "text is required"}
+        try:
+            contact_id = self.send(recipient, text)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"ok": True, "contact_id": contact_id}
+
+    # ---- actions ----
+
+    def _address(self) -> tuple[int, dict]:
+        try:
+            link = self.daemon.request_address()
+        except RuntimeError as exc:
+            return 503, {"error": f"address lookup is not available: {exc}"[:300]}
+        except Exception as exc:  # TimeoutError, daemon error
+            return 502, {"error": f"address lookup failed: {exc}"[:300]}
+        if not isinstance(link, dict):
+            return 502, {"error": "address lookup returned no link"}
+        return 200, link
+
+    def send(self, recipient: str, text: str) -> str:
+        """Resolve a recipient and enqueue the message. Returns the contact id."""
+        contact_id = self.resolve(recipient)
+        if contact_id is None:
+            raise ValueError(f"unknown SimpleX recipient: {recipient!r}")
+        self.daemon.enqueue(contact_id, text)
+        return contact_id
+
+    def resolve(self, recipient: str) -> str | None:
+        """A numeric id (with or without `@`) or a known display name."""
+        recipient = str(recipient or "").strip()
+        if not recipient:
+            return None
+        bare = recipient.lstrip("@")
+        if bare.isdigit():
+            return bare
+        for contact in self.inbox.contacts():
+            if contact["display_name"] == recipient or contact["id"] == recipient:
+                return contact["id"]
+        return None

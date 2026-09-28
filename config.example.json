@@ -73,44 +73,47 @@
   },
   "skill_bodies": "data/skills",
   "skill_seeds": "seeds",
-  "messaging_bridge_url": "http://127.0.0.1:5227",
+  "simplex_bridge_url": "http://127.0.0.1:5227",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
   "simplex_chat": {
-    "_comment": "Pinned simplex-chat daemon that the messenger gateway talks to. bootstrap.sh downloads this exact binary (sha256 verified) into .runtime/bin/, runs it headless on `port` with its profile in .runtime/simplex/, and renders the semif-simplex.service unit from it. Bump version/bin_url/sha256 together. The gateway's ws_url (gateway.simplex.ws_url) must match `port`.",
+    "_comment": "Pinned simplex-chat daemon(s). The command gateway talks to the daemon on `port` (profile .runtime/simplex/, unit semif-simplex.service). The SimpleX forwarding bridge owns its OWN daemon/profile on `forward_port` (profile .runtime/simplex-forward/, unit semif-simplex-forward.service) so messaging UX never shares the command bot's identity. bootstrap.sh downloads this exact binary (sha256 verified) into .runtime/bin/ and renders both units. Bump version/bin_url/sha256 together. gateway.simplex.ws_url must match `port`; bridges.simplex.ws_url must match `forward_port`.",
     "version": "v7.0.3",
     "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
     "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0",
     "port": 5226,
-    "display_name": "semif"
+    "display_name": "semif",
+    "forward_port": 5228,
+    "forward_display_name": "semif-forward"
+  },
+  "bridges": {
+    "_comment": "Standalone third-party API bridges: a simple, secure local HTTP layer between codegen-authored skill bodies and real system services. Each bridge runs as its own process (`python -m semif_agent.cli bridge [--name NAME]`), one process per service daemon, and never runs inside the command gateway — gateway isolation is non-negotiable (see AGENTS.md). The bridge catalog (names, endpoints, config vars) is injected into the code-generation prompts via `semif_agent.bridges.describe_bridges()`.",
+    "simplex": {
+      "_comment": "SimpleX forwarding bridge: buffers every inbound DM (no allowlist — the point is to see who reached the bot through its invite link), and serves invite-link / read / send over HTTP. It owns its own simplex-chat daemon/profile (`ws_url`, `forward_port` above), separate from the command gateway's. Skills use the top-level `simplex_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 5227,
+      "token": "",
+      "max_inbox": 100,
+      "ws_url": "ws://127.0.0.1:5228",
+      "user_id": 1,
+      "auto_accept": true,
+      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+    }
   },
   "gateway": {
-    "_comment": "Messenger intake. `python -m semif_agent.cli gateway` connects to the local simplex-chat daemon (see `simplex_chat` above) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. `user_id` is the daemon user whose contact address the connect-link lookup shows/creates (default 1). Groups/attachments are not supported in this first cut.",
+    "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
     "simplex": {
       "enabled": false,
       "ws_url": "ws://127.0.0.1:5226",
       "allowed_users": [],
       "allow_all_users": false,
       "auto_accept": true,
-      "user_id": 1,
       "home_channel": "",
       "reply_prefix": "",
       "text_batch_delay": 0.8,
-      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2},
-      "inbox": {
-        "_comment": "Buffer every authorized inbound DM so a read skill can pull it (see `messaging_bridge_url`). dispatch=true keeps the current behavior (also submit the message as a scheduler request); set dispatch=false for pull-only mode, where inbound messages are buffered and only acted on when the user asks.",
-        "dispatch": true,
-        "max_size": 100
-      },
-      "bridge": {
-        "_comment": "Local HTTP API the gateway serves to skills (send/read SimpleX messages). Skills call it over `http` with the top-level `messaging_bridge_url`; keep that URL in sync with host/port. GET /address shows/creates the bot's contact link (wired to the adapter); /health, /contacts, /inbox, /inbox/next and POST /send are the rest. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. Set enabled=false to run the gateway without the bridge.",
-        "enabled": true,
-        "host": "127.0.0.1",
-        "port": 5227,
-        "token": "",
-        "max_inbox": 100
-      }
+      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
     }
   },
   "dashboard": {"port": 8765, "host": "0.0.0.0"}

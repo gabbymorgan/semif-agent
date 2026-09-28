@@ -1,0 +1,21 @@
+[Unit]
+Description=SemIf agent SimpleX forwarding bridge daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The forwarding bridge owns its OWN simplex-chat profile (separate from the
+# command gateway's bot), so messaging UX never shares the command identity.
+# Bot mode + a PTY are required for the same reason as semif-simplex.service:
+# --headless means "chat relay" in v7, and the CLI only pumps WebSocket events
+# with a controlling terminal.
+ExecStart=/usr/bin/script -q -e -c "@REPO@/.runtime/bin/simplex-chat -p @FORWARD_PORT@ -d @REPO@/.runtime/simplex-forward/simplex_v1 -k '' --create-bot-display-name '@FORWARD_DISPLAY@'" /dev/null
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semif-simplex-forward
+
+[Install]
+WantedBy=default.target

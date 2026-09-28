@@ -1,15 +1,16 @@
-"""The messaging-gateway adapter contract.
+"""The messenger command-gateway adapter contract.
 
-An adapter owns one transport (SimpleX WebSocket, and later Telegram, Signal,
-...). It delivers inbound text as `InboundMessage` and drains outbound replies
-from a stdlib queue. Everything about the SemIf scheduler — gating, scoring,
-queueing, run ownership, questions, repairs — lives in `GatewayService`; an
-adapter must not know it exists.
+An adapter owns one command transport (SimpleX WebSocket, and later Telegram,
+Signal, ...). It delivers inbound text as `InboundMessage` and drains outbound
+replies from a stdlib queue. Everything about the SemIf scheduler — gating,
+scoring, queueing, run ownership, questions, repairs — lives in `GatewayService`;
+an adapter must not know it exists. Neither knows anything about messaging UX
+(invite links, reading, composing): that is the bridge services' job.
 
-The transport is intentionally a plain `queue.Queue` bridge: the adapter's
-event loop puts an outbound message into the queue, the service puts replies
-into it. This keeps scheduler work (which is synchronous and can block on the
-decision engine) off the adapter's event loop.
+The transport is intentionally a plain `queue.Queue`: the adapter's event loop
+puts an outbound message into the queue, the service puts replies into it. This
+keeps scheduler work (which is synchronous and can block on the decision engine)
+off the adapter's event loop.
 """
 
 from __future__ import annotations

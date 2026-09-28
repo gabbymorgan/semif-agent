@@ -1,11 +1,11 @@
 """Show the SimpleX contact link others use to connect to this agent.
 
-Real integration: the running messenger gateway serves a local HTTP bridge
-(`messaging_bridge_url`). The gateway's own connection to the `simplex-chat`
-daemon is the only thing that can read (or create) the bot's *user contact
-address*; this body asks the bridge for it and reports the link honestly. It
-never opens a WebSocket to the daemon and never invents a link: if the gateway
-is not running or has no address, it says so.
+Real integration: the standalone SimpleX forwarding bridge
+(`simplex_bridge_url`). The bridge's own connection to the `simplex-chat`
+daemon is the only thing that can read (or create) the forwarding bot's *user
+contact address*; this body asks the bridge for it and reports the link
+honestly. It never opens a WebSocket to the daemon and never invents a link: if
+the bridge is not running or has no address, it says so.
 
 `GET /address` shows the existing link and creates one on first call, returning
 `{short_link, full_link, created}`.
@@ -22,20 +22,20 @@ from semif_agent.skills import ActionResult, Prediction
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
-    "config_vars": ["messaging_bridge_url"],
+    "config_vars": ["simplex_bridge_url"],
 }
 
 TIMEOUT_SECONDS = 30
 
 
 class BridgeError(Exception):
-    """The local messaging bridge is unreachable or returned an error."""
+    """The SimpleX forwarding bridge is unreachable or returned an error."""
 
 
 def _base(ctx):
-    url = str(ctx.config.get("messaging_bridge_url", "") or "").strip().rstrip("/")
+    url = str(ctx.config.get("simplex_bridge_url", "") or "").strip().rstrip("/")
     if not url:
-        raise BridgeError("messaging_bridge_url is not configured")
+        raise BridgeError("simplex_bridge_url is not configured")
     return url
 
 
@@ -57,8 +57,8 @@ def predict(ctx, request):
     except BridgeError as exc:
         return Prediction(text=f"bridge error: {exc}")
     if not payload.get("ok"):
-        return Prediction(text="bridge error: gateway bridge is not healthy")
-    return Prediction(text="ready: messenger bridge reachable")
+        return Prediction(text="bridge error: simplex forwarding bridge is not healthy")
+    return Prediction(text="ready: simplex forwarding bridge reachable")
 
 
 def act(ctx, request, prediction):
@@ -77,7 +77,7 @@ def act(ctx, request, prediction):
     if not (short or full):
         return ActionResult(
             action_log=(
-                "simplex.connect_link: the gateway returned no SimpleX "
+                "simplex.connect_link: the bridge returned no SimpleX "
                 "contact link; the bot has no address yet."
             ),
             new_state=request.text,
