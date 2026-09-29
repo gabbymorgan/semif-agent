@@ -743,8 +743,8 @@ def build_skill_prompt(
         f"the '{category}' category did not fit any existing skill. Propose ONE "
         "new skill for this category: a specific, single-purpose action the agent "
         "can take. Reply with JSON only: "
-        '{"title": "<short lowercase snake_case id, no spaces>", '
-        '"description": "<one to two sentence purpose>"}'
+        '{"title": "<short lowercase snake_case id, no spaces, generic and reusable>", '
+        '"description": "<one to two sentence description of how it benefits user>"}'
     )
     existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
     user = (
