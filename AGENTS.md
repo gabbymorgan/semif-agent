@@ -38,8 +38,10 @@ Guessing, inventing data, or shipping a toy is always the wrong answer.
 ## What this is
 
 A local desktop CLI agent whose entire control flow is a single decision model
-(SemIf). Inputs are gated, scored for urgency, queued, and dispatched through a
-skill tree. Every SemIf decision is logged as a labeled training row; the
+(SemIf). Inputs are scored for urgency, queued, and dispatched through a
+skill tree. Nothing is gated out up front: every input is dispatched and inputs
+that are not tasks fall through navigation into the closed `response` tree of
+canned replies. Every SemIf decision is logged as a labeled training row; the
 `dream` pass computes the prediction-vs-observation cost (cross-entropy / NLL +
 ECE) that later drives fine-tuning. See "Product premise" above for what the
 agent is for; this section is the machinery.
@@ -62,8 +64,7 @@ capability is a new bridge, not a gateway feature.
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard, gateway (command intake), bridge (standalone
                 third-party API bridges)
-scheduler.py    gate (handle/ignore; state carries the user's expectation +
-                the available skills, so lookups are not read as small talk)
+scheduler.py    no up-front gate: every input is dispatched
                 -> choice(tau) -> score -> queue; preempt + requeue;
                 a skill run paused for input (needs_input) keeps `current`
                 busy; `answer` routes straight to the pending run, bypassing
@@ -79,8 +80,8 @@ scheduler.py    gate (handle/ignore; state carries the user's expectation +
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
-skills.py    tree + registry (hardcoded built-in: response.reject, service-free
-                behaviors only), navigation = SemIf choices per level (logged),
+skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
+                tree only), navigation = SemIf choices per level (logged),
                 create_category
                 and create_skill author + register stubs via the decision model
                 in generation mode; SkillStore persists one folder per skill
@@ -283,6 +284,19 @@ CLI, unit tests (24) + box integration tests (2).
   option (a genuinely unmatched action still reaches authoring through the
   intent guard) and traces `create_suppressed` with the probs. An empty
   tree/category still short-circuits straight to create.
+- **No handle/ignore gate; the `response` tree is the catchall** (Sep 2026):
+  the top-level `_contains_request` handle/ignore gate is gone. Every input is
+  scored and dispatched; inputs that are not tasks fall through navigation into
+  the closed `response` category, a hardcoded tree of canned replies
+  (`response.greeting`, `response.thanks`, `response.acknowledge`,
+  `response.farewell`, `response.affirm`, `response.unable`, and the catchall
+  `response.clarify` — "Could you try being more specific?"). `response` is a
+  `CANNED_CATEGORIES` member: `navigate` never offers `create_skill` there (the
+  intent guard is skipped too), `Scheduler._dispatch_skill`/`restart_skill`
+  refuse to author it, and the runner skips `assess:outcome`/repair for it — a
+  canned line has no side effect to assess. The leaf choice logs phase
+  `navigate:response` and traces `response_selected`. `response.reject` (a stub
+  that never ran) is gone.
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which
   service/account, how to connect, where the credential comes from, what success
@@ -741,7 +755,7 @@ CLI, unit tests (24) + box integration tests (2).
   (a scheduler hook, default `None`) copies that ownership across an updated
   request so its completion still routes home. A `needs_input` pause sets
   `pending_owner` from the pending run's source; the same chat's next message
-  goes straight to `Scheduler.answer` (no gate/score/navigation). A *different*
+  goes straight to `Scheduler.answer` (no score/navigation). A *different*
   chat during another chat's pause is told to wait — the single-slot scheduler
   must not silently abandon the first chat's run. A background poll calls
   `Scheduler.run_queue()` (routing each `[run_id] summary` to its owner) and

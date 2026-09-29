@@ -1,6 +1,6 @@
 # Semif Agent
 
-A local desktop CLI agent whose control flow is a single decision model (SemIf). Inputs are gated, scored, queued, and dispatched through a skill tree; every decision is logged as a labeled training row, and the decision model is fine-tuned at regular intervals on the accumulated prediction-vs-observation cost.
+A local desktop CLI agent whose control flow is a single decision model (SemIf). Inputs are scored, queued, and dispatched through a skill tree; every decision is logged as a labeled training row, and the decision model is fine-tuned at regular intervals on the accumulated prediction-vs-observation cost. Nothing is gated out up front: every input is dispatched, and inputs that are not tasks fall through navigation into the closed `response` tree of canned replies.
 
 ## Engine: SemIf (local decision layer)
 
@@ -13,12 +13,10 @@ A local desktop CLI agent whose control flow is a single decision model (SemIf).
 
 ```
 intake (typed / events / timers / other skills)
-  └─ contains_request?          (gate: should the agent handle this? the state
-                                 carries the user's expectation + available skills)
-       └─ choice                (SemIf: "should this interrupt the current process?")
-            ├─ yes → preempt current, requeue it with state preserved
-            └─ no  → score      (SemIf: "how urgent?")
-                      └─ priority queue, sorted by urgency desc
+  └─ choice                (SemIf: "should this interrupt the current process?")
+       ├─ yes → preempt current, requeue it with state preserved
+       └─ no  → score      (SemIf: "how urgent?")
+                 └─ priority queue, sorted by urgency desc
 ```
 
 - **Scheduler**: run head of queue when idle. A new interrupt displaces the current process, which itself requeues preserving its state.
@@ -33,7 +31,7 @@ All decisions are SemIf calls: `{state, question, options[]}`. State is the curr
 
 - **`choice`** — binary: `interrupt` / `defer`. Interrupt iff `P(interrupt) >= τ`.
 - **`score`** — ordinal urgency: `critical` / `high` / `medium` / `low`, mapped to numeric weights for sorting.
-- **skill navigation** — at each tree level: choose category / descend; the category level offers a `create_category` suggestion and the leaf level a `create_skill` suggestion.
+- **skill navigation** — at each tree level: choose category / descend; the category level offers a `create_category` suggestion and the leaf level a `create_skill` suggestion. Inputs that are not tasks descend into the closed `response` category of canned replies (never codegen).
 - **`read_next()`** — argument selection within a skill (e.g., which contact is "girlfriend").
 
 **LLM/SemIf boundary**: SemIf for fast, repeated, low-latency decisions (gating, scoring, routing, argument selection). LLM for generation and assessment (email body, self-assessment summary). Never the reverse.

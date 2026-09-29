@@ -84,7 +84,7 @@ def test_tree_endpoint(tmp_path):
         status, payload = server.get("/api/tree")
         assert status == 200
         assert "response" in payload["categories"]
-        assert any(s["name"] == "response.reject" for s in payload["categories"]["response"])
+        assert any(s["name"] == "response.clarify" for s in payload["categories"]["response"])
     finally:
         server.close()
 

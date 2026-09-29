@@ -140,15 +140,10 @@ def test_pipeline_end_to_end(tmp_path):
     assert "queue:" in skills
 
 
-def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
-    """Regression: the gate must not drop lookups phrased as questions.
-
-    Before the gate state carried the end-user expectation and the available
-    skills, "tell me the next event in my nextcloud calendar" scored 0.599
-    (just under tau 0.6) and "what is the next event in my nextcloud calendar?"
-    scored 0.191, so both were dropped as "no actionable request". All lookup
-    variants must pass now, while chatter stays out.
-    """
+def test_navigation_routes_noise_into_the_response_tree(tmp_path):
+    """There is no up-front handle/ignore gate any more: every input is
+    dispatched, and chatter that is not a task must land in the closed `response`
+    tree (a canned reply), never in an integration category or codegen."""
     config = load_config()
     require_real(config)
     _isolate_runtime(config, tmp_path)
@@ -157,32 +152,21 @@ def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
     lookups = [
         "tell me the next event in my nextcloud calendar",
         "what is the next event in my nextcloud calendar?",
-        "what is the next event in my nextcloud calendar Morgan",
-        "tell me the next event in my nextcloud calendar Morgan",
         "tell me the next even in my calendar",
-        "tell me the next event in my personal calendar",
-    ]
-    # Imperative tasks with no matching skill are still actionable: the agent
-    # learns them. Regression: "send a simplex message to pepper saying hi"
-    # scored 0.135 and was dropped as "no actionable request".
-    tasks = [
-        "send a simplex message to pepper saying hi",
-        "send a simplex message to pepper that says hello back to them",
-        "send a new simplex message to pepper: hey",
-        "send a simplex message",
-        "email Sam about lunch",
     ]
     noise = ["hello there", "thanks!", "the sky is blue", "what's up"]
-    for text in lookups + tasks:
-        accepted = scheduler._contains_request(Request(text))
-        row = scheduler.log.read()[-1]
-        print(f"[task] {row['predicted_probs']} accepted={accepted} {text!r}")
-        assert accepted, f"gate dropped a task: {text!r}"
+    for text in lookups:
+        result = navigate(
+            scheduler.engine, scheduler.log, scheduler.trace, Request(text), scheduler.tree
+        )
+        print(f"[lookup] {text!r} -> {result!r}")
+        assert getattr(result, "category", None) == "calendar", f"lookup misrouted: {text!r}"
     for text in noise:
-        accepted = scheduler._contains_request(Request(text))
-        row = scheduler.log.read()[-1]
-        print(f"[noise] {row['predicted_probs']} accepted={accepted} {text!r}")
-        assert not accepted, f"gate accepted noise: {text!r}"
+        result = navigate(
+            scheduler.engine, scheduler.log, scheduler.trace, Request(text), scheduler.tree
+        )
+        print(f"[noise] {text!r} -> {result!r}")
+        assert getattr(result, "category", None) == "response", f"noise left the response tree: {text!r}"
 
 
 def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
@@ -252,7 +236,7 @@ def test_busy_choice_path(tmp_path):
     scheduler.busy("driving on the freeway", skill="driving")
     status, detail = scheduler.submit("tell me if my package was delivered")
     print(f"[{status}] {detail}")
-    assert status in ("preempted", "queued", "dropped")
+    assert status in ("preempted", "queued")
     scheduler.idle()
 
 

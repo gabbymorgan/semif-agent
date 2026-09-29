@@ -470,9 +470,64 @@ def compose_state(request: Request, current: str | None = None) -> str:
     return " ".join(parts)
 
 
-def _response_reject(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
-    message = f"Rejected: I cannot act on this while busy ({request.text})."
-    return ActionResult(action_log=f"response.reject: {message}", new_state=message)
+def _canned_predict(ctx: ActionContext, request: Request) -> Prediction:
+    return Prediction(text="")
+
+
+def _canned_response(name: str, message: str):
+    """An act that returns a fixed line. No transport, no generation, no config."""
+
+    def act(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
+        return ActionResult(action_log=f"{name}: {message}", new_state=message)
+
+    return act
+
+
+# The `response` category is a closed tree of canned replies: it never authors a
+# skill (no create route) and its runs are not assessed (there is no side effect
+# to succeed or fail). Every non-task input lands here instead of being gated.
+CANNED_CATEGORIES = frozenset({"response"})
+RESPONSE_FALLBACK = "response.clarify"
+
+_CANNED_RESPONSES = [
+    (
+        "greeting",
+        "The user is greeting the agent (hello, hi, good morning).",
+        "Hello! What can I help you with?",
+    ),
+    (
+        "thanks",
+        "The user is thanking the agent.",
+        "You're welcome! Anything else?",
+    ),
+    (
+        "acknowledge",
+        "The user is acknowledging or making filler the agent should nod to.",
+        "Got it.",
+    ),
+    (
+        "farewell",
+        "The user is signing off (bye, goodbye, see you).",
+        "Goodbye! Talk to you later.",
+    ),
+    (
+        "affirm",
+        "The user is agreeing or confirming (yes, ok, sure, sounds good).",
+        "Okay!",
+    ),
+    (
+        "unable",
+        "A request the agent understands but has no way to perform.",
+        "I'm not able to do that yet.",
+    ),
+    (
+        "clarify",
+        "The input is too vague to act on; ask the user to be more specific.",
+        "Could you try being more specific?",
+    ),
+]
+
+_RESPONSE_MESSAGES = {f"response.{name}": message for name, _, message in _CANNED_RESPONSES}
 
 
 def build_skills(config: dict) -> list[Skill]:
@@ -483,15 +538,22 @@ def build_skills(config: dict) -> list[Skill]:
     `seeds/`. A fabricated built-in here shadows the authoring path for a real
     one (navigation routes to it), so keep this list to behaviors that need no
     external service.
+
+    The `response` category is a closed tree of canned replies (see
+    CANNED_CATEGORIES): it is the catchall for inputs that are not tasks, and it
+    never goes through codegen.
     """
     return [
         Skill(
-            name="response.reject",
+            name=f"response.{name}",
             category="response",
-            description="Politely reject a request because the agent is busy.",
-            act=_response_reject,
-        ),
+            description=description,
+            predict=_canned_predict,
+            act=_canned_response(f"response.{name}", message),
+        )
+        for name, description, message in _CANNED_RESPONSES
     ]
+
 
 
 def build_tree(skills: list[Skill]) -> dict[str, list[Skill]]:
@@ -549,6 +611,46 @@ def _clears_create_gate(
     create_p = probs[create_id]
     best = max((probs[i] for i in existing_ids if i in probs), default=0.0)
     return create_p >= tau and (create_p - best) >= margin
+
+
+def _navigate_canned(
+    engine: SemIfEngine,
+    log: DecisionLog,
+    trace: TraceLog,
+    request: Request,
+    category: str,
+    skills: list[Skill],
+) -> Skill:
+    """Pick one canned reply from a closed category. No create branch, ever.
+
+    The catchall (`RESPONSE_FALLBACK`) is offered last so the decision question
+    can point at it by name; it is the answer when nothing specific fits.
+    """
+    ordered = [s for s in skills if not s.is_noop()] or list(skills)
+    fallback = next((s for s in ordered if s.name == RESPONSE_FALLBACK), None)
+    ordered = [s for s in ordered if s is not fallback] + ([fallback] if fallback else [])
+    if len(ordered) == 1:
+        return ordered[0]
+    leaf = DecisionRequest(
+        state=compose_state(request, current=category),
+        question=(
+            "Which canned response best fits this input? "
+            f"Choose {ordered[-1].name} if none of the others does."
+        ),
+        options=[Option(s.name, s.description) for s in ordered],
+    )
+    result = engine.call(leaf)
+    log.append(leaf, result, extra={"phase": "navigate:response", "run_id": request.id})
+    chosen = next((s for s in ordered if s.name == result.selected), ordered[-1])
+    trace.append(
+        "response_selected",
+        request.id,
+        category=category,
+        skill=chosen.name,
+        selected=result.selected,
+        probs=result.probs,
+    )
+    return chosen
 
 
 def navigate(
@@ -625,6 +727,8 @@ def navigate(
         )
         return CreateCategory()
     skills = tree[category]
+    if category in CANNED_CATEGORIES:
+        return _navigate_canned(engine, log, trace, request, category, skills)
     create_skill = Option(
         "create_skill",
         "No existing skill performs this action; create a new skill for it.",

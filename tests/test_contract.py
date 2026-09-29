@@ -34,11 +34,11 @@ def test_result_selected_and_probs():
 
 def test_request_requeue_preserves_state():
     original = Request(text="t", priority=0.7)
-    original.resume["from_skill"] = "response.reject"
+    original.resume["from_skill"] = "response.clarify"
     updated = original.copy_for_requeue()
     assert updated.id == original.id
     assert updated.priority == original.priority
-    assert updated.resume["from_skill"] == "response.reject"
+    assert updated.resume["from_skill"] == "response.clarify"
     assert updated.reentries == original.reentries + 1
 
 

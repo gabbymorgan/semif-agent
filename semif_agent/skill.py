@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from .decisions import DecisionRequest, Option, Request
 from .log import DecisionLog
 from .skills import (
+    CANNED_CATEGORIES,
     ActionContext,
     Prediction,
     Skill,
@@ -301,6 +302,19 @@ class SkillRunner:
         self, skill: Skill, request: Request, prediction: Prediction | None, action
     ) -> RunResult:
         observed = action.new_state
+        if skill.category in CANNED_CATEGORIES:
+            summary = deterministic_summary(
+                skill.category, skill.name, True, action.action_log, observed
+            )
+            return RunResult(
+                skill=skill.name,
+                success=True,
+                summary=summary,
+                action_log=action.action_log,
+                new_state=observed,
+                assessment_summary=summary,
+                prediction=prediction,
+            )
         success, updated_request = self._assess(skill, request, action)
 
         decisions = getattr(prediction, "decisions", [])

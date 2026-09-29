@@ -1,8 +1,10 @@
-"""The scheduler: gate, choice, score, queue, dispatch.
+"""The scheduler: choice, score, queue, dispatch.
 
-Every SemIf decision (gate, choice, score, navigation, prediction) is logged.
+Every SemIf decision (choice, score, navigation, prediction) is logged.
 A high-priority input can preempt the current process, which requeues with its
-state preserved; a deferred input is scored and queued by urgency.
+state preserved; a deferred input is scored and queued by urgency. There is no
+up-front handle/ignore gate: every input is dispatched, and inputs that are not
+tasks fall through navigation into the closed `response` tree of canned replies.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ from .log import DecisionLog
 from .queue import UrgencyQueue
 from .skill import SkillRunner
 from .skills import (
+    CANNED_CATEGORIES,
+    RESPONSE_FALLBACK,
     ActionContext,
     CategoryRegistry,
     CreateCategory,
@@ -54,12 +58,9 @@ from .skills import (
     merge_seed_store,
     merge_skill_store,
     navigate,
-    tree_summary,
 )
 from .trace import TraceLog
 
-GATE_YES = "yes"
-GATE_CAPABILITY_CHARS = 1200
 CHOICE_INTERRUPT = "interrupt"
 URGENCY_OPTIONS = [
     ("critical", "Immediate danger or critical failure."),
@@ -68,43 +69,6 @@ URGENCY_OPTIONS = [
     ("low", "Can wait."),
 ]
 URGENCY_WEIGHTS = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
-
-
-def build_gate_decision(request: Request, tree: dict[str, list[Skill]]) -> DecisionRequest:
-    """The top-level handle/ignore filter, with end-user expectation and the
-    agent's real capabilities in the state.
-
-    Without them the decision model reads an information request ("tell me the
-    next event in my nextcloud calendar") as small talk and drops it: "actionable"
-    implies a side effect, and the model cannot see that looking a value up in a
-    configured service is exactly what this agent does. The available skills are
-    listed so a request naming one of them is visibly within the agent's remit.
-    """
-    capabilities = tree_summary(tree)[:GATE_CAPABILITY_CHARS] or "  (none yet)"
-    state = (
-        f"User input: {request.text}\n"
-        "[Context: the user is talking to a personal task agent. Any imperative "
-        "request to perform a task — send, message, tell, check, create, remind, "
-        "or look something up — must be handled, even if no skill matches yet. "
-        "Only chatter, thanks, and bare greetings should be ignored.]\n"
-        f"[Available skills:\n{capabilities}]"
-    )
-    return DecisionRequest(
-        state=state,
-        question="Should the agent handle this input?",
-        options=[
-            Option(
-                GATE_YES,
-                "Yes — do what it asks, including looking something up, reporting "
-                "information, or performing an action using the agent's skills.",
-            ),
-            Option(
-                "no",
-                "No — it is not a request for the agent to do or answer anything "
-                "(background text, noise, or a bare greeting).",
-            ),
-        ],
-    )
 
 
 @dataclass
@@ -296,14 +260,6 @@ class Scheduler:
 
     # ---- decision templates (all real SemIf, all logged) ----
 
-    def _contains_request(self, request: Request) -> bool:
-        decision = build_gate_decision(request, self.tree)
-        result = self.engine.call(decision)
-        self.log.append(
-            decision, result, extra={"phase": "gate", "run_id": request.id}
-        )
-        return result.prob(GATE_YES) >= self.tau
-
     def _choice(self, request: Request, current: Process) -> bool:
         decision = DecisionRequest(
             state=compose_state(request, current=current.skill),
@@ -362,9 +318,6 @@ class Scheduler:
     def _submit_locked(self, text: str, source: str = "typed") -> tuple[str, str, str]:
         request = Request(text, source=source)
         self.trace.append("submit", request.id, text=text, source=source)
-        if not self._contains_request(request):
-            self.trace.append("dropped", request.id, reason="no actionable request")
-            return "dropped", "no actionable request", request.id
 
         if self.current is None:
             weight, label = self._score(request)
@@ -473,7 +426,20 @@ class Scheduler:
                 return created
             return self._dispatch_skill(request, created.skill, weight)
         if isinstance(navigation, CreateSkill):
+            if navigation.category in CANNED_CATEGORIES:
+                fallback = self._canned_fallback(navigation.category)
+                if fallback is not None:
+                    self.trace.append(
+                        "create_suppressed",
+                        request.id,
+                        level="canned_category",
+                        category=navigation.category,
+                        fallback=fallback.name,
+                    )
+                    return self._run_skill(fallback, request)
             return self._dispatch_skill(request, navigation.category, weight)
+        if navigation.category in CANNED_CATEGORIES:
+            return self._run_skill(navigation, request)
         if not confirm_skill_fit(
             self.engine, self.log, self.trace, request, navigation, self.tau
         ):
@@ -485,6 +451,14 @@ class Scheduler:
             )
             return self._dispatch_skill(request, navigation.category, weight)
         return self._run_skill(navigation, request)
+
+    def _canned_fallback(self, category: str) -> Skill | None:
+        """The catchall canned reply for a closed category, else its first leaf."""
+        skills = self.tree.get(category, [])
+        for skill in skills:
+            if skill.name == RESPONSE_FALLBACK:
+                return skill
+        return skills[0] if skills else None
 
     def _dispatch_skill(
         self, request: Request, category: str, weight: float = 0.0
@@ -1587,6 +1561,8 @@ class Scheduler:
             )
             if leaf is None:
                 return "error", f"no skill {category}.{name}"
+            if category in CANNED_CATEGORIES:
+                return "error", f"{category} is a closed canned tree; there is no body to write"
             if leaf.writing:
                 return "error", f"skill {category}.{name} is already being written"
             if self.codegen is None:

@@ -29,7 +29,6 @@ from semif_agent.scheduler import (
     RepairOffer,
     Scheduler,
     SkillWrite,
-    build_gate_decision,
 )
 from semif_agent.skills import (
     ActionResult,
@@ -218,14 +217,19 @@ def test_build_category_prompt_contains_request_and_tree():
     assert "category" in messages[0]["content"]
     joined = messages[1]["content"]
     assert "tracking for my drone delivery" in joined
-    assert "response: response.reject" in joined
+    assert "response: response.acknowledge" in joined
 
 
-def test_build_skills_is_internal_behaviors_only():
+def test_build_skills_are_canned_responses_only():
     """Real integrations are generated or seeded, never fabricated here: a
     hardcoded fake shadows the authoring path for a real skill (navigation
-    routes to it). Only service-free behaviors stay built-in."""
-    assert [skill.name for skill in build_skills({"skills": {}})] == ["response.reject"]
+    routes to it). The only built-ins are the closed `response` canned tree."""
+    skills = build_skills({"skills": {}})
+    names = [skill.name for skill in skills]
+    assert names and all(name.startswith("response.") for name in names)
+    assert "response.clarify" in names
+    assert all(skill.category == "response" for skill in skills)
+    assert not any(skill.is_noop() for skill in skills)
 
 
 def test_parse_category_draft_plain_json():
@@ -535,44 +539,63 @@ def test_navigate_empty_tree_short_circuits(tmp_path):
     assert any(e["kind"] == "create_category" for e in trace.read())
 
 
-def test_gate_decision_carries_expectation_and_capabilities():
-    """The gate must know the user expects handling and what the agent can
-    actually do; without that context, lookups are read as small talk and
-    dropped (the nextcloud calendar regression)."""
+def test_navigate_canned_category_never_offers_create(tmp_path):
+    """The `response` tree is closed: its leaf choice has no create_skill option
+    and never authors, regardless of how weak the match is."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = build_tree(build_skills({"skills": {}}))
-    tree["calendar"] = [
-        Skill(name="next_event", category="calendar", description="Report the next event.")
-    ]
-    decision = build_gate_decision(
-        Request("tell me the next event in my nextcloud calendar"), tree
-    )
-    assert "tell me the next event in my nextcloud calendar" in decision.state
-    assert "perform a task" in decision.state
-    assert "look something up" in decision.state
-    assert "calendar: next_event" in decision.state
-    assert decision.question == "Should the agent handle this input?"
-    assert [o.id for o in decision.options] == ["yes", "no"]
-    assert "performing an action" in decision.options[0].description
-    assert "greeting" in decision.options[1].description
+
+    class Recording:
+        def __init__(self):
+            self.request = None
+
+        def call(self, request):
+            from semif_agent.decisions import DecisionResult
+
+            self.request = request
+            ids = [o.id for o in request.options]
+            return DecisionResult(request=request, option_ids=ids, probabilities=[1.0] * len(ids))
+
+    engine = Recording()
+    result = navigate(engine, log, trace, Request("hello there"), tree)
+    assert isinstance(result, Skill)
+    assert result.category == "response"
+    assert all(o.id != "create_skill" for o in engine.request.options)
+    assert "create_skill" not in [o.id for o in engine.request.options]
+    assert result.name in [o.id for o in engine.request.options]
 
 
-def test_gate_decision_accepts_imperative_tasks_with_no_matching_skill():
-    """A request to do something the tree has no skill for is still actionable —
-    the agent learns it. Regression: 'send a simplex message to pepper saying
-    hi' scored 0.135 and was dropped as 'no actionable request' because the gate
-    context only vouched for lookups."""
+def test_navigate_canned_category_points_at_the_catchall(tmp_path):
+    """The catchall is offered last and named in the question when nothing
+    specific fits."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = build_tree(build_skills({"skills": {}}))
-    tree["simplex"] = [
-        Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
-    ]
-    decision = build_gate_decision(Request("send a simplex message to pepper saying hi"), tree)
-    assert "even if no skill matches yet" in decision.state
+    engine = _ProbEngine({"canned response": {"response.clarify": 1.0}})
+    result = navigate(engine, log, trace, Request("do the thing"), tree)
+    assert result.name == "response.clarify"
+    leaf = engine.calls[-1]
+    assert "response.clarify" in leaf.question
+    assert leaf.options[-1].id == "response.clarify"
+    assert "navigate:response" in [r["extra"]["phase"] for r in log.read()]
 
 
-def test_gate_decision_empty_tree_still_builds():
-    decision = build_gate_decision(Request("hello"), {})
-    assert "(none yet)" in decision.state
-    assert decision.options[0].id == "yes"
+def test_canned_response_runs_without_assessment(tmp_path):
+    """A canned reply is a fixed line: no side effect to assess, no repair loop.
+    The runner returns success without an assess:outcome decision."""
+    from semif_agent.skill import SkillRunner
+    from semif_agent.skills import ActionContext
+
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    skill = next(s for s in build_skills({"skills": {}}) if s.name == "response.greeting")
+    runner = SkillRunner(ActionContext(engine=_ProbEngine({}), config={}), log)
+    outcome = runner.run(skill, Request("hello"))
+    assert outcome.success is True
+    assert outcome.new_state == "Hello! What can I help you with?"
+    assert outcome.error is None
+    assert log.read() == []
+
 
 
 def test_navigate_leaf_offers_create_for_unmatched_action(tmp_path):
@@ -769,6 +792,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
         tmp_path,
         choices={"same action": "different"},
     )
+    scheduler.tree.pop("response", None)
     scheduler.tree["simplex"] = [
         Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
     ]
