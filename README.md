@@ -1,0 +1,597 @@
+# semif-agent
+
+A self-hosted agent whose **entire control flow is one decision model**. You
+ask it to do something in plain language ("check my email", "message Sam on
+SimpleX", "put lunch with Dana on my calendar") and it either chooses and executes a known skill in seconds or learns a new one in minutes.
+
+The routing, gating, scoring, assessment and fidelity decisions are all made by
+**SemIf** — a small local model that reads option logits directly from a single
+forward pass. An LLM is used only to generate what cannot be achieved deterministically or through classification - for example, a skill's title, description, or code body. There are no simulated successes with mocked data and fake endpoint.  There is chain-of-thought infodump to give the illusion of confidence in a failed outcome. There is just a decision tree leading to reusable code snippets, plugged into a deliberately planned infrastructure of basic services. If intelligence is "on tap," then semif-agent is the catchment system.
+
+A successful release of this could be defined by a single question: "Can I use this for most of the things I use my phone for besides scrolling?" The idea of using a single chat interface operating on minimal back-end resources to replace the diversity of features currently accomplished by a smartphone is audacious for sure. Many have tried and failed. But as technology progresses, it is always worth revisiting old problems with fresh eyes, and we are confident that the end result will be something that a substantial base of end users would enjoy.
+
+
+---
+
+## Table of contents
+
+- [Why this exists (the reasoning)](#why-this-exists-the-reasoning)
+- [How it works](#how-it-works)
+  - [The scheduler: choose, score, queue, dispatch](#the-scheduler-choose-score-queue-dispatch)
+  - [The skill tree and navigation](#the-skill-tree-and-navigation)
+  - [The skill run loop](#the-skill-run-loop)
+  - [Authoring a new skill](#authoring-a-new-skill)
+  - [Data contracts and tiered config](#data-contracts-and-tiered-config)
+  - [Repairing a failed run](#repairing-a-failed-run)
+  - [Dream: the learning signal](#dream-the-learning-signal)
+- [Features](#features)
+- [Repository layout](#repository-layout)
+- [Installation](#installation)
+  - [Option A: one-command staging box (`bootstrap.sh`)](#option-a-one-command-staging-box-bootstrapsh)
+  - [Option B: dev machine (stdlib only)](#option-b-dev-machine-stdlib-only)
+  - [Prerequisites: ollama models](#prerequisites-ollama-models)
+  - [Configuration](#configuration)
+- [Running the agent](#running-the-agent)
+  - [REPL](#repl)
+  - [Scripted mode](#scripted-mode)
+  - [Dashboard](#dashboard)
+  - [Messenger gateway (SimpleX)](#messenger-gateway-simplex)
+  - [Bridge services](#bridge-services)
+  - [Dream report](#dream-report)
+- [Skills in detail](#skills-in-detail)
+- [Testing](#testing)
+- [Roadmap / status](#roadmap--status)
+
+---
+
+## Why this exists
+
+The design premise is that **language models are good at generating text and bad
+at being a reliable control plane**. Repeatedly asking an LLM "should I interrupt
+this process? how urgent is this? which skill handles this?" produces slow,
+non-deterministic, un-loggable behavior. So control flow is pulled out of the
+model entirely:
+
+- **Semantic ifs, not text generation.** SemIf is a local rebuild of Jev's
+  interface pattern. One forward pass reads typed option logits directly from a
+  model; it returns per-option probabilities conditional on exactly the option
+  set you supplied. There is no answer sentence and no decoding loop. It is fast
+  (~0.9 s/decision on CPU), deterministic, cheap, and — crucially — **loggable**.
+  Probabilities are conditional on the option set, not absolute confidence, so
+  the agent treats them as conditional scores and calibrates per workload.
+- **Local by construction.** The target is a desktop machine; data stays
+  in-network. The decision model is pinned to an exact revision, so every swap is
+  auditable via prompt hashes.
+- **The decision engine is always real.** There is no mock engine and no degraded
+  mode. If SemIf cannot be loaded, the app reports it and exits non-zero rather
+  than pretending. (Pure unit tests may use a scripted double; the runtime never
+  does.)
+- **Simulated Agile patterns.** A skill is a real integration into the active tool chain for end user satisfaction. It takes existing mail
+  protocols, SimpleX, CalDAV/WebDAV, configured local CLIs, HTTP APIs and your supplied data to produce actions that best fit your query. In the absence of a an existing skill, the skill generation process is activated. Skill generation has four major phases - definition, refinement, coding, testing (unit and integration). Each step in this process has deterministic and probabilistic handling optimized to achieve the stated goal of the user in the context of the platform's core mission.
+- **Nothing is gated out up front.** Every input is dispatched and scored.
+  Inputs that are not tasks fall through navigation into the closed `response`
+  category — a hardcoded tree of canned replies (`greeting`, `thanks`,
+  `acknowledge`, `farewell`, `affirm`, `unable`, and the catchall `clarify`).
+  `response` never goes through codegen and its runs are never assessed (a canned
+  line has no side effect to succeed or fail). It never offers generated text. By design, you will never be having a "conversation" with an LLM through this platform.
+- **Everything is a training row.** Every SemIf decision is logged as a labeled
+  row; the `dream` pass computes the prediction-vs-observation cost
+  (cross-entropy / NLL + ECE) that later drives fine-tuning. This means that the platform should improve with use, much like SOTA agentic harnesses, but through reinforcement learning and procedurally generated context augmentations (as opposed to markdown files that grow, compress, and prune their way through a meandering and inherently context-limited self-improvement loop).
+
+
+---
+
+## How it works
+
+### The scheduler: choose, score, queue, dispatch
+
+Implemented in `semif_agent/scheduler.py` and `semif_agent/queue.py`:
+
+```
+intake (typed input / messenger gateway / scripted)
+  └─ choice   "should this interrupt the current process?"   (SemIf)
+       ├─ yes → preempt current, requeue it with state preserved
+       └─ no  → score   "how urgent?"  critical/high/medium/low   (SemIf)
+                 └─ urgency priority queue (weight desc, then FIFO)
+```
+
+- The **queue** is a max-heap by urgency weight, FIFO within equal weight, with
+  upward ageing so low-priority items cannot starve (`queue.py`).
+- A **skill run paused for input** (`needs_input`) keeps the current slot busy;
+  an answer routes straight back to the pending run, bypassing
+  choice/score/navigation.
+- A high-priority input can preempt the running process, which re-queues with its
+  state preserved.
+- Exactly one execution slot. (Concurrency, when it comes, is SemIf's
+  shared-state mode for parallel *decisions* — not parallel process execution.)
+
+### The skill tree and navigation
+
+Skills are leaves: categories → skills → actions. Navigation is a chain of SemIf
+choices, one per level (`navigate` in `semif_agent/skills.py`), and **every
+choice is logged** (`navigate:category`, `navigate:leaf`, `navigate:response`).
+
+- The category level offers a `create_category` branch; the leaf level offers
+  `create_skill`.
+- **Create-confidence gate.** `create_skill`/`create_category` share a softmax
+  with the real options, so a weak plurality win is not evidence that nothing
+  matches. A create branch fires only when `P(create) >= navigation.create_tau`
+  **and** it leads the best existing option by `navigation.create_margin`;
+  otherwise navigation falls back to the best existing option and traces
+  `create_suppressed` with the probabilities. An empty tree/category still
+  short-circuits straight to create.
+- There is a second door to authoring: an **intent guard**
+  (`confirm_skill_fit`, phase `navigate:intent`) for genuinely unmatched actions.
+
+### The skill run loop
+
+Every skill (`semif_agent/skill.py`) follows the same loop:
+
+```
+observe baseline → predict → act → observe outcome → assess
+```
+
+- `predict(ctx, request)` forecasts and makes any SemIf **sub-decisions**
+  (e.g. which contact is "girlfriend") using the real engine; they are returned
+  inside `Prediction.decisions` and logged as training rows.
+- `act(ctx, request, prediction)` performs the real action via stdlib transports
+  and returns an `ActionResult(action_log, new_state, needs_input)`.
+- `assess` is a **SemIf decision**, not generation:
+  - `assess:outcome` — success/failure at `tau`.
+  - `assess:requeue` — on failure, `complete` vs `retry` (bounded by
+    `max_reentries`).
+- The run summary is **deterministic** (same inputs ⇒ same string):
+  `f"{category}.{name}: {'ok'|'failed'} — {action_log or new_state}"`.
+- A skill can pause for human input two ways: `act` returns `needs_input`
+  (predict is not re-run on resume), or — for a contract variable the runner
+  cannot satisfy — a **pre-predict** pause collects config before predict runs.
+
+### Authoring a new skill
+
+When navigation chooses a create branch, `scheduler._dispatch_skill` runs the
+authoring pipeline. It is **asynchronous** and single-slot, so the gate stays
+free while the big codegen model thinks:
+
+1. **Stub.** The small decision model (`SemIfEngine.generate`) authors a title +
+   description. The stub is registered and hot-merged into the running tree
+   immediately (navigable right away); a `skill_writing` trace event is emitted.
+2. **Elicitation** (`generate_elicitation`, default on): implementation
+   questions — which service/account, how to connect, where the credential
+   comes from, what success looks like. The REPL asks inline; the dashboard
+   defers to a question queue and the worker waits
+   (`codegen.elicitation.wait_timeout`).
+3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
+   (`codegen`, default `qwen38-iq3s`) writes `predict`/`act` against `SKILL.md`,
+   reading every operational value from `ctx.config` and declaring `INTEGRATION`
+   (service / transport / config_vars).
+4. **Fidelity gate** (`authoring:fidelity` SemIf accept/reconsider decision +
+   static `integration_findings`): is the action real, or simulated? One
+   corrective regen with the raw evidence bundle, then accept-with-badge
+   (`unverified`) rather than hard-fail.
+5. **Data contract** (`generate_data_contract`): a separate call sharing
+   `TESTGEN.md` + `skill.py` derives `contract.json` — a flat map of snake_case
+   variable name → semantic description, for user input and SemIf only.
+6. **Test** (`generate_skill_tests`): a second shared-context call produces
+   `skill.test.py`, a hermetic mechanics test (inline fixtures, a loopback
+   `http.server` for HTTP bodies, no external network).
+7. **Auto-run** (`run_skill_test`): executes the test as a subprocess. On
+   failure a 3-option SemIf decision (`codegen_regen`) picks code/contract/test
+   to regenerate, bounded by `codegen.test_max_attempts`.
+
+On success the body materializes to `data/skills/<category>/<name>/`, is
+hot-merged, and **the original request is re-queued** at its scored weight and
+re-runs navigation onto the new leaf. On failure the leaf stays a restartable
+stub. A whole new category runs the same chain deterministically:
+`create_category` → `create_skill` → async body → re-dispatch.
+
+A rejected/simulated body is traced (`fidelity_review`), badged `unverified`,
+and never blocks authoring. Codegen failures (including timeouts) surface as a
+graceful stub and are retryable with `restart <category> <skill>`.
+
+### Data contracts and tiered config
+
+Generated bodies own no data. At runtime the runner merges:
+
+```
+global config → category config → skill config → per-fire answers  =  ctx.config
+```
+
+- After the contract lands, a SemIf `choice` per variable auto-populates the
+  skill config from the global + category config (`config:search`).
+- Variables still unresolved pause the run **before predict** and are asked of
+  the human one at a time.
+- Each answer gets a SemIf `record-as-config vs ask-again-each-fire` choice
+  (`config:record`); recorded values persist to the skill `config.json`.
+- On successive firings only the unresolved variables are asked.
+
+A finished skill folder is:
+
+```
+data/skills/<category>/<name>/
+  skill.py        # runnable body
+  skill.test.py   # hermetic mechanics test
+  contract.json   # variable name -> semantic description
+  config.json     # recorded values (secrets live here, gitignored)
+```
+
+Each body also records the `SKILL.md` revision it was written against
+(`contract_ref` / `contract_dirty` on the `skill_writing` trace).
+
+### Repairing a failed run
+
+A failed real run logs a SemIf `repair:choice` decision offering:
+
+```
+retry | repair_skill | ask_user | no_repair
+```
+
+It is surfaced as a `repair_offered` trace, in the REPL (`repairs`,
+`repair <id> [action]`) and in the dashboard. Executing is user-confirmed
+(a codegen write is slow): `retry` re-queues, `repair_skill` rewrites the body
+with the observed failure (bounded by `codegen.repair.max_attempts`), and
+`ask_user` posts a repair question. A run is never silently auto-repaired.
+
+### Dream: the learning signal
+
+`semif_agent/dream.py` replays `decisions.jsonl` and computes, per row, the NLL
+of the observed outcome under the predicted distribution, plus weighted
+cross-entropy, accuracy and binned ECE. Human relabels (`relabel`, or
+`POST /api/relabel`) are weighted 3×. This is the training signal for the v2
+fine-tuning loop — it is not yet the fine-tune itself.
+
+---
+
+## Features
+
+- **SemIf-only decisions** — choice, scoring, navigation, assessment, fidelity,
+  config search/record, repair choice, regeneration choice, and a codegen
+  degeneration watchdog all route through one local decision model.
+- **No handle/ignore gate** — every input is dispatched; non-tasks fall through
+  to the closed `response` canned tree.
+- **Real integrations by construction** — bodies must perform the real action,
+  read data from `ctx.config`, declare `INTEGRATION`, and report real failures.
+- **Async skill authoring** — elicitation → body → fidelity → contract → test →
+  auto-run, with a SemIf regeneration ladder on test failure. Gate stays free.
+- **Tiered config + first-fire collection** — global/category/skill config with
+  a `record-vs-ask` decision per answer.
+- **Runtime repair loop** — retry / repair / ask / no-op, user-confirmed.
+- **Decision logging + dream cost** — every decision is a labeled training row
+  with prompt hashes, tokens and timing.
+- **Run lifecycle tracing** — `runs.jsonl` keyed by `run_id`, powering a
+  Redux-DevTools-style dashboard.
+- **Messenger command gateway (SimpleX)** — take commands and reply over DM.
+- **Standalone bridge services** — a token-guarded localhost HTTP layer in front
+  of third-party systems, so generated bodies never speak native protocols.
+- **Seeds** — shipped real starter skills: `calendar.next_event` (Nextcloud
+  CalDAV) and `simplex.next_message` / `simplex.connect_link`.
+- **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
+- **Stdlib-only core** — SemIf/llama.cpp are lazy imports, so the package stays
+  importable and testable without the heavy engine installed.
+
+---
+
+## Repository layout
+
+```
+semif_agent/
+  cli.py            argparse: run / dream / skills / status / relabel /
+                    dashboard / gateway / bridge
+  scheduler.py      no up-front gate; choice -> score -> queue -> dispatch;
+                    preempt + requeue; needs_input pauses; async single-slot
+                    skill authoring worker; fidelity gate; repair loop
+  skill.py          observe -> predict -> act -> observe -> assess; deterministic
+                    summary; pre-predict contract collection
+  skills.py         tree + registry, canned `response` tree, navigation,
+                    create gates, intent guard, tiered config resolution
+  codegen.py        OpenAI-compatible client; body/elicitation/contract/test
+                    generation; parse/validate; INTEGRATION extraction; test runner
+  engine.py         SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
+  llm.py            dormant OpenAI-compatible client (`_parse_json` is reused)
+  log.py            decisions.jsonl rows {state, question, options, probs, ...}
+  trace.py          runs.jsonl lifecycle events keyed by run_id
+  dream.py          NLL / weighted CE / accuracy / ECE cost report
+  decisions.py      DecisionRequest / Option / DecisionResult / Request dataclasses
+  queue.py          urgency max-heap (weight desc, FIFO, ageing)
+  dashboard.py      stdlib HTTP + JSON API + static UI
+  static/           dashboard frontend (html/js/css)
+  simplex_ws.py     neutral SimpleX daemon protocol (shared by gateway + bridge)
+  gateway/          messenger COMMAND intake/reply (SimpleX first)
+  bridges/          standalone third-party API bridges (SimpleX first)
+seeds/              committed starter skills (calendar, simplex)
+scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
+requirements/       staging.txt — the pinned engine deps
+tests/              stdlib unit tests + tests/integration (staging only)
+SKILL.md            the contract fed to the skill-body codegen model
+TESTGEN.md          the contract fed to the test/contract codegen model
+AGENTS.md           the operational guide (read this before touching code)
+config.example.json per-machine config template
+```
+
+---
+
+## Installation
+
+The agent runs anywhere pure-Python runs, but a *working* agent needs the SemIf
+decision engine, a pinned GGUF, and an OpenAI-compatible endpoint for codegen.
+`scripts/bootstrap.sh` provisions all of it inside a gitignored `.runtime/` tree
+in the checkout.
+
+### Prerequisites: ollama models
+
+Two OpenAI-compatible endpoints (usually ollama), which may be on different
+machines:
+
+- **`codegen`** — the large model that writes skill bodies (e.g.
+  `qwen38-iq3s`, a 27B IQ3_S GGUF). This is slow and ideally on a beefier host.
+- **`llm`** — an OpenAI-compatible endpoint retained but **dormant**: assessment,
+  fidelity and requeue are SemIf decisions now, so the LLM is out of every
+  decision path (only its `_parse_json` helper is borrowed by the authoring
+  parsers). It is configured for backlogged retirement; skill titles and
+  descriptions come from the SemIf decision model itself, not this endpoint.
+
+The **decision engine is separate** and runs via llama.cpp CPU (or Vulkan if your
+build enables it), not ollama.
+
+### Option A: one-command staging box (`bootstrap.sh`)
+
+On a fresh Ubuntu machine, from a checkout of this repo:
+
+```sh
+scripts/bootstrap.sh \
+  --llm-url http://127.0.0.1:11434 \
+  --codegen-url http://192.168.8.181:11434
+```
+
+The script is idempotent (every stage no-ops on existing state) and:
+
+1. installs system prereqs + enables linger;
+2. generates/uses `~/.ssh/id_ed25519` and clones + pins the SemIf engine;
+3. creates `.runtime/venv` and installs the pinned deps from
+   `requirements/staging.txt` (installing `semif-phase1` with `--no-deps`, since
+   the llama.cpp path never imports torch);
+4. downloads and sha256-verifies the pinned GGUF into `.runtime/models/`;
+5. pre-fetches the HF tokenizer into `.runtime/hf/`;
+6. downloads and sha256-verifies the pinned `simplex-chat` binary;
+7. writes `config.json` (paths, LLM/codegen URLs, dashboard, SimpleX);
+8. renders and enables systemd **user** units:
+   `semif-simplex` (bot daemon), `semif-gateway` (agent gateway),
+   `semif-simplex-forward` (the bridge's own daemon), `semif-bridge`;
+9. prints the bot's SimpleX contact address.
+
+Useful flags: `--threads N`, `--public-dashboard`, `--copy-data SRC`,
+`--simplex-allowed-users CSV`, `--simplex-home-channel ID`,
+`--simplex-display-name NAME`. Run `scripts/bootstrap.sh -h` for the full list.
+
+It installs **no ollama**; it expects one for `llm` and pulls `llm.model`,
+warning (never auto-pulling) if the remote codegen host is missing its model.
+
+### Option B: dev machine (stdlib only)
+
+The core is dependency-free, so unit tests run anywhere:
+
+```sh
+python3 -m pytest tests/ -q --ignore=tests/integration
+```
+
+For a full install on a machine you manage, follow the same steps bootstrap
+performs (venv, `semif-phase1 --no-deps`, `requirements/staging.txt`, GGUF,
+tokenizer cache), then copy `config.example.json` to `config.json` and adjust
+paths.
+
+### Configuration
+
+`config.json` is **gitignored and per-machine**. Copy the template and edit:
+
+```sh
+cp config.example.json config.json
+```
+
+Key blocks:
+
+| Block | What it controls |
+| --- | --- |
+| `engine` | SemIf source/revision, GGUF path, context, threads |
+| `llm` | dormant OpenAI-compatible endpoint (out of every decision path) |
+| `codegen` | skill-body model endpoint, timeouts, sampler, elicitation, fidelity, repair, test, degeneration watchdog, token budget |
+| `navigation` | create-gate `create_tau` / `create_margin` |
+| `tau` | decision threshold; `max_reentries` requeue bound |
+| `queue` | `max_size`, `age_rate` |
+| `skill_bodies` / `skill_seeds` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
+| `gateway.simplex` | command gateway: ws_url, allowlist, batching |
+| `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
+| `simplex_bridge_url` / `simplex_bridge_token` | what skill bodies call |
+| `simplex_chat` | pinned simplex-chat binary + gateway/forward ports |
+| `dashboard` | bind host/port |
+
+Runtime artifacts (`data/decisions.jsonl`, `data/runs.jsonl`,
+`data/categories.json`, `data/skills/`, `data/drafts/`) are gitignored too.
+
+> **Codegen timeout:** do not cap codegen `max_tokens`. The reasoning model
+> writes for 25–45 min; `codegen.timeout` defaults to 1200 s and the staging
+> config raises it to 3600 s.
+
+---
+
+## Running the agent
+
+All subcommands go through the CLI:
+
+```sh
+python -m semif_agent.cli run              # interactive REPL
+python -m semif_agent.cli run --script inputs.jsonl
+python -m semif_agent.cli dream            # cost report
+python -m semif_agent.cli skills           # print the skill tree
+python -m semif_agent.cli status           # current process + queue
+python -m semif_agent.cli relabel <id> <outcome>
+python -m semif_agent.cli dashboard [--port 8765] [--host 0.0.0.0] [--replay]
+python -m semif_agent.cli gateway [--platform simplex] [--dashboard]
+python -m semif_agent.cli bridge [--name simplex]
+```
+
+On a bootstrap box, use the venv and set `HF_HOME` to the checkout's cache:
+
+```sh
+REPO=~/repos/semif-agent
+HF_HOME="$REPO/.runtime/hf" "$REPO/.runtime/venv/bin/python" -m semif_agent.cli run
+```
+
+### REPL
+
+Type a request, or one of the meta-commands:
+
+```
+busy <text>   mark a current process (so preemption can be demonstrated)
+idle          clear the current process
+status        current process + queue
+skills        skill tree
+dream         cost report
+relabel <id> <outcome>
+restart <category> <skill>
+repairs       list pending repair offers
+repair <offer-id> [retry|repair_skill|ask_user|no_repair]
+quit
+```
+
+Authoring questions and repair offers are printed after each turn; answer them
+inline.
+
+### Scripted mode
+
+`--script file.jsonl` submits each `{"text": ..., "source": ...}` row, then
+drains the queue.
+
+### Dashboard
+
+A stdlib HTTP server serving a Redux-DevTools-style inspector: static skill tree,
+run flow with decisions/events and dream costs, status, and write endpoints.
+
+```
+GET  /api/trace /api/tree /api/dream /api/status /api/questions /api/repairs
+POST /api/submit /api/answer /api/questions /api/restart /api/repair /api/relabel
+```
+
+Live mode warms the engine; `--replay` reads the logs without loading SemIf
+(submit degrades to a JSON error). Binds `127.0.0.1:8765` by default.
+
+### Messenger gateway (SimpleX)
+
+`cli gateway` connects to the local `simplex-chat` daemon over its JSON WebSocket
+API and feeds authorized DM text through the normal gate/score/queue/dispatch
+pipeline. Results, authoring questions and repair offers go back to the
+originating chat. It is **default-deny**: put allowed contactIds or display names
+in `gateway.simplex.allowed_users`. Requires the optional `websockets` package
+(lazy import; the gateway refuses to start without it).
+
+> **Gateway isolation is non-negotiable.** The gateway takes commands and sends
+> replies — nothing else. It never reads history, shows or creates invite links,
+> or composes messages. That is messaging UX and lives in the bridges.
+
+### Bridge services
+
+`cli bridge` runs standalone bridges: each is a process that stands up a small,
+token-guarded localhost HTTP API in front of one third-party system and owns its
+own daemon/profile. Generated skill bodies call them like any HTTP service (base
+URL from a config var), so they never speak a native protocol directly.
+
+The first bridge is **SimpleX** (`semif_agent/bridges/simplex.py`), with its own
+simplex-chat daemon separate from the gateway's. Its HTTP surface:
+
+```
+GET  /health
+GET  /contacts
+GET  /inbox            # peek buffered inbound DMs
+GET  /inbox/next?contact=<id>   # pop oldest unread
+GET  /address          # show/create the contact link (503 not connected, 502 failure)
+POST /send {"recipient": "<id|display_name>", "text": "..."}
+```
+
+`simplex_bridge_url` (top-level config) is what skills call; the bridge catalog
+is injected into every codegen prompt via `describe_bridges()`, so it is the
+single source of bridge specifics. Adding a bridge = a class + a config block +
+a `CATALOG` entry.
+
+### Dream report
+
+```sh
+HF_HOME=... python -m semif_agent.cli dream
+```
+
+Prints row counts, weighted cross-entropy, accuracy, ECE and the highest-cost
+rows.
+
+---
+
+## Skills in detail
+
+A skill is one specific, single-purpose action reachable by category → skill
+navigation. It is three things:
+
+1. a **manifest** (navigable description — `name`, `category`, `description`,
+   plus optional `allowed_inputs`, `actions`, `cost_budget`, `decision_log_ref`);
+2. a **code body** (`predict` / `act`);
+3. an **`INTEGRATION` declaration** (service / transport / config_vars).
+
+`SKILL.md` is the authoritative body contract and is fed verbatim to the codegen
+model. It requires: perform the real action; stdlib transports only
+(`urllib`/`http.client`, `imaplib`/`smtplib`/`poplib`, `subprocess`, file I/O);
+no mocking; data from `ctx.config` (never embedded or fabricated); request
+clarification via `needs_input` when requirements are unclear; write files only
+under configured data dirs; fail fast; and declare a consistent `INTEGRATION`.
+
+`TESTGEN.md` is the separate contract for tests. A generated test is a
+**hermetic mechanics check** — inline fixtures, a loopback `http.server` for HTTP
+bodies, no external network, no `mock_data.json`. Passing it proves the code
+runs, not that the live integration works. That is what the real run and the
+repair loop are for.
+
+**Seeds** (`seeds/`) ship real starter integrations in the exact generated
+folder format, plus a `manifest.json`. `merge_seed_store` loads them into every
+tree at startup; recorded config is written to the runtime store, so the
+committed seed never holds secrets.
+
+- `calendar.next_event` — next upcoming event from Nextcloud CalDAV (recurring
+  events expanded server-side); config vars `nextcloud_url`,
+  `nextcloud_username`, `nextcloud_app_password`.
+- `simplex.next_message` — read the next unread message via the forwarding
+  bridge.
+- `simplex.connect_link` — show/create the forwarding bot's contact link.
+
+---
+
+## Testing
+
+```sh
+# anywhere, fast, stdlib only
+python3 -m pytest tests/ -q --ignore=tests/integration
+
+# staging box only: real SemIf + real ollama
+~/repos/semif-agent/.runtime/venv/bin/python -m pytest tests/integration -q -s
+```
+
+Unit tests use the `ScriptedEngine` double (`tests/conftest.py`) to drive
+scheduling mechanics without a GGUF; data-structure tests cover queue ordering,
+dream cost and contract serialization. Integration tests exercise the real
+engine + LLM end to end and take ~100 s on the staging box.
+
+**Fixtures are not the runtime.** Skill tests use real local endpoints (a
+loopback server, never a mock); a real run is the only proof an integration
+works.
+
+---
+
+## Roadmap / status
+
+**Done.** Core loop, urgency queue, skill tree, real SemIf assessment, decision
+logging, `dream` cost pass, REPL + JSONL CLI; live `create_category` /
+`create_skill` with the async authoring pipeline (elicitation → body → fidelity →
+contract → test → auto-run → re-dispatch); tiered config + first-fire
+collection; runtime repair loop; the closed `response` canned tree; real
+integrations with `INTEGRATION` declarations; the SimpleX command gateway and the
+standalone SimpleX bridge + seeds.
+
+**Next.** Real fine-tuning from grounded decision rows ("dreaming") with
+validation + pinned-revision swap; queue persistence; more intake sources
+(events/timers); dashboard run-requeue cross-linking; per-decision thresholds and
+calibration; more bridges; a richer SimpleX read path (message history / true
+unread, contact-list refresh, a `simplex.send_message` seed). See `AGENTS.md` for
+the detailed backlog and known gotchas.
