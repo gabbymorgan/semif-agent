@@ -22,7 +22,9 @@ from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
+from semif_agent.skill import RunResult
 from semif_agent.scheduler import (
+    DispatchResult,
     PendingQuestion,
     RepairOffer,
     Scheduler,
@@ -42,6 +44,7 @@ from semif_agent.skills import (
     build_skill_prompt,
     build_skills,
     build_tree,
+    confirm_skill_fit,
     generate_category,
     generate_skill,
     merge_registry,
@@ -543,19 +546,125 @@ def test_gate_decision_carries_expectation_and_capabilities():
         Request("tell me the next event in my nextcloud calendar"), tree
     )
     assert "tell me the next event in my nextcloud calendar" in decision.state
-    assert "expects it to handle this input" in decision.state
-    assert "reading or looking up information" in decision.state
+    assert "perform a task" in decision.state
+    assert "look something up" in decision.state
     assert "calendar: next_event" in decision.state
     assert decision.question == "Should the agent handle this input?"
     assert [o.id for o in decision.options] == ["yes", "no"]
-    assert "looking something up" in decision.options[0].description
+    assert "performing an action" in decision.options[0].description
     assert "greeting" in decision.options[1].description
+
+
+def test_gate_decision_accepts_imperative_tasks_with_no_matching_skill():
+    """A request to do something the tree has no skill for is still actionable —
+    the agent learns it. Regression: 'send a simplex message to pepper saying
+    hi' scored 0.135 and was dropped as 'no actionable request' because the gate
+    context only vouched for lookups."""
+    tree = build_tree(build_skills({"skills": {}}))
+    tree["simplex"] = [
+        Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
+    ]
+    decision = build_gate_decision(Request("send a simplex message to pepper saying hi"), tree)
+    assert "even if no skill matches yet" in decision.state
 
 
 def test_gate_decision_empty_tree_still_builds():
     decision = build_gate_decision(Request("hello"), {})
     assert "(none yet)" in decision.state
     assert decision.options[0].id == "yes"
+
+
+def test_navigate_leaf_offers_create_for_unmatched_action(tmp_path):
+    """The create_skill fallback must describe the *trigger* (no skill performs
+    the action), not the mechanism ('suggest creating a new skill'): the
+    decision model only sees option descriptions, and the generic wording lost
+    0.03-0.06 to a read skill on send requests."""
+
+    class Recording:
+        def __init__(self):
+            self.request = None
+
+        def call(self, request):
+            from semif_agent.decisions import DecisionResult
+
+            self.request = request
+            ids = [o.id for o in request.options]
+            return DecisionResult(request=request, option_ids=ids, probabilities=[1.0] * len(ids))
+
+    engine = Recording()
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = {"simplex": [Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")]}
+    navigate(engine, log, trace, Request("send a simplex message"), tree)
+    create = next(o for o in engine.request.options if o.id == "create_skill")
+    assert "No existing skill performs this action" in create.description
+    assert "action" in engine.request.question
+
+
+def test_confirm_skill_fit_returns_true_when_action_matches(tmp_path):
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = ScriptedEngine(choices={"same action": "same"})
+    skill = Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")
+    assert confirm_skill_fit(engine, log, trace, Request("read the next simplex message"), skill) is True
+    row = log.read()[-1]
+    assert row["extra"]["phase"] == "navigate:intent"
+    assert row["selected"] == "same"
+
+
+def test_confirm_skill_fit_returns_false_on_mismatch(tmp_path):
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = ScriptedEngine(choices={"same action": "different"})
+    skill = Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")
+    assert confirm_skill_fit(engine, log, trace, Request("send a simplex message"), skill) is False
+    assert any(e["kind"] == "intent_guard" and e["fits"] is False for e in trace.read())
+
+
+def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
+    """A routed skill whose action doesn't match the request must not run: the
+    guard sends dispatch to create_skill in the same category instead."""
+    scheduler = _scheduler(
+        tmp_path,
+        choices={"same action": "different"},
+    )
+    scheduler.tree["simplex"] = [
+        Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
+    ]
+    scheduler._create_skill = lambda request, category: DispatchResult(
+        kind="create_skill", summary="authoring requested", skill="send_message"
+    )
+    request = Request("send a simplex message to pepper")
+    result = scheduler._dispatch(request)
+    assert result.kind == "create_skill"
+    phases = [r["extra"].get("phase") for r in scheduler.log.read()]
+    assert "navigate:intent" in phases
+
+
+def test_dispatch_intent_match_runs_skill(tmp_path):
+    scheduler = _scheduler(tmp_path, choices={"same action": "same"})
+
+    def predict(ctx, request):
+        return Prediction(text="")
+
+    def act(ctx, request, prediction):
+        return ActionResult(action_log="read the next message", new_state="read")
+
+    scheduler.tree.pop("response", None)
+    scheduler.tree["simplex"] = [
+        Skill(
+            name="next_message",
+            category="simplex",
+            description="Read the next SimpleX message.",
+            predict=predict,
+            act=act,
+        ),
+    ]
+    request = Request("read the next simplex message")
+    result = scheduler._dispatch(request)
+    assert result.kind == "ran"
+    assert result.skill == "next_message"
+
 
 
 def test_dispatch_create_category_without_engine_is_fatal(tmp_path):
@@ -1084,3 +1193,29 @@ def test_resolve_repair_unknown_offer_errors(tmp_path):
     status, detail = scheduler.resolve_repair("missing")
     assert status == "error"
     assert "no repair offer" in detail
+
+
+def test_exhausted_reentry_offers_repair(tmp_path):
+    """A failure whose retry is refused because the reentry budget is spent must
+    still surface a repair offer. Before, `updated_request` stayed truthy so the
+    offer was skipped and the failure vanished after the retry ladder."""
+    scheduler = _scheduler(tmp_path)
+    _install_tracking_stub(scheduler)
+    skill = scheduler.tree["tracking"][0]
+    skill.predict = lambda ctx, request: Prediction(text="")
+    skill.act = lambda ctx, request, prediction: ActionResult(
+        action_log="connection refused", new_state="unchanged"
+    )
+    request = Request("track my package")
+    request.reentries = scheduler.max_reentries
+    outcome = RunResult(
+        skill="tracking.check",
+        success=False,
+        summary="failed",
+        action_log="connection refused",
+        new_state="unchanged",
+        updated_request="track my package",
+    )
+    scheduler._finish_run(skill, request, outcome)
+    assert not any(e["kind"] == "requeued" for e in scheduler.trace.read())
+    assert any(e["kind"] == "repair_offered" for e in scheduler.trace.read())

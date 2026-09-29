@@ -46,6 +46,7 @@ from .skills import (
     build_skills,
     build_tree,
     compose_state,
+    confirm_skill_fit,
     generate_category,
     generate_skill,
     materialize_skill,
@@ -82,10 +83,10 @@ def build_gate_decision(request: Request, tree: dict[str, list[Skill]]) -> Decis
     capabilities = tree_summary(tree)[:GATE_CAPABILITY_CHARS] or "  (none yet)"
     state = (
         f"User input: {request.text}\n"
-        "[Context: the user is talking to a personal task agent and expects it to "
-        "handle this input. The agent performs real tasks through its skills; "
-        "reading or looking up information from a configured service is a real "
-        "task, not small talk.]\n"
+        "[Context: the user is talking to a personal task agent. Any imperative "
+        "request to perform a task — send, message, tell, check, create, remind, "
+        "or look something up — must be handled, even if no skill matches yet. "
+        "Only chatter, thanks, and bare greetings should be ignored.]\n"
         f"[Available skills:\n{capabilities}]"
     )
     return DecisionRequest(
@@ -94,8 +95,8 @@ def build_gate_decision(request: Request, tree: dict[str, list[Skill]]) -> Decis
         options=[
             Option(
                 GATE_YES,
-                "Yes — do what it asks, including looking something up or "
-                "reporting information using the agent's skills.",
+                "Yes — do what it asks, including looking something up, reporting "
+                "information, or performing an action using the agent's skills.",
             ),
             Option(
                 "no",
@@ -462,6 +463,16 @@ class Scheduler:
             return self._dispatch_skill(request, created.skill, weight)
         if isinstance(navigation, CreateSkill):
             return self._dispatch_skill(request, navigation.category, weight)
+        if not confirm_skill_fit(
+            self.engine, self.log, self.trace, request, navigation, self.tau
+        ):
+            self.trace.append(
+                "intent_mismatch",
+                request.id,
+                selected_skill=f"{navigation.category}.{navigation.name}",
+                chosen="create_skill",
+            )
+            return self._dispatch_skill(request, navigation.category, weight)
         return self._run_skill(navigation, request)
 
     def _dispatch_skill(
@@ -633,13 +644,15 @@ class Scheduler:
             action_log=outcome.action_log,
             updated_request=outcome.updated_request,
         )
+        requeued = False
         if outcome.updated_request and request.reentries < self.max_reentries:
             child = _requeue(request, outcome.updated_request)
             self.queue.push(child, 0.5)
             self.trace.append("requeued", request.id, text=outcome.updated_request)
             if self.on_request_requeued is not None:
                 self.on_request_requeued(request.id, child.id)
-        if not outcome.success and not outcome.updated_request:
+            requeued = True
+        if not outcome.success and not (outcome.updated_request and requeued):
             self._propose_repair(skill, request, outcome)
         return DispatchResult(
             kind="ran",

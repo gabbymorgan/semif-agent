@@ -574,10 +574,14 @@ def navigate(
         )
         return CreateCategory()
     skills = tree[category]
-    create_skill = Option("create_skill", "Suggest creating a new skill.")
+    create_skill = Option(
+        "create_skill",
+        "No existing skill performs this action; create a new skill for it.",
+    )
     leaf = DecisionRequest(
         state=compose_state(request, current=category),
-        question=f"Within {category}, which skill?",
+        question=f"Which {category} skill performs the action this request asks for? "
+        "Choose create_skill if none does.",
         options=[Option(s.name, s.description) for s in skills] + [create_skill],
     )
     if not skills:
@@ -608,6 +612,64 @@ def navigate(
         )
         return CreateSkill(category=category)
     return next(s for s in skills if s.name == pick)
+
+
+def confirm_skill_fit(
+    engine: SemIfEngine,
+    log: DecisionLog,
+    trace: TraceLog,
+    request: Request,
+    skill: Skill,
+    tau: float = 0.6,
+) -> bool:
+    """Does this skill's action actually match what the request asks for?
+
+    Navigation picks the closest leaf; a seeded read skill can outscore the
+    generic "create a new skill" branch on a request whose verb (send) no
+    existing action performs. This one SemIf decision guards against silently
+    running the wrong skill: a mismatch sends dispatch to author a new leaf
+    instead. Wording tuned against the real model: comparing the two *actions*
+    ("different action") is unambiguous where "can this serve the request" was
+    not — e.g. "message Sam" (an implicit send in instant-messaging syntax)
+    reads as a different action from "read the next message". Do not add an
+    instant-messaging context hint: it over-fires and pulls read phrasings to
+    the send side.
+    """
+    decision = DecisionRequest(
+        state=(
+            f"Requested action: {request.text}\n"
+            f"Action of the existing skill: {skill.description}"
+        ),
+        question="Compare the requested action and the skill's action. Are they the same action?",
+        options=[
+            Option("same", "Same action."),
+            Option(
+                "different",
+                "Different action: the skill does not do what the user asks.",
+            ),
+        ],
+    )
+    result = engine.call(decision)
+    log.append(
+        decision,
+        result,
+        extra={
+            "phase": "navigate:intent",
+            "run_id": request.id,
+            "skill": f"{skill.category}.{skill.name}",
+        },
+    )
+    fits = result.prob("same") >= tau
+    trace.append(
+        "intent_guard",
+        request.id,
+        category=skill.category,
+        skill=skill.name,
+        selected=result.selected,
+        probs=result.probs,
+        fits=fits,
+    )
+    return fits
 
 
 def tree_summary(tree: dict[str, list[Skill]]) -> str:

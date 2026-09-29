@@ -26,6 +26,7 @@ from semif_agent.scheduler import SkillWrite
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
+    CreateSkill,
     Prediction,
     Skill,
     SkillDraft,
@@ -35,6 +36,7 @@ from semif_agent.skills import (
     generate_category,
     generate_skill,
     materialize_skill,
+    navigate,
 )
 
 
@@ -160,17 +162,84 @@ def test_gate_accepts_information_requests_and_rejects_noise(tmp_path):
         "tell me the next even in my calendar",
         "tell me the next event in my personal calendar",
     ]
+    # Imperative tasks with no matching skill are still actionable: the agent
+    # learns them. Regression: "send a simplex message to pepper saying hi"
+    # scored 0.135 and was dropped as "no actionable request".
+    tasks = [
+        "send a simplex message to pepper saying hi",
+        "send a simplex message to pepper that says hello back to them",
+        "send a new simplex message to pepper: hey",
+        "send a simplex message",
+        "email Sam about lunch",
+    ]
     noise = ["hello there", "thanks!", "the sky is blue", "what's up"]
-    for text in lookups:
+    for text in lookups + tasks:
         accepted = scheduler._contains_request(Request(text))
         row = scheduler.log.read()[-1]
-        print(f"[lookup] {row['predicted_probs']} accepted={accepted} {text!r}")
-        assert accepted, f"gate dropped a lookup: {text!r}"
+        print(f"[task] {row['predicted_probs']} accepted={accepted} {text!r}")
+        assert accepted, f"gate dropped a task: {text!r}"
     for text in noise:
         accepted = scheduler._contains_request(Request(text))
         row = scheduler.log.read()[-1]
         print(f"[noise] {row['predicted_probs']} accepted={accepted} {text!r}")
         assert not accepted, f"gate accepted noise: {text!r}"
+
+
+def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
+    """A send request must navigate to create_skill, not silently to the read
+    skill that merely shares the word 'message'.
+
+    Regression: every send phrasing picked simplex.next_message (P 0.46-0.73)
+    while the create_skill fallback scored only 0.007-0.09, because its option
+    description named the mechanism ("suggest creating a new skill") instead of
+    the trigger. This asserts the navigation outcome only — no codegen write.
+    """
+    config = load_config()
+    require_real(config)
+    _isolate_runtime(config, tmp_path)
+    scheduler, config = build_scheduler(config)
+    scheduler.tree["simplex"] = [
+        Skill(
+            name="next_message",
+            category="simplex",
+            description="Read the next unread SimpleX message through the forwarding bridge.",
+        ),
+        Skill(
+            name="connect_link",
+            category="simplex",
+            description="Show (creating if needed) the SimpleX contact link others use to connect to this agent.",
+        ),
+    ]
+
+    for text in [
+        "send a simplex message to pepper saying hi",
+        "send a new simplex message to pepper: hey",
+    ]:
+        before = len(scheduler.log.read())
+        result = navigate(
+            scheduler.engine,
+            scheduler.log,
+            scheduler.trace,
+            Request(text),
+            scheduler.tree,
+        )
+        leaf_rows = [
+            r for r in scheduler.log.read()[before:]
+            if r.get("extra", {}).get("phase") == "navigate:leaf"
+        ]
+        print(f"[nav] {leaf_rows[-1]['predicted_probs'] if leaf_rows else '-'} :: {text!r} -> {result}")
+        assert isinstance(result, CreateSkill), f"send must route to create_skill, got {result!r}"
+        assert result.category == "simplex"
+
+    read = navigate(
+        scheduler.engine,
+        scheduler.log,
+        scheduler.trace,
+        Request("read the next simplex message"),
+        scheduler.tree,
+    )
+    print(f"[nav control] read -> {read}")
+    assert getattr(read, "name", None) == "next_message", "a read request must still route to the read skill"
 
 
 def test_busy_choice_path(tmp_path):
