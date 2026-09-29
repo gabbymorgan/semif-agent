@@ -33,24 +33,37 @@ def known_infos() -> list[BridgeInfo]:
 def describe_bridges() -> str:
     """A prompt block describing every available bridge service.
 
-    Injected into the skill-body and elicitation prompts so codegen knows which
-    real services it may build a skill against, how to reach each one, and which
-    `ctx.config` variable carries its URL. Static — no bridge needs to be
-    running or enabled.
+    Injected into the skill-body, retry, regen, elicitation, and testgen
+    prompts so codegen knows which real services it may build a skill against,
+    how to reach and authenticate to each one, and which `ctx.config` variables
+    carry its URL, token, and other values. This is the single source of bridge
+    specifics — SKILL.md/TESTGEN.md carry only the generic pattern. Static: no
+    bridge needs to be running or enabled.
     """
     lines = [
         "Available bridge services (call these over HTTP with urllib.request; "
-        "never speak a service's native protocol directly):",
+        "never speak a service's native protocol directly; read every value "
+        "from ctx.config):",
     ]
     for info in known_infos():
-        lines.append(f"- {info.name}: {info.description}")
-        lines.append(f"    config var: {info.url_config_var}")
+        lines.append(f"- {info.name} (service: {info.service}): {info.description}")
+        lines.append(f"    base URL config var: {info.url_config_var}")
+        if info.auth_header and info.auth_config_var:
+            lines.append(
+                f"    auth: send the value of {info.auth_config_var} in the "
+                f"{info.auth_header} header when it is set"
+            )
+        docs = dict(info.config_var_docs)
         if info.config_vars:
-            other = [v for v in info.config_vars if v != info.url_config_var]
-            if other:
-                lines.append(f"    other config vars: {', '.join(other)}")
-        for endpoint in info.endpoints:
-            lines.append(f"    {endpoint}")
+            lines.append("    config vars:")
+            for name in info.config_vars:
+                description = docs.get(name)
+                suffix = f" — {description}" if description else ""
+                lines.append(f"      - {name}{suffix}")
+        if info.endpoints:
+            lines.append("    endpoints:")
+            for endpoint in info.endpoints:
+                lines.append(f"      - {endpoint}")
     return "\n".join(lines) + "\n"
 
 

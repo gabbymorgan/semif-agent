@@ -124,7 +124,8 @@ class SkillDraft:
     `requirements` maps elicitation questions (asked of the human during
     authoring) to their answers; they are fed to the body-writer so the body
     reflects the refined product goal. `integration` carries the service and
-    transport the answers point at, so the body writer implements exactly that.
+    transport the answers point at; it is fed to the body writer as an advisory
+    hint only — the SKILL.md contract, request, and requirements still win.
     """
 
     name: str

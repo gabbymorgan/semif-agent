@@ -32,18 +32,51 @@ class SimplexBridge(BridgeService):
         ),
         url_config_var="simplex_bridge_url",
         endpoints=(
-            "GET /health -> {\"ok\": true} — the bridge is up",
-            "GET /contacts -> {\"contacts\": [{\"id\", \"display_name\"}]}",
-            "GET /inbox -> peek buffered inbound messages (does not consume)",
-            "GET /inbox/next?contact=<id> -> pop the oldest unread message for a "
-            "contact (or any contact) -> {\"message\": {...}|null}",
-            "GET /address -> the agent's SimpleX contact link "
-            "(creates it on first call) -> {\"short_link\", \"full_link\", "
-            "\"created\"}",
+            "GET /health -> 200 {\"ok\": true, \"platform\": \"simplex\"} — the "
+            "bridge is up",
+            "GET /contacts -> 200 {\"contacts\": [{\"id\", \"display_name\"}]} — "
+            "contacts learned from inbound messages",
+            "GET /inbox -> 200 {\"messages\": [{\"id\", \"contact_id\", "
+            "\"display_name\", \"text\", \"received_at\"}]} — peek buffered "
+            "inbound messages; does not consume",
+            "GET /inbox/next?contact=<id> -> 200 {\"message\": {...}|null} — pop "
+            "the oldest unread message (optionally from one contact); null means "
+            "none buffered. The bridge owns the read cursor",
+            "GET /address -> 200 {\"short_link\", \"full_link\", \"created\"} — "
+            "the agent's contact link; creates it on first call. 503 when the "
+            "daemon is not connected, 502 when the lookup fails",
             "POST /send {\"recipient\": \"<id|display_name>\", \"text\": \"...\"} "
-            "-> {\"ok\", \"contact_id\"}",
+            "-> 200 {\"ok\": true, \"contact_id\": \"<id>\"}; 400 {\"error\": "
+            "\"...\"} on a missing/invalid field or an unknown recipient",
+            "any request -> 401 {\"error\": \"unauthorized\"} when the token is "
+            "configured and the auth header is missing or wrong",
         ),
-        config_vars=("simplex_bridge_url", "simplex_default_contact"),
+        config_vars=(
+            "simplex_bridge_url",
+            "simplex_default_contact",
+            "simplex_bridge_token",
+        ),
+        config_var_docs=(
+            (
+                "simplex_bridge_url",
+                "Base URL of the local SimpleX forwarding bridge "
+                "(e.g. http://127.0.0.1:5227); never hardcode it in the body.",
+            ),
+            (
+                "simplex_default_contact",
+                "Optional default SimpleX contact (contact id or display name) "
+                "used when the request does not already make the conversation "
+                "clear; leave blank to always choose among senders.",
+            ),
+            (
+                "simplex_bridge_token",
+                "Shared secret for the bridge, if one is configured; sent as the "
+                "X-Semif-Token header. Leave blank when the bridge requires no "
+                "auth.",
+            ),
+        ),
+        auth_header="X-Semif-Token",
+        auth_config_var="simplex_bridge_token",
     )
 
     def __init__(self, config: dict | None = None, trace=None, daemon=None):

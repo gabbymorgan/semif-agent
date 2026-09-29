@@ -75,10 +75,11 @@ A stdlib-only Python script that:
   headers, body) where practical. The loopback address exists only in the test;
   the body must read its endpoint from config.
 - For a messaging skill (a body that talks to a bridge service), stand up a
-  loopback server implementing the bridge endpoints the body uses (`GET /inbox`,
-  `GET /inbox/next?contact=`, `GET /address`, `POST /send`) and assert the body
-  built the real requests. Never connect to a real `simplex-chat` daemon or a
-  live bridge.
+  loopback server implementing the bridge endpoints the body uses (the bridge
+  catalog injected into this prompt lists them) and assert the body built the
+  real requests. If the catalog names an auth header, set the fixture token in
+  the fixture config and assert the body sent that header. Never connect to a
+  real service daemon or a live bridge.
 - For non-HTTP transports (IMAP, SMTP, subprocess, ...), exercise config
   resolution, argument construction, and error paths (missing or misconfigured
   values) without performing the real I/O.

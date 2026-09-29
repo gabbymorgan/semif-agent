@@ -22,7 +22,7 @@ from semif_agent.skills import ActionResult, Prediction
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
-    "config_vars": ["simplex_bridge_url"],
+    "config_vars": ["simplex_bridge_url", "simplex_bridge_token"],
 }
 
 TIMEOUT_SECONDS = 30
@@ -39,8 +39,15 @@ def _base(ctx):
     return url
 
 
+def _headers(ctx):
+    token = str(ctx.config.get("simplex_bridge_token", "") or "").strip()
+    return {"X-Semif-Token": token} if token else {}
+
+
 def _get(ctx, path):
-    request = urllib.request.Request(_base(ctx) + path)
+    request = urllib.request.Request(
+        _base(ctx) + path, headers=_headers(ctx)
+    )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))

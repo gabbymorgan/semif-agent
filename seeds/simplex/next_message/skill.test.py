@@ -42,6 +42,7 @@ class FakeEngine:
 class BridgeHandler(BaseHTTPRequestHandler):
     messages = []
     requests = []
+    tokens = []
 
     def _send(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
@@ -53,6 +54,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.requests.append(self.path)
+        self.tokens.append(self.headers.get("X-Semif-Token"))
         url = urllib.parse.urlparse(self.path)
         if url.path == "/inbox":
             self._send({"messages": list(self.messages)})
@@ -72,7 +74,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 
 def start_server(messages):
-    handler = type("Handler", (BridgeHandler,), {"messages": list(messages), "requests": []})
+    handler = type(
+        "Handler",
+        (BridgeHandler,),
+        {"messages": list(messages), "requests": [], "tokens": []},
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, handler, f"http://127.0.0.1:{server.server_address[1]}"
@@ -88,8 +94,12 @@ def message(identifier, contact, name, text):
     }
 
 
-def config(url, default=""):
-    return {"simplex_bridge_url": url, "simplex_default_contact": default}
+def config(url, default="", token=""):
+    return {
+        "simplex_bridge_url": url,
+        "simplex_default_contact": default,
+        "simplex_bridge_token": token,
+    }
 
 
 def test_multiple_senders_uses_semif_decision():
@@ -192,12 +202,29 @@ def test_unreachable_bridge_fails_honestly():
     print(action.action_log)
 
 
+def test_auth_token_is_sent_when_configured():
+    server, handler, url = start_server([message("m1", "4", "Alice", "hi")])
+    try:
+        engine = FakeEngine()
+        ctx = ActionContext(engine=engine, config=config(url, token="sekret"))
+        request = Request("read my next simplex message")
+        prediction = skill.predict(ctx, request)
+        action = skill.act(ctx, request, prediction)
+        assert "hi" in action.action_log, action.action_log
+        assert set(handler.tokens) == {"sekret"}, handler.tokens
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main():
     test_multiple_senders_uses_semif_decision()
     test_default_contact_skips_decision()
     test_single_sender_needs_no_decision()
     test_empty_inbox_is_reported_honestly()
     test_unreachable_bridge_fails_honestly()
+    test_auth_token_is_sent_when_configured()
     print("ok")
 
 

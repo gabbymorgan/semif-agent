@@ -74,6 +74,7 @@
   "skill_bodies": "data/skills",
   "skill_seeds": "seeds",
   "simplex_bridge_url": "http://127.0.0.1:5227",
+  "simplex_bridge_token": "",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",

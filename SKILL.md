@@ -154,9 +154,13 @@ talk to. Declaring a transport the body does not use is a broken skill.
 
 Some real systems are reached through a **bridge service**: a standalone local
 process that stands up a small, token-guarded HTTP API in front of the system
-and owns its native protocol and credentials. The concrete catalog of bridges
-available to you is injected into the prompt at authoring time (render it with
-`semif_agent.bridges.describe_bridges()`); read it rather than guessing.
+and owns its native protocol and credentials. The concrete catalog of bridges —
+which services exist, their base-URL config var, auth, config vars, and the
+exact endpoints with their request/response/error shapes — is injected into the
+prompt at authoring time (render it with
+`semif_agent.bridges.describe_bridges()`); read it rather than guessing. This
+section is only the generic pattern; the catalog is the source of the
+bridge-specific details.
 
 A body must never speak a service's native protocol directly — no WebSocket to
 `simplex-chat`, no direct daemon access. It calls the bridge's HTTP API with the
@@ -165,47 +169,36 @@ integration:
 
 ```python
 INTEGRATION = {
-    "service": "simplex",
+    "service": "<the bridge's service id, from the catalog>",
     "transport": "http",
-    "config_vars": ["simplex_bridge_url", "simplex_default_contact"],
+    "config_vars": ["<base URL config var>", "<any other config var it reads>"],
 }
 ```
 
-For example, the `simplex` bridge (SimpleX messaging) exposes, at the base URL
-in `simplex_bridge_url`:
-
-| Request                                | Purpose                                                            |
-| -------------------------------------- | ------------------------------------------------------------------ |
-| `GET  <base>/health`                   | `{"ok": true}` — the bridge is up.                                 |
-| `GET  <base>/contacts`                 | `{"contacts": [{"id", "display_name"}]}` — known contacts.         |
-| `GET  <base>/inbox`                    | Peek buffered inbound messages; does not consume.                  |
-| `GET  <base>/inbox/next?contact=<id>`  | Pop the oldest unread message (optionally from one contact).       |
-| `GET  <base>/address`                  | The agent's contact link; creates it on first call.                |
-| `POST <base>/send`                     | `{"recipient": "<id\|display_name>", "text": "..."}` — send.        |
-
-`GET /inbox` returns `{"messages": [{"id", "contact_id", "display_name", "text",
-"received_at"}]}`; `GET /inbox/next` returns `{"message": {...} | null}`, where
-`null` means nothing is buffered. `GET /address` returns
-`{"short_link", "full_link", "created"}`. `POST /send` returns
-`{"ok": true, "contact_id": "<id>"}`. The bridge owns the read cursor, so a
-read skill needs no state of its own.
-
 Rules:
 
-- **Recipient selection is a SemIf decision.** When more than one conversation
-  is relevant (e.g. several have buffered messages), resolve which one with a
-  `ctx.engine.call(...)` sub-decision over the contacts — mirroring how
-  `calendar.next_event` picks a calendar. Use `simplex_default_contact` only as
-  the configured fallback when the request does not already make it clear.
+- **Read every value from `ctx.config`.** The base URL, any token, and any
+  default (recipient/contact/target) come from the config vars the catalog
+  lists. Never hardcode a host, port, or bridge address in the body.
+- **Send the auth header when the catalog lists one.** If the catalog names an
+  auth config var and header, read the var and send it in that header when it is
+  set; omit the header when the value is blank.
+- **Resolve the recipient/target with a SemIf sub-decision.** When more than one
+  conversation or target is relevant, resolve which one with a
+  `ctx.engine.call(...)` sub-decision over the catalog's list endpoint (e.g.
+  contacts or buffered senders), mirroring how `calendar.next_event` picks a
+  calendar. Use the catalog's default config var only as the configured
+  fallback when the request does not already make it clear.
 - **Sending requires user intent.** Send only because the request (or the
   requirements) asks for it. Never broadcast, never message a contact the user
   did not name or confirm, and never fabricate a message body as a working
   value.
 - **Report real failures.** A bridge error, an unknown recipient, or an empty
-  inbox is reported honestly in `action_log` / `new_state`; never claim a
-  message was sent or read when it was not.
-- The bridge is local-only, but its URL still comes from `ctx.config` — never
-  hardcode a host, port, or bridge address in the body.
+  inbox is reported honestly in `action_log` / `new_state` — use the error
+  statuses the catalog documents. Never claim a message was sent or read when it
+  was not.
+- **The bridge owns its own state.** Read cursors and similar state live in the
+  bridge, not in the body; the body keeps no working state of its own.
 
 ## Conventions
 

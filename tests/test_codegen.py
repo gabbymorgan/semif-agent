@@ -23,6 +23,7 @@ from semif_agent.codegen import (
     _retry_prompt,
     build_elicitation_prompt,
     build_skill_body_prompt,
+    build_testgen_base_prompt,
     extract_integration,
     generate_data_contract,
     generate_requirements,
@@ -42,6 +43,7 @@ from semif_agent.codegen import (
     run_skill_test,
     skill_contract_ref,
 )
+from semif_agent.bridges.registry import describe_bridges
 from semif_agent.decisions import Request
 from semif_agent.skills import (
     Skill,
@@ -1681,12 +1683,14 @@ def test_skill_contract_lists_all_transports():
         assert transport in text
 
 
-def test_skill_contract_documents_bridge_services():
+def test_skill_contract_documents_bridge_pattern_only():
     text = read_skill_contract()
-    assert "simplex_bridge_url" in text
-    assert "/inbox/next" in text
-    assert "/send" in text
+    # The generic pattern lives in SKILL.md; the bridge specifics do not.
+    assert "describe_bridges()" in text
     assert "never speak a service's native protocol" in text
+    assert "simplex_bridge_url" not in text
+    assert "/inbox/next" not in text
+    assert "X-Semif-Token" not in text
 
 
 def test_body_directives_expose_bridge_services():
@@ -1704,6 +1708,8 @@ def test_body_prompts_require_real_action_and_integration():
     assert "Perform the real action" in joined
     assert "INTEGRATION" in joined
     assert "hermetic mechanics check" in joined
+    assert "service: simplex" in joined
+    assert "simplex_bridge_url" in joined
     retry = _retry_prompt(
         Request("check if the service is up"),
         "tracking",
@@ -1713,6 +1719,56 @@ def test_body_prompts_require_real_action_and_integration():
     )
     assert "INTEGRATION" in retry[1]["content"]
     assert BODY_DIRECTIVES in retry[1]["content"]
+    assert "service: simplex" in retry[1]["content"]
+
+
+def test_body_prompt_carries_the_advisory_integration_hint():
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(
+        name="probe",
+        description="Probe the service.",
+        integration={"service": "simplex", "transport": "http"},
+    )
+    messages = build_skill_body_prompt(
+        Request("send a message"), "messaging", draft, tree, "THE CONTRACT"
+    )
+    joined = messages[1]["content"]
+    assert "advisory only" in joined
+    assert "service=simplex" in joined
+    assert "transport=http" in joined
+
+
+def test_regen_prompt_includes_catalog_and_integration_hint():
+    from semif_agent.codegen import _regen_body_prompt
+
+    draft = SkillDraft(
+        name="probe",
+        description="Probe the service.",
+        integration={"service": "simplex", "transport": "http"},
+    )
+    messages = _regen_body_prompt(
+        Request("send a message"),
+        "messaging",
+        draft,
+        "THE CONTRACT",
+        GOOD_BODY,
+        {"error": "boom"},
+        reason_kind="run_failure",
+    )
+    joined = messages[1]["content"]
+    assert "service: simplex" in joined
+    assert "simplex_bridge_url" in joined
+    assert "service=simplex" in joined
+    assert BODY_DIRECTIVES in joined
+
+
+def test_testgen_base_prompt_includes_catalog():
+    messages = build_testgen_base_prompt(
+        Request("send a message"), "messaging", "send_message", GOOD_BODY, "THE CONTRACT"
+    )
+    joined = messages[1]["content"]
+    assert describe_bridges().strip() in joined
+    assert "simplex_bridge_url" in joined
 
 
 def test_retry_prompt_carries_requirements():

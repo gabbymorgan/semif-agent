@@ -286,12 +286,14 @@ simplex["home_channel"] = home_channel
 # The standalone SimpleX forwarding bridge owns its own daemon/profile
 # (simplex_chat.forward_port), separate from the command gateway, and serves the
 # invite-link / read / send HTTP API skills use. Expose its URL as the top-level
-# `simplex_bridge_url` so the data-contract config search auto-populates it.
+# `simplex_bridge_url` so the data-contract config search auto-populates it, and
+# mirror its optional shared secret as `simplex_bridge_token` for the auth header.
 bridge = cfg.setdefault("bridges", {}).setdefault("simplex", {})
 bridge_port = int(bridge.get("port", 5227))
 bridge["enabled"] = True
 bridge["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('forward_port', 5228)}"
 cfg["simplex_bridge_url"] = f"http://127.0.0.1:{bridge_port}"
+cfg["simplex_bridge_token"] = bridge.get("token", "") or ""
 simplex.pop("bridge", None)  # legacy key; forwarding is a separate service now
 json.dump(cfg, open(out, "w"), indent=2)
 PY

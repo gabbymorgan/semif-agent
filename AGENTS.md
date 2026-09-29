@@ -111,8 +111,13 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 declare INTEGRATION service/transport/config_vars);
                 parse/validate (compile + predict/act) + parse_integration /
                 infer_integration / integration_findings; the bridge catalog
-                (describe_bridges()) is injected into the body + elicitation
-                prompts; elicitation questions
+                (describe_bridges()) is injected into the body, retry, regen,
+                elicitation, and testgen prompts — it is the single source of
+                bridge specifics (service, base-URL var, auth header/token var,
+                config-var docs, endpoints with error shapes), while SKILL.md/
+                TESTGEN.md carry only the generic pattern; the advisory
+                elicitation integration hint rides on every body/retry/regen
+                prompt; elicitation questions
                 + integration hint; TESTGEN.md drives two shared-context calls
                 producing contract.json then skill.test.py (hermetic mechanics
                 test: inline fixtures, loopback http.server for HTTP bodies, no
@@ -519,7 +524,9 @@ CLI, unit tests (24) + box integration tests (2).
   working-tree contract differed from that commit; both degrade to `None`
   outside a git checkout. Recorded as `contract_ref`/`contract_dirty` on the
   `skill_writing` trace event; the dashboard shows `SKILL.md @ <ref>` with a `*`
-  when dirty.
+  when dirty. **Deferred:** this pointer covers only the generic pattern now that
+  bridge specifics live in the runtime catalog, not SKILL.md — recording a
+  catalog revision on the trace is future work.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the
@@ -771,9 +778,14 @@ CLI, unit tests (24) + box integration tests (2).
   codegen-authored skill body never speaks that system's native protocol.
   SimpleX is the first; adding a service means adding a class to
   `bridges/registry.py` `CATALOG` and a `config.example.json` block. The catalog
-  (`BridgeInfo`: name, description, URL config var, endpoints) is injected into
-  the codegen prompts via `describe_bridges()`, so the model knows what it can
-  build against and how.
+  (`BridgeInfo`: name, service, description, URL config var, other config vars
+  with one-line docs, auth header + token config var, and endpoints with
+  request/response/error shapes) is injected into every codegen prompt
+  (body/retry/regen/elicitation/testgen) via `describe_bridges()` and is the
+  single source of bridge specifics — SKILL.md/TESTGEN.md carry only the generic
+  pattern. The bridge's optional shared secret is mirrored to the top-level
+  `simplex_bridge_token` config var (bootstrap syncs it) so bodies can send the
+  `X-Semif-Token` header.
 - **Run mode.** `python -m semif_agent.cli bridge [--name simplex]` builds the
   scheduler (engine lazy, used only for trace) and runs the selected + enabled
   bridges until interrupted. Each bridge owns its service daemon: `SimplexBridge`

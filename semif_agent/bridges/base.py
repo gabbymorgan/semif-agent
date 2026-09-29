@@ -34,6 +34,13 @@ class BridgeInfo:
     endpoints: tuple[str, ...] = ()
     #: Other `ctx.config` keys a body built on this bridge may read.
     config_vars: tuple[str, ...] = field(default=())
+    #: One-line semantic description per config var: `(name, description)`.
+    #: Every entry in `config_vars` must be documented here.
+    config_var_docs: tuple[tuple[str, str], ...] = ()
+    #: Optional shared-secret header the bridge enforces when its token is set
+    #: (e.g. `X-Semif-Token`), and the top-level `ctx.config` var holding it.
+    auth_header: str = ""
+    auth_config_var: str = ""
 
 
 class BridgeService(ABC):

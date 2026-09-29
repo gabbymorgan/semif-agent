@@ -240,12 +240,29 @@ def test_stop_closes_the_daemon():
 def test_known_infos_include_simplex():
     infos = {info.name: info for info in known_infos()}
     assert "simplex" in infos
-    assert infos["simplex"].url_config_var == "simplex_bridge_url"
+    info = infos["simplex"]
+    assert info.service == "simplex"
+    assert info.url_config_var == "simplex_bridge_url"
+    assert info.auth_header == "X-Semif-Token"
+    assert info.auth_config_var == "simplex_bridge_token"
 
 
-def test_describe_bridges_names_the_service_and_config_var():
+def test_every_bridge_documents_its_config_vars_and_auth():
+    for info in known_infos():
+        docs = dict(info.config_var_docs)
+        assert set(info.config_vars) <= set(docs), info.name
+        assert all(description.strip() for description in docs.values()), info.name
+        if info.auth_header or info.auth_config_var:
+            assert info.auth_header and info.auth_config_var, info.name
+            assert info.auth_config_var in info.config_vars, info.name
+
+
+def test_describe_bridges_renders_service_auth_and_endpoints():
     text = describe_bridges()
     assert "simplex" in text
+    assert "service: simplex" in text
     assert "simplex_bridge_url" in text
+    assert "X-Semif-Token" in text
+    assert "simplex_bridge_token" in text
     assert "/inbox/next" in text
     assert "never speak" in text

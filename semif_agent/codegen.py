@@ -652,6 +652,24 @@ def _requirements_block(requirements: dict[str, str] | None) -> str:
     return f"Requirements gathered from the product owner:\n{lines}\n"
 
 
+def _integration_hint_block(draft: SkillDraft) -> str:
+    """Advisory integration hint from elicitation: service + transport.
+
+    Never overrides the request, requirements, or SKILL.md contract — it only
+    biases the body writer toward the integration the questions were aiming at.
+    """
+    integration = getattr(draft, "integration", None) or {}
+    service = integration.get("service")
+    transport = integration.get("transport")
+    if not service and not transport:
+        return ""
+    return (
+        "Elicitation pointed at this integration (advisory only: follow the "
+        "request, requirements, and contract if they disagree): "
+        f"service={service or 'unknown'}, transport={transport or 'unknown'}.\n"
+    )
+
+
 def build_skill_body_prompt(
     request: Request,
     category: str,
@@ -683,6 +701,7 @@ def build_skill_body_prompt(
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
         f"{req_block}"
+        f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Write the Python module body now. Reply with ONLY valid Python code "
@@ -997,6 +1016,7 @@ def _retry_prompt(
         f"Skill name: {draft.name}\n"
         f"Skill description: {draft.description}\n"
         f"{_requirements_block(requirements)}"
+        f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
@@ -1070,7 +1090,7 @@ ELICITATION_EXAMPLES = [
     "How does it authenticate with the service, and should that credential come from the app's config?",
     "What does a successful run look like — what should it report back to you?",
     "If the service is unreachable or refuses the action, should the run fail loudly or record 'could not complete' as the result?",
-    "Should this skill send or read SimpleX messages through the simplex bridge, and if so which conversation (resolved by contact name)?",
+    "Should this skill read or send through one of the available bridge services (see the catalog below), and if so which conversation or target?",
 ]
 
 
@@ -1287,7 +1307,8 @@ def build_testgen_base_prompt(
     user = (
         f"Skill: {category}.{name}\n"
         f"Request: {request.text}\n"
-        f"Finished skill body:\n```python\n{skill_code}\n```"
+        f"Finished skill body:\n```python\n{skill_code}\n```\n"
+        f"{describe_bridges()}"
     )
     return [
         {"role": "system", "content": system},
@@ -1527,6 +1548,8 @@ def _regen_body_prompt(
         f"Skill description: {draft.description}\n"
         f"Evidence:\n{render_evidence(evidence)}\n"
         f"Previous body:\n```python\n{previous_code}\n```\n"
+        f"{_integration_hint_block(draft)}"
+        f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
         "no markdown fences, no JSON."
