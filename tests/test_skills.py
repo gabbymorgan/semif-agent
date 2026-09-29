@@ -36,6 +36,7 @@ from semif_agent.skills import (
     CategoryDraft,
     CategoryRegistry,
     CreateCategory,
+    CreateSkill,
     Prediction,
     Skill,
     SkillDraft,
@@ -599,6 +600,146 @@ def test_navigate_leaf_offers_create_for_unmatched_action(tmp_path):
     create = next(o for o in engine.request.options if o.id == "create_skill")
     assert "No existing skill performs this action" in create.description
     assert "action" in engine.request.question
+
+
+class _ProbEngine:
+    """Returns caller-specified probabilities, keyed by a substring of the
+    decision question, so a test can force a weak create plurality."""
+
+    def __init__(self, by_question: dict[str, dict[str, float]]):
+        self.by_question = by_question
+        self.calls = []
+
+    def call(self, request):
+        from semif_agent.decisions import DecisionResult
+
+        self.calls.append(request)
+        ids = [o.id for o in request.options]
+        probs_map = {}
+        for key, value in self.by_question.items():
+            if key in request.question:
+                probs_map = value
+                break
+        if not probs_map:
+            probs_map = {ids[0]: 1.0}
+        return DecisionResult(
+            request=request,
+            option_ids=ids,
+            probabilities=[float(probs_map.get(i, 0.0)) for i in ids],
+        )
+
+
+def _leaf_tree():
+    return {
+        "simplex": [
+            Skill(
+                name="next_message",
+                category="simplex",
+                description="Read the next SimpleX message.",
+            )
+        ]
+    }
+
+
+def test_navigate_suppresses_weak_create_plurality(tmp_path):
+    """create_skill wins the softmax by a hair but fails the margin gate: the
+    weak plurality must fall back to the best existing skill, not author."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "skill performs": {"next_message": 0.45, "create_skill": 0.5},
+        }
+    )
+    result = navigate(
+        engine, log, trace, Request("send a simplex message"), _leaf_tree()
+    )
+    assert getattr(result, "name", None) == "next_message"
+    suppressed = [e for e in trace.read() if e["kind"] == "create_suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["level"] == "leaf"
+    assert suppressed[0]["fallback"] == "next_message"
+
+
+def test_navigate_create_clears_margin_and_tau(tmp_path):
+    """A create that leads the best skill by >= margin and clears tau fires."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "skill performs": {"next_message": 0.2, "create_skill": 0.7},
+        }
+    )
+    result = navigate(
+        engine, log, trace, Request("send a simplex message"), _leaf_tree()
+    )
+    assert isinstance(result, CreateSkill)
+    assert result.category == "simplex"
+    assert not [e for e in trace.read() if e["kind"] == "create_suppressed"]
+
+
+def test_navigate_create_below_tau_is_suppressed(tmp_path):
+    """Even with a clear lead, a create below the absolute floor is suppressed
+    (all options weak => nothing is a confident match)."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "skill performs": {"next_message": 0.1, "create_skill": 0.3},
+        }
+    )
+    result = navigate(
+        engine, log, trace, Request("send a simplex message"), _leaf_tree()
+    )
+    assert getattr(result, "name", None) == "next_message"
+    assert any(e["kind"] == "create_suppressed" for e in trace.read())
+
+
+def test_navigate_category_create_gate_suppresses_and_falls_back(tmp_path):
+    """The same gate applies to create_category: a weak plurality win falls back
+    to the best existing category and descends into it."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = _leaf_tree()
+    tree["calendar"] = [
+        Skill(name="next_event", category="calendar", description="Report the next event.")
+    ]
+    engine = _ProbEngine(
+        {
+            "top-level category": {
+                "calendar": 0.30,
+                "simplex": 0.32,
+                "create_category": 0.38,
+            },
+            "skill performs": {"next_message": 1.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("send a simplex message"), tree)
+    assert getattr(result, "name", None) == "next_message"
+    suppressed = [e for e in trace.read() if e["kind"] == "create_suppressed"]
+    assert len(suppressed) == 1 and suppressed[0]["level"] == "category"
+    assert suppressed[0]["fallback"] == "simplex"
+
+
+def test_navigate_category_create_clears_gate(tmp_path):
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = _leaf_tree()
+    engine = _ProbEngine(
+        {
+            "top-level category": {
+                "simplex": 0.1,
+                "create_category": 0.8,
+            },
+        }
+    )
+    result = navigate(engine, log, trace, Request("book a flight"), tree)
+    assert isinstance(result, CreateCategory)
+    assert not [e for e in trace.read() if e["kind"] == "create_suppressed"]
+
 
 
 def test_confirm_skill_fit_returns_true_when_action_matches(tmp_path):

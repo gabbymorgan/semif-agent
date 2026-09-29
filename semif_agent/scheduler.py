@@ -224,6 +224,9 @@ class Scheduler:
         self.trace = trace if trace is not None else TraceLog()
         self.config = config
         self.tau = tau
+        nav_cfg = config.get("navigation", {}) or {}
+        self.create_tau = float(nav_cfg.get("create_tau", 0.4))
+        self.create_margin = float(nav_cfg.get("create_margin", 0.15))
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
@@ -455,7 +458,15 @@ class Scheduler:
     # ---- dispatch ----
 
     def _dispatch(self, request: Request, weight: float = 0.0) -> DispatchResult:
-        navigation = navigate(self.engine, self.log, self.trace, request, self.tree)
+        navigation = navigate(
+            self.engine,
+            self.log,
+            self.trace,
+            request,
+            self.tree,
+            create_tau=self.create_tau,
+            create_margin=self.create_margin,
+        )
         if isinstance(navigation, CreateCategory):
             created = self._create_category(request)
             if created.kind != "create_category":

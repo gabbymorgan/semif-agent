@@ -275,6 +275,14 @@ CLI, unit tests (24) + box integration tests (2).
   new category runs the same chain deterministically: `create_category` →
   `create_skill` → async body → re-dispatch. Authoring is still a single pass —
   validating/reusing written bodies across runs is future work.
+  **Create-branch confidence gate** (Sep 2026): `create_skill`/`create_category`
+  compete in a softmax with the real options, so a weak plurality win is not
+  evidence that nothing matches. Navigation fires a create branch only when
+  `P(create) >= navigation.create_tau` **and** it leads the best existing option
+  by `navigation.create_margin`; otherwise it falls back to the best existing
+  option (a genuinely unmatched action still reaches authoring through the
+  intent guard) and traces `create_suppressed` with the probs. An empty
+  tree/category still short-circuits straight to create.
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which
   service/account, how to connect, where the credential comes from, what success

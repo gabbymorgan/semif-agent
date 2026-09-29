@@ -526,12 +526,39 @@ def merge_registry(tree: dict[str, list[Skill]], categories: dict[str, dict]) ->
             existing.add(name)
 
 
+def _clears_create_gate(
+    result,
+    create_id: str,
+    existing_ids: list[str],
+    tau: float,
+    margin: float,
+) -> bool:
+    """Should the create branch actually fire, or is it a weak plurality win?
+
+    The create option shares a softmax with the real categories/skills, so its
+    probability is diluted by every existing option — it is not a measure of
+    "confidence that nothing matches". Require both an absolute floor (`tau`)
+    and a clear lead over the best existing option (`margin`); a create that
+    only squeaks past on a crowded tree is suppressed and navigation falls back
+    to the best existing branch (the intent guard remains a second door to
+    authoring). Returns True when the gate is effectively disabled.
+    """
+    probs = result.probs
+    if create_id not in probs:
+        return True
+    create_p = probs[create_id]
+    best = max((probs[i] for i in existing_ids if i in probs), default=0.0)
+    return create_p >= tau and (create_p - best) >= margin
+
+
 def navigate(
     engine: SemIfEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,
     tree: dict[str, list[Skill]],
+    create_tau: float = 0.4,
+    create_margin: float = 0.15,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
@@ -541,6 +568,12 @@ def navigate(
     (an empty tree, or a category with no skills yet) short-circuits straight to
     the create branch: SemIf decisions need at least two options, and asking
     "which of one?" is meaningless.
+
+    A create branch that wins the softmax but fails the confidence gate
+    (`create_tau` floor and `create_margin` lead over the best existing option)
+    is suppressed: navigation falls back to the best existing option so a
+    genuinely unmatched action still reaches authoring through the intent guard,
+    while a crowded tree no longer drifts into create on a weak plurality.
     """
     categories = sorted(tree.keys())
     create_category = Option("create_category", "Suggest a new category for this.")
@@ -563,6 +596,23 @@ def navigate(
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
+    if category == "create_category" and not _clears_create_gate(
+        top_result, "create_category", categories, create_tau, create_margin
+    ):
+        fallback = max(
+            (c for c in categories if c in top_result.probs),
+            key=lambda c: top_result.probs[c],
+        )
+        trace.append(
+            "create_suppressed",
+            request.id,
+            level="category",
+            fallback=fallback,
+            probs=top_result.probs,
+            tau=create_tau,
+            margin=create_margin,
+        )
+        category = fallback
     if category == "create_category":
         trace.append(
             "create_category",
@@ -600,6 +650,24 @@ def navigate(
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
+    if pick == "create_skill" and not _clears_create_gate(
+        leaf_result, "create_skill", [s.name for s in skills], create_tau, create_margin
+    ):
+        fallback = max(
+            (s.name for s in skills if s.name in leaf_result.probs),
+            key=lambda n: leaf_result.probs[n],
+        )
+        trace.append(
+            "create_suppressed",
+            request.id,
+            level="leaf",
+            category=category,
+            fallback=fallback,
+            probs=leaf_result.probs,
+            tau=create_tau,
+            margin=create_margin,
+        )
+        pick = fallback
     if pick == "create_skill":
         trace.append(
             "skill_needed",
