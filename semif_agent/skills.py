@@ -557,8 +557,8 @@ def navigate(
     trace: TraceLog,
     request: Request,
     tree: dict[str, list[Skill]],
-    create_tau: float = 0.4,
-    create_margin: float = 0.15,
+    create_tau: float = 0.5,
+    create_margin: float = 0.35,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 

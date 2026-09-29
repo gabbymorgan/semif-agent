@@ -4,8 +4,8 @@
   "max_reentries": 3,
   "navigation": {
     "_comment": "Confidence gate on the create branches. create_skill/create_category share a softmax with the real skills/categories, so a weak plurality win is not evidence that nothing matches. The create branch only fires when P(create) >= create_tau AND it leads the best existing option by create_margin; otherwise navigation falls back to the best existing option (a genuinely unmatched action still reaches authoring through the intent guard). Suppressed picks are traced as create_suppressed with their probs so the thresholds can be calibrated from real runs. A level with nothing to choose from still short-circuits to create.",
-    "create_tau": 0.4,
-    "create_margin": 0.15
+    "create_tau": 0.5,
+    "create_margin": 0.35
   },
   "queue": {"max_size": 100, "age_rate": 0.01},
   "engine": {

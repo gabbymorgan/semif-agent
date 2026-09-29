@@ -225,8 +225,8 @@ class Scheduler:
         self.config = config
         self.tau = tau
         nav_cfg = config.get("navigation", {}) or {}
-        self.create_tau = float(nav_cfg.get("create_tau", 0.4))
-        self.create_margin = float(nav_cfg.get("create_margin", 0.15))
+        self.create_tau = float(nav_cfg.get("create_tau", 0.5))
+        self.create_margin = float(nav_cfg.get("create_margin", 0.35))
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
