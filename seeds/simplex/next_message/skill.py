@@ -1,4 +1,4 @@
-"""Read the next unread SimpleX message through the forwarding bridge.
+"""Read the next unread SimpleX message bridge.
 
 Real integration: the standalone SimpleX forwarding bridge
 (`simplex_bridge_url`) buffers every inbound DM and forwards outbound sends.

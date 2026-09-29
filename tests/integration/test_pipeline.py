@@ -202,7 +202,7 @@ def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
         Skill(
             name="next_message",
             category="simplex",
-            description="Read the next unread SimpleX message through the forwarding bridge.",
+            description="Read the next unread SimpleX message bridge.",
         ),
         Skill(
             name="connect_link",
