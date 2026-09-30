@@ -76,6 +76,86 @@ def contact_link(resp: dict) -> dict:
     return {}
 
 
+def _text_from_content(content: dict) -> str | None:
+    """Extract the text of a text message from a `CIContent` union, or None.
+
+    Handles the same two shapes as `parse_direct_text_item`: the API form
+    (`{"type": "rcvMsgContent", "msgContent": {...}}`) and the DB/Aeson form
+    (`{"rcvMsgContent": {"msgContent": {...}}}`), for both received and sent
+    messages. Non-text content (files, calls, events) yields None.
+    """
+    for key in ("rcvMsgContent", "sndMsgContent"):
+        if content.get("type") == key:
+            msg_content = content.get("msgContent") or {}
+        elif isinstance(content.get(key), dict):
+            msg_content = content[key].get("msgContent") or {}
+        else:
+            continue
+        if msg_content.get("type") == "text":
+            return str(msg_content.get("text", "")).strip()
+    return None
+
+
+def parse_chat_item(item: dict) -> dict | None:
+    """Normalize one `ChatItem` into a history entry, or None.
+
+    Returns `{item_id, text, status, unread, direction, sent_at}`. `status` is
+    the raw `meta.itemStatus.type` (`rcvNew` / `rcvRead` / `snd*`), and `unread`
+    is True only for an unread received message. Items without an id are
+    dropped rather than fabricated.
+    """
+    meta = item.get("meta") or {}
+    item_id = meta.get("itemId")
+    if item_id is None:
+        return None
+    text = _text_from_content(item.get("content") or {})
+    if not text:
+        return None
+    status = (meta.get("itemStatus") or {}).get("type") or ""
+    return {
+        "item_id": str(item_id),
+        "text": text,
+        "status": status,
+        "unread": status == "rcvNew",
+        "direction": (item.get("chatDir") or {}).get("type") or "",
+        "sent_at": meta.get("itemTs") or "",
+    }
+
+
+def parse_chat(achat: dict) -> dict | None:
+    """Normalize one `AChat` into a chat summary, or None for a non-direct chat.
+
+    Returns `{contact_id, display_name, unread_count, min_unread_item_id,
+    unread, messages}` from `chatInfo` + `chatStats` + `chatItems`. A group or
+    local chat (no direct contact) yields None.
+    """
+    info = achat.get("chatInfo") or {}
+    if info.get("type") != "direct":
+        return None
+    entry = contact_entry(info.get("contact") or {})
+    if entry is None:
+        return None
+    stats = achat.get("chatStats") or {}
+    try:
+        unread_count = int(stats.get("unreadCount") or 0)
+    except (TypeError, ValueError):
+        unread_count = 0
+    messages: list[dict] = []
+    for item in achat.get("chatItems") or []:
+        parsed = parse_chat_item(item)
+        if parsed is not None:
+            messages.append(parsed)
+    min_unread = stats.get("minUnreadItemId")
+    return {
+        "contact_id": entry["id"],
+        "display_name": entry["display_name"],
+        "unread_count": unread_count,
+        "min_unread_item_id": str(min_unread) if min_unread is not None else "",
+        "unread": bool(stats.get("unreadChat")) or unread_count > 0,
+        "messages": messages,
+    }
+
+
 def parse_direct_text_item(item: dict) -> InboundDict | None:
     """Normalize one `newChatItems` entry into a message dict, or None.
 
@@ -395,6 +475,89 @@ class SimplexDaemon:
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
             raise TimeoutError("simplex contacts request timed out") from exc
+
+    # ---- chats / history ----
+
+    async def chats(
+        self, unread_only: bool = True, count: int = 20, timeout: float = 20.0
+    ) -> list[dict]:
+        """Chat previews from the daemon, optionally only those with unread.
+
+        `/_get chats <userId> count=<n> {"type":"filters","favorite":false,
+        "unread":<bool>}` returns `apiChats`. This reads the daemon's persistent
+        state, unlike the bridge's in-memory receive buffer. A `chatCmdError`
+        or malformed reply yields an empty list rather than fabricated chats.
+        """
+        user_id = await self.active_user(timeout)
+        query = {"type": "filters", "favorite": False, "unread": bool(unread_only)}
+        command = f"/_get chats {user_id} count={max(1, int(count))} {json.dumps(query)}"
+        resp = await self._roundtrip(command, timeout)
+        if resp.get("type") != "apiChats":
+            return []
+        chats: list[dict] = []
+        for achat in resp.get("chats") or []:
+            parsed = parse_chat(achat)
+            if parsed is not None:
+                chats.append(parsed)
+        return chats
+
+    async def chat_history(
+        self, contact_id: str, count: int = 20, timeout: float = 20.0
+    ) -> list[dict]:
+        """Recent messages of one direct chat, newest-aware, from the daemon.
+
+        `/_get chat @<contactId> count=<n>` returns `apiChat`; each message
+        carries `meta.itemStatus` (`rcvNew`/`rcvRead`), so callers can tell
+        unread from read. A malformed reply yields an empty list.
+        """
+        chat_ref = str(contact_id).strip().lstrip("@")
+        command = f"/_get chat @{chat_ref} count={max(1, int(count))}"
+        resp = await self._roundtrip(command, timeout)
+        if resp.get("type") != "apiChat":
+            return []
+        chat = resp.get("chat")
+        parsed = parse_chat(chat) if isinstance(chat, dict) else None
+        return parsed["messages"] if parsed is not None else []
+
+    def request_chats(
+        self, unread_only: bool = True, count: int = 20, timeout: float = 20.0
+    ) -> list[dict]:
+        """Thread-safe chat-preview lookup for callers off the event loop.
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated list.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(
+            self.chats(unread_only=unread_only, count=count, timeout=timeout), loop
+        )
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex chats request timed out") from exc
+
+    def request_chat_history(
+        self, contact_id: str, count: int = 20, timeout: float = 20.0
+    ) -> list[dict]:
+        """Thread-safe per-chat history lookup for callers off the event loop.
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated list.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(
+            self.chat_history(contact_id, count=count, timeout=timeout), loop
+        )
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex chat history request timed out") from exc
 
     # ---- inbound ----
 

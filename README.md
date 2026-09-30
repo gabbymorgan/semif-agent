@@ -503,9 +503,16 @@ GET  /health
 GET  /contacts
 GET  /inbox            # peek buffered inbound DMs
 GET  /inbox/next?contact=<id>   # pop oldest unread
+GET  /unread           # daemon's persistent unread chats (read-only; 503/502)
+GET  /history?contact=<id>&count=<n>   # recent messages for one chat (read-only; 503/502)
 GET  /address          # show/create the contact link (503 not connected, 502 failure)
 POST /send {"recipient": "<id|display_name>", "text": "..."}
 ```
+
+`/unread` and `/history` read the daemon's own state (`/_get chats` / `/_get chat`),
+so they see messages that arrived while the bridge was down — unlike the live
+`/inbox` receive buffer. Both are read-only: v7 has no mark-read command, so
+acking is a client-side read receipt, not an API call.
 
 `simplex_bridge_url` (top-level config) is what skills call; the bridge catalog
 is injected into every codegen prompt via `describe_bridges()`, so it is the
@@ -589,11 +596,11 @@ logging, `dream` cost pass, REPL + JSONL CLI; live `create_category` /
 contract → test → auto-run → re-dispatch); tiered config + first-fire
 collection; runtime repair loop; the closed `response` canned tree; real
 integrations with `INTEGRATION` declarations; the SimpleX command gateway and the
-standalone SimpleX bridge + seeds.
+standalone SimpleX bridge + seeds (contact-list refresh, daemon-backed message
+history / true unread).
 
 **Next.** Real fine-tuning from grounded decision rows ("dreaming") with
 validation + pinned-revision swap; queue persistence; more intake sources
 (events/timers); dashboard run-requeue cross-linking; per-decision thresholds and
-calibration; more bridges; a richer SimpleX read path (message history / true
-unread, contact-list refresh, a `simplex.send_message` seed). See `AGENTS.md` for
-the detailed backlog and known gotchas.
+calibration; more bridges; a `simplex.send_message` seed. See `AGENTS.md` for the
+detailed backlog and known gotchas.

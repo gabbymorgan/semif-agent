@@ -165,14 +165,16 @@ bridges/        standalone third-party API bridges (SimpleX first). base.py:
                 owns its OWN simplex-chat daemon/profile (separate from the
                 gateway's), buffers every inbound DM, refreshes the daemon
                 contact list on (re)connect + on demand, serves invite-link/
-                read/send. registry.py: CATALOG, describe_bridges() (catalog injected
+                read/send plus daemon-backed unread + per-chat history.
+                registry.py: CATALOG, describe_bridges() (catalog injected
                 into the codegen prompts), run_bridges(). Run with `python -m
                 semif_agent.cli bridge [--name NAME]`; config under `bridges`.
 simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
                 adapter and the bridge (parse direct text across v7 shapes,
                 structured `/_send`, corrId→Future round-trips, contact-address
-                `/_show_address`/`/_address`, contact-request accept). Knows
-                nothing about the scheduler or either front end.
+                `/_show_address`/`/_address`, contact-request accept, contact
+                list + chat previews/history). Knows nothing about the
+                scheduler or either front end.
 ```
 
 ## Run / verify
@@ -838,12 +840,19 @@ CLI, unit tests (24) + box integration tests (2).
   read cursor, and serves `GET /health`, `GET /contacts` (the daemon's contact
   list, refreshed on (re)connect and on demand — best-effort, falling back to
   the cached/inbound-learned set when the daemon is unavailable), `GET /inbox`
-  (peek), `GET /inbox/next?contact=<id>` (pop oldest), `GET /address`
+  (peek), `GET /inbox/next?contact=<id>` (pop oldest), `GET /unread` (the
+  daemon's persistent unread chats via `/_get chats` + `ChatListQuery` unread
+  filter — `chatStats{unreadCount, minUnreadItemId}` plus each previewed
+  `meta.itemStatus`; read-only), `GET /history?contact=<id>&count=<n>` (recent
+  messages for one chat via `/_get chat @<id>`; read-only), `GET /address`
   (show/create the forwarding bot's contact link; 503 when the daemon is not
   connected, 502 when the lookup fails), and `POST /send`
   `{"recipient","text"}` (resolves a numeric id or a known display name —
   refreshing the daemon contact list once on a miss — and enqueues on the
-  bridge's own daemon).
+  bridge's own daemon). `/unread` and `/history` read the daemon's own state
+  (surviving bridge restarts), unlike the live `/inbox` buffer; both are
+  read-only because v7 has no mark-read command (acking is a client-side read
+  receipt).
 - **Skill-facing config.** The top-level `simplex_bridge_url` is the address a
   body calls (the data-contract config search auto-populates it); bootstrap keeps
   it in sync with the bridge port. Skills reach a bridge with the ordinary `http`
@@ -864,13 +873,19 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   /contacts`, and a send-resolution miss), so `/send` can address a contact it
   has never received from. Best-effort: a disconnected daemon keeps the cached
   set.
-- [ ] **2. Message history + true unread** (`bridges/simplex.py`). The in-memory
-  inbox is a receive buffer, not the daemon's read state. Use `/_get chats
-  <userId> count=<n> <json(PaginationByTime)>` with a `ChatListQuery` unread
-  filter and `AChat.chatStats{unreadCount, minUnreadItemId}` +
-  `chatItem.meta.itemStatus` (`rcvNew`/`rcvRead`) to expose real unread history.
-  Note: v7 has **no mark-read command**, so acking is via read receipts, not an
-  API call.
+- [x] **2. Message history + true unread** (`bridges/simplex.py`,
+  `simplex_ws.py`). Shipped: `SimplexDaemon.chats(unread_only, count)` /
+  `request_chats()` query `/_get chats <userId> count=<n>
+  {"type":"filters","favorite":false,"unread":true}` and parse
+  `apiChats` (`AChat.chatStats{unreadCount, minUnreadItemId, unreadChat}` +
+  `chatItem.meta.itemStatus` `rcvNew`/`rcvRead`); `chat_history(contact_id,
+  count)` / `request_chat_history()` query `/_get chat @<id> count=<n>` and
+  parse `apiChat`. `SimplexBridge` exposes `GET /unread` (persistent unread
+  chats, summaries + previewed messages) and `GET /history?contact=<id>&count=<n>`
+  (recent messages with per-item status), both read-only and degrading like
+  `/address` (503 not connected / 502 lookup failure; `/history` 400 without a
+  contact). The live `/inbox` buffer is unchanged. Note: v7 has **no mark-read
+  command**, so acking is via read receipts, not an API call.
 - [ ] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
   outbound counterpart to `simplex.next_message`: resolve the recipient with a
   SemIf sub-decision over `/contacts`, send only on explicit user intent, and

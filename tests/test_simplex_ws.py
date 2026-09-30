@@ -16,6 +16,8 @@ from semif_agent.simplex_ws import (
     accept_command,
     contact_entry,
     contact_link,
+    parse_chat,
+    parse_chat_item,
     parse_direct_text_item,
     send_text_command,
 )
@@ -400,3 +402,168 @@ def test_on_connected_hook_runs_and_failures_are_swallowed():
     # A hook failure must not propagate (it would tear down the connection).
     asyncio.run(SimplexDaemon("ws://x", on_connected=bad)._notify_connected())
     asyncio.run(SimplexDaemon("ws://x")._notify_connected())
+
+
+# ---- chat previews / history (true unread) ----
+
+def chat_item(item_id=10, text="hello", status="rcvNew", direction="directRcv", shape="api"):
+    meta = {"itemId": item_id, "itemTs": "2026-01-01T00:00:00Z", "itemStatus": {"type": status}}
+    if shape == "api":
+        content = {"type": "rcvMsgContent", "msgContent": {"type": "text", "text": text}}
+    else:
+        content = {"rcvMsgContent": {"msgContent": {"type": "text", "text": text}}}
+    return {"chatDir": {"type": direction}, "meta": meta, "content": content}
+
+
+def api_chat(contact_id="4", display="Alice", unread_count=2, min_unread="10",
+             unread_chat=True, items=None):
+    return {
+        "chatInfo": {
+            "type": "direct",
+            "contact": {"contactId": contact_id, "profile": {"displayName": display}},
+        },
+        "chatStats": {
+            "unreadCount": unread_count,
+            "unreadMentions": 0,
+            "reportsCount": 0,
+            "minUnreadItemId": min_unread,
+            "unreadChat": unread_chat,
+        },
+        "chatItems": items if items is not None else [chat_item()],
+    }
+
+
+def test_parse_chat_item_reads_status_and_text():
+    parsed = parse_chat_item(chat_item(item_id=12, text="hi", status="rcvNew"))
+    assert parsed == {
+        "item_id": "12",
+        "text": "hi",
+        "status": "rcvNew",
+        "unread": True,
+        "direction": "directRcv",
+        "sent_at": "2026-01-01T00:00:00Z",
+    }
+    read = parse_chat_item(chat_item(item_id=11, text="old", status="rcvRead"))
+    assert read["unread"] is False
+
+
+def test_parse_chat_item_accepts_aeson_shape_and_drops_non_text():
+    assert parse_chat_item(chat_item(shape="aeson"))["text"] == "hello"
+    assert parse_chat_item(chat_item(text="")) is None
+    file_item = chat_item()
+    file_item["content"] = {"type": "rcvFile", "file": {}}
+    assert parse_chat_item(file_item) is None
+    assert parse_chat_item({"meta": {}, "content": {}}) is None
+
+
+def test_parse_chat_reads_stats_and_skips_non_direct():
+    parsed = parse_chat(api_chat(contact_id="7", display="Bob", unread_count=3, min_unread="42"))
+    assert parsed["contact_id"] == "7"
+    assert parsed["display_name"] == "Bob"
+    assert parsed["unread_count"] == 3
+    assert parsed["min_unread_item_id"] == "42"
+    assert parsed["unread"] is True
+    assert [m["item_id"] for m in parsed["messages"]] == ["10"]
+
+    group = api_chat()
+    group["chatInfo"] = {"type": "group", "groupInfo": {}}
+    assert parse_chat(group) is None
+
+
+def test_parse_chat_unread_false_when_no_unread():
+    parsed = parse_chat(api_chat(unread_count=0, min_unread=None, unread_chat=False))
+    assert parsed["unread"] is False
+    assert parsed["min_unread_item_id"] == ""
+
+
+def test_chats_sends_unread_filter_and_parses_previews():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "activeUser", "user": {"userId": 3}},
+                {"type": "apiChats", "chats": [api_chat()]},
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.chats(unread_only=True, count=5, timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert [m["cmd"] for m in ws.sent] == [
+        "/user",
+        '/_get chats 3 count=5 {"type": "filters", "favorite": false, "unread": true}',
+    ]
+    assert result[0]["contact_id"] == "4"
+    assert result[0]["unread_count"] == 2
+
+
+def test_chats_returns_empty_on_error_response():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "activeUser", "user": {"userId": 1}},
+                {"type": "chatCmdError", "chatError": {"type": "error"}},
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.chats(timeout=5)
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_chat_history_uses_chat_ref_and_parses_items():
+    daemon = SimplexDaemon("ws://x")
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {
+                    "type": "apiChat",
+                    "chat": api_chat(
+                        items=[
+                            chat_item(item_id=10, text="first", status="rcvRead"),
+                            chat_item(item_id=11, text="second", status="rcvNew"),
+                        ]
+                    ),
+                }
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.chat_history("@7", count=9, timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert [m["cmd"] for m in ws.sent] == ["/_get chat @7 count=9"]
+    assert [(m["item_id"], m["unread"]) for m in result] == [("10", False), ("11", True)]
+
+
+def test_chat_history_returns_empty_on_error_response():
+    daemon = SimplexDaemon("ws://x")
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(daemon, [{"type": "chatCmdError", "chatError": {"type": "error"}}])
+        daemon._ws = ws
+        return await daemon.chat_history("4", timeout=5)
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_request_chats_without_connection_raises():
+    daemon = SimplexDaemon("ws://x")
+    with pytest.raises(RuntimeError):
+        daemon.request_chats(timeout=1)
+
+
+def test_request_chat_history_without_connection_raises():
+    daemon = SimplexDaemon("ws://x")
+    with pytest.raises(RuntimeError):
+        daemon.request_chat_history("4", timeout=1)

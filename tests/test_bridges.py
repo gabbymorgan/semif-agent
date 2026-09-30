@@ -21,12 +21,28 @@ from semif_agent.bridges.simplex import SimplexBridge
 class FakeDaemon:
     """Stands in for the bridge's own simplex-chat connection."""
 
-    def __init__(self, link=None, error=None, contacts=None, contacts_error=None):
+    def __init__(
+        self,
+        link=None,
+        error=None,
+        contacts=None,
+        contacts_error=None,
+        chats=None,
+        chats_error=None,
+        history=None,
+        history_error=None,
+    ):
         self.link = link
         self.error = error
         self.contacts_list = contacts or []
         self.contacts_error = contacts_error
+        self.chats_list = chats or []
+        self.chats_error = chats_error
+        self.history_list = history or []
+        self.history_error = history_error
         self.refresh_count = 0
+        self.chat_calls = []
+        self.history_calls = []
         self.sent = []
         self.closed = False
         self.on_message = None
@@ -54,6 +70,18 @@ class FakeDaemon:
 
     async def contacts(self, timeout=20.0):
         return self.request_contacts(timeout)
+
+    def request_chats(self, unread_only=True, count=20, timeout=20.0):
+        self.chat_calls.append((unread_only, count))
+        if self.chats_error is not None:
+            raise self.chats_error
+        return list(self.chats_list)
+
+    def request_chat_history(self, contact_id, count=20, timeout=20.0):
+        self.history_calls.append((contact_id, count))
+        if self.history_error is not None:
+            raise self.history_error
+        return list(self.history_list)
 
     def close(self):
         self.closed = True
@@ -309,6 +337,111 @@ def test_stop_closes_the_daemon():
     assert daemon.closed is True
 
 
+# ---- daemon-backed unread / history ----
+
+def chat_summary(contact_id="4", display_name="Alice", unread_count=2):
+    return {
+        "contact_id": contact_id,
+        "display_name": display_name,
+        "unread_count": unread_count,
+        "min_unread_item_id": "10",
+        "unread": True,
+        "messages": [
+            {
+                "item_id": "10",
+                "text": "hello there",
+                "status": "rcvNew",
+                "unread": True,
+                "direction": "directRcv",
+                "sent_at": "2026-01-01T00:00:00Z",
+            }
+        ],
+    }
+
+
+def test_unread_returns_daemon_chats():
+    daemon = FakeDaemon(chats=[chat_summary()])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        assert get(f"{base}/unread") == {"chats": [chat_summary()]}
+        assert daemon.chat_calls == [(True, 20)], "must ask the daemon for unread"
+    finally:
+        bridge.stop()
+
+
+def test_unread_honours_count_query():
+    daemon = FakeDaemon(chats=[])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        get(f"{base}/unread?count=5")
+        assert daemon.chat_calls == [(True, 5)]
+    finally:
+        bridge.stop()
+
+
+def test_unread_without_connection_is_unavailable():
+    bridge, _, base = start_bridge(daemon=FakeDaemon(chats_error=RuntimeError("not connected")))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/unread")
+        assert exc.value.code == 503
+    finally:
+        bridge.stop()
+
+
+def test_unread_lookup_failure_is_reported():
+    bridge, _, base = start_bridge(daemon=FakeDaemon(chats_error=TimeoutError("slow")))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/unread")
+        assert exc.value.code == 502
+    finally:
+        bridge.stop()
+
+
+def test_history_returns_messages_for_contact():
+    messages = [{"item_id": "11", "text": "hi", "status": "rcvRead", "unread": False,
+                 "direction": "directRcv", "sent_at": ""}]
+    daemon = FakeDaemon(history=messages)
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        assert get(f"{base}/history?contact=7") == {"contact_id": "7", "messages": messages}
+        assert daemon.history_calls == [("7", 20)]
+    finally:
+        bridge.stop()
+
+
+def test_history_requires_a_contact():
+    bridge, daemon, base = start_bridge()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/history")
+        assert exc.value.code == 400
+        assert daemon.history_calls == []
+    finally:
+        bridge.stop()
+
+
+def test_history_without_connection_is_unavailable():
+    bridge, _, base = start_bridge(daemon=FakeDaemon(history_error=RuntimeError("not connected")))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/history?contact=4")
+        assert exc.value.code == 503
+    finally:
+        bridge.stop()
+
+
+def test_history_lookup_failure_is_reported():
+    bridge, _, base = start_bridge(daemon=FakeDaemon(history_error=TimeoutError("slow")))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/history?contact=4")
+        assert exc.value.code == 502
+    finally:
+        bridge.stop()
+
+
 # ---- catalog / codegen surface ----
 
 def test_known_infos_include_simplex():
@@ -339,4 +472,6 @@ def test_describe_bridges_renders_service_auth_and_endpoints():
     assert "X-Semif-Token" in text
     assert "simplex_bridge_token" in text
     assert "/inbox/next" in text
+    assert "/unread" in text
+    assert "/history" in text
     assert "never speak" in text

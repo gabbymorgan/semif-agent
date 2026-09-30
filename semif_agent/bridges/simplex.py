@@ -43,6 +43,17 @@ class SimplexBridge(BridgeService):
             "GET /inbox/next?contact=<id> -> 200 {\"message\": {...}|null} — pop "
             "the oldest unread message (optionally from one contact); null means "
             "none buffered. The bridge owns the read cursor",
+            "GET /unread -> 200 {\"chats\": [{\"contact_id\", \"display_name\", "
+            "\"unread_count\", \"min_unread_item_id\", \"unread\", \"messages\": "
+            "[{item_id, text, status, unread, direction, sent_at}]}]} — the "
+            "daemon's persistent unread chats (survives bridge restarts), not "
+            "just what arrived while connected. Read-only; 503 when the daemon "
+            "is not connected, 502 when the lookup fails",
+            "GET /history?contact=<id>&count=<n> -> 200 {\"contact_id\", "
+            "\"messages\": [{item_id, text, status, unread, direction, "
+            "sent_at}]} — recent message history for one contact (count default "
+            "20); status is rcvNew (unread) or rcvRead. Read-only; 503/502 as "
+            "/unread, 400 without a contact",
             "GET /address -> 200 {\"short_link\", \"full_link\", \"created\"} — "
             "the agent's contact link; creates it on first call. 503 when the "
             "daemon is not connected, 502 when the lookup fails",
@@ -139,6 +150,12 @@ class SimplexBridge(BridgeService):
         if path == "/inbox/next":
             contact = (query.get("contact") or [None])[0]
             return 200, {"message": self.inbox.pop(contact)}
+        if path == "/unread":
+            return self._unread(query)
+        if path == "/history":
+            contact = (query.get("contact") or [None])[0]
+            count = (query.get("count") or [None])[0]
+            return self._history(contact, count)
         if path == "/address":
             return self._address()
         return 404, {"error": "not found"}
@@ -175,6 +192,49 @@ class SimplexBridge(BridgeService):
         self.inbox.merge_contacts(contacts)
         self._event("contacts_refreshed", count=len(contacts))
         return self.inbox.contacts()
+
+    def _unread(self, query: dict) -> tuple[int, dict]:
+        """The daemon's persistent unread chats (not the live receive buffer).
+
+        Read-only: there is no mark-read command in v7, so this never consumes.
+        Best-effort like `/address` — 503 when the daemon is not connected, 502
+        when the lookup fails, never a fabricated chat.
+        """
+        count = self._count((query.get("count") or [None])[0])
+        try:
+            chats = self.daemon.request_chats(unread_only=True, count=count)
+        except RuntimeError as exc:
+            return 503, {"error": f"unread lookup is not available: {exc}"[:300]}
+        except Exception as exc:  # TimeoutError, daemon error
+            return 502, {"error": f"unread lookup failed: {exc}"[:300]}
+        return 200, {"chats": chats}
+
+    def _history(self, contact: str | None, count: str | None) -> tuple[int, dict]:
+        """Recent message history for one contact, straight from the daemon.
+
+        Read-only. A missing contact is a client error; a disconnected or
+        failing daemon degrades like `/unread`.
+        """
+        contact = str(contact or "").strip()
+        if not contact:
+            return 400, {"error": "contact is required"}
+        try:
+            messages = self.daemon.request_chat_history(
+                contact, count=self._count(count)
+            )
+        except RuntimeError as exc:
+            return 503, {"error": f"history lookup is not available: {exc}"[:300]}
+        except Exception as exc:  # TimeoutError, daemon error
+            return 502, {"error": f"history lookup failed: {exc}"[:300]}
+        return 200, {"contact_id": contact, "messages": messages}
+
+    @staticmethod
+    def _count(raw: str | None, default: int = 20, maximum: int = 100) -> int:
+        try:
+            value = int(raw) if raw is not None else default
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(value, maximum))
 
     def _address(self) -> tuple[int, dict]:
         try:
