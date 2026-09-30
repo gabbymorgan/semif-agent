@@ -21,6 +21,7 @@ A successful release of this could be defined by a single question: "Can I use t
   - [The skill tree and navigation](#the-skill-tree-and-navigation)
   - [The skill run loop](#the-skill-run-loop)
   - [Authoring a new skill](#authoring-a-new-skill)
+  - [What each model sees](#what-each-model-sees)
   - [Data contracts and tiered config](#data-contracts-and-tiered-config)
   - [Repairing a failed run](#repairing-a-failed-run)
   - [Dream: the learning signal](#dream-the-learning-signal)
@@ -188,6 +189,67 @@ stub. A whole new category runs the same chain deterministically:
 A rejected/simulated body is traced (`fidelity_review`), badged `unverified`,
 and never blocks authoring. Codegen failures (including timeouts) surface as a
 graceful stub and are retryable with `restart <category> <skill>`.
+
+### What each model sees
+
+Two kinds of model calls exist, and they are injected with **different things**.
+
+A **SemIf decision** carries only three fields — `state`, `question`, and
+`options` (each with an `id` + `description`) — and
+`semif_phase1.llamacpp_backend.score` reads the option logits from that one
+forward pass. There is no hidden system prompt and no growing conversation:
+what you see in the table below is the entire input. Probabilities are
+conditional on exactly the supplied options.
+
+A **generative call** (`llm` for titles/descriptions, `codegen` for bodies and
+tests) is a built OpenAI-style `messages` list. Its context is assembled from
+the request, the tree, the elicitation answers, the runtime **bridge catalog**
+(`describe_bridges()`), and — for bodies and tests — the contract files
+(`SKILL.md`, `TESTGEN.md`).
+
+#### SemIf decisions
+
+| Phase | File | State injected | Options |
+| --- | --- | --- | --- |
+| `interrupt:choice` | `scheduler.py:279` | request text + `[current process: <skill>]` | `interrupt` / `defer` |
+| `priority:score` | `scheduler.py:296` | request text (+ `[current process: …]` when busy) | critical / high / medium / low |
+| `navigate:category` | `skills.py:682` | request text | every category name (+ `create_category`) |
+| `navigate:leaf` | `skills.py:736` | request text + `[current process: <category>]` | every skill name + description (+ `create_skill`) |
+| `navigate:response` | `skills.py:634` | request text + category | canned reply names + descriptions (catchall last) |
+| `navigate:intent` | `skills.py:811` | `Requested action: <text>` + `Action of the existing skill: <description>` | `same` / `different` |
+| `assess:outcome` | `skill.py:257` | skill label + goal + action log | `success` / `failure` |
+| `assess:requeue` | `skill.py:279` | skill label + goal + action log + `outcome: failed` | `complete` / `retry` |
+| `config:search` | `scheduler.py:1477` | skill + variable name + its semantic description | each candidate config key (+ `ask`) |
+| `config:record` | `skill.py:112` | skill + `variable = value` | `record` / `ask_again` |
+| `authoring:fidelity` | `scheduler.py:1311` | skill, request, description, `INTEGRATION` JSON, static findings, first 4000 chars of body | `accept` / `reconsider` |
+| `repair:choice` | `scheduler.py:658` | skill, request, integration, truncated failure | `retry` / `repair_skill` / `ask_user` / `no_repair` |
+| degeneration watchdog¹ | `cli.py:128` | `[codegen <model>]` + last 2000 chars of the stream | `continue` / `stop` |
+| `codegen_regen`¹ | `cli.py:165` | `[testgen <model>]` + last 1200 chars of the test error | `regen_code` / `regen_test` / `regen_contract` |
+
+¹ Trace-only: logged to `runs.jsonl`, never to `decisions.jsonl`.
+
+#### Generative calls
+
+| Call | Client | System context | User context | File |
+| --- | --- | --- | --- | --- |
+| `generate_category` | `llm` | authoring instruction: propose one broad category, JSON-only | request text + full tree summary | `skills.py:896` |
+| `generate_skill` | `llm` | authoring instruction: propose one specific skill, JSON-only | request + category + existing skill names | `skills.py:947` |
+| `generate_skill_body` | `codegen` | full **SKILL.md** | request, category, name, description, existing skills + tree summary, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:156` |
+| body retry | `codegen` | full **SKILL.md** | rejection reason, request, category, name, description, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:474` |
+| `generate_elicitation` | `codegen` | elicitation instructions + example questions + anti-patterns + `max_questions` | request, category, name, description, existing skills + tree summary, **bridge catalog** | `codegen.py:580` |
+| `generate_data_contract` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog** + the contract ask | `codegen.py:833` |
+| `generate_skill_tests` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog**; continued with the accepted **contract JSON** as an assistant turn + the test-gen ask | `codegen.py:942` |
+| `regenerate_skill_body` | `codegen` | full **SKILL.md** | correction header, request, description, **raw evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
+
+The **bridge catalog** is `describe_bridges()` (`bridges/registry.py:33`): each
+known bridge's name, service, description, base-URL config var, auth header +
+token var, documented config vars, and endpoints. It is the single runtime
+source of bridge specifics — `SKILL.md` and `TESTGEN.md` carry only the generic
+pattern — so a bridge can be added without touching either contract file.
+
+The **raw evidence bundle** handed to a corrective regen carries the request,
+description, requirements, the observed failure fields (error, action log, new
+state, summary) and the previous body, rendered as-is with no prose diagnosis.
 
 ### Data contracts and tiered config
 

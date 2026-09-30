@@ -695,9 +695,11 @@ CLI, unit tests (24) + box integration tests (2).
   exceeds even the relaxed cap before it settles on a body, which is why the
   sampler (below) is the real fix.
 - **Sampler params + escalation.** `codegen.temperature` (default 0.7),
-  `top_p` (0.85), `presence_penalty` (1.5), `frequency_penalty` (0.2) follow
-  the Qwen3.8 model card's instruct-mode anti-repetition guidance — a high
-  `presence_penalty`, not greedy temperature, is the loop cure. Those four are
+  `top_p` (0.85), `presence_penalty` (1.5), `frequency_penalty` (0.2) are the
+  Qwen3.8 model card's instruct-mode preset used as an anti-repetition sampler,
+  not to toggle reasoning — a high `presence_penalty`, not greedy temperature,
+  is the loop cure, and the model's thinking-mode preset
+  (`presence_penalty=0.0`) is exactly what it loops under. Those four are
   the only sampler knobs reachable via ollama's OpenAI-compat API;
   `repeat_penalty`/`min_p`/`top_k` are Modelfile-only, so the per-request
   `presence_penalty` (which overrides the Modelfile) is what actually stops the

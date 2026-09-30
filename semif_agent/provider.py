@@ -80,13 +80,14 @@ class OpenAICompatClient:
     It lets a SemIf continue/stop decision cut off a generation that is
     looping instead of converging, before it fills the context window.
 
-    Sampler defaults follow the Qwen3.8 model card's instruct-mode guidance
-    (unsloth/Qwen3.8-27B-GGUF): the anti-repetition cure is a high
-    `presence_penalty`, not greedy temperature. `temperature`/`top_p`/
-    `presence_penalty`/`frequency_penalty` are per-`chat` overridable; the
-    `generate_skill_body` escalation ladder bumps presence toward the card's
-    max (2.0) and lowers temperature on retries. `max_attempts` bounds that
-    ladder (default 3).
+    Sampler defaults are the Qwen3.8 card's instruct-mode preset
+    (unsloth/Qwen3.8-27B-GGUF) used as an anti-repetition sampler, not to
+    toggle reasoning: a high `presence_penalty` is the loop cure, while the
+    prototype thinking-mode preset (`presence_penalty=0.0`) is what this
+    codegen model loops under. `temperature`/`top_p`/`presence_penalty`/
+    `frequency_penalty` are per-`chat` overridable; the `generate_skill_body`
+    escalation ladder bumps presence toward the card's max (2.0) and lowers
+    temperature on retries. `max_attempts` bounds that ladder (default 3).
     """
 
     error_class = ProviderError

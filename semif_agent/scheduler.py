@@ -275,7 +275,7 @@ class Scheduler:
 
     # ---- decision templates (all real SemIf, all logged) ----
 
-    def _choice(self, request: Request, current: Process) -> bool:
+    def _interrupt_choice(self, request: Request, current: Process) -> bool:
         decision = DecisionRequest(
             state=compose_state(request, current=current.skill),
             question="Should this be allowed to interrupt the current process?",
@@ -292,7 +292,7 @@ class Scheduler:
         )
         return result.prob(CHOICE_INTERRUPT) >= self.tau
 
-    def _score(self, request: Request, current: str | None = None) -> tuple[float, str]:
+    def _priority_score(self, request: Request, current: str | None = None) -> tuple[float, str]:
         decision = DecisionRequest(
             state=compose_state(request, current=current),
             question="How urgent is this request?",
@@ -335,7 +335,7 @@ class Scheduler:
         self.trace.append("submit", request.id, text=text, source=source)
 
         if self.current is None:
-            weight, label = self._score(request)
+            weight, label = self._priority_score(request)
             self.current = Process(request=request, skill="(scheduling)", weight=weight)
             try:
                 outcome = self._dispatch(request, weight=weight)
@@ -347,7 +347,7 @@ class Scheduler:
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "running", f"[{label}] {outcome.summary}", request.id
 
-        interrupt = self._choice(request, self.current)
+        interrupt = self._interrupt_choice(request, self.current)
         if interrupt:
             if self.pending is not None:
                 self.trace.append("pending_abandoned", self.pending.request.id)
@@ -364,7 +364,7 @@ class Scheduler:
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return "preempted", f"interrupted {previous.skill}; {outcome.summary}", request.id
 
-        weight, label = self._score(request, current=self.current.skill)
+        weight, label = self._priority_score(request, current=self.current.skill)
         ok = self.queue.push(request, weight)
         if not ok:
             self.trace.append("rejected", request.id, reason="queue is full")
