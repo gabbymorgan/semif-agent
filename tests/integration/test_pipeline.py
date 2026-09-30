@@ -2,8 +2,9 @@
 
     python -m pytest tests/integration -q
 
-The decision engine is real (llamacpp GGUF) and self-assessment is a real
-local LLM endpoint. If either is unavailable this fails loudly — no mocking.
+The decision engine is real (llamacpp GGUF), and the `llm` and `codegen`
+providers are real OpenAI-compatible endpoints. If any is unavailable this
+fails loudly — no mocking.
 """
 
 import json
@@ -78,7 +79,7 @@ def _install_tracking_fixture(scheduler):
     The pipeline tests need a target whose flow is stable; the hardcoded
     email/tracking examples were removed because they faked their integrations.
     This injects a runnable tracking leaf instead — the decision engine, the
-    self-assessment LLM, and the decision log all remain real.
+    `llm`/`codegen` providers, and the decision log all remain real.
     """
 
     def predict(ctx, request):
@@ -240,29 +241,22 @@ def test_busy_choice_path(tmp_path):
     scheduler.idle()
 
 
-def test_engine_generation_normal_mode(tmp_path):
-    """The pinned decision model must also generate text in the normal way."""
+def test_engine_scoring_only(tmp_path):
+    """The pinned decision model scores (makes decisions); it no longer writes
+    free text. Text authoring is the `llm` provider's job."""
     config = load_config()
     require_real(config)
     scheduler, config = build_scheduler(config)
-    out = scheduler.engine.generate(
-        [
-            {"role": "system", "content": "Reply with the single word ok."},
-            {"role": "user", "content": "say ok"},
-        ],
-        max_tokens=16,
-    )
-    print(f"generation: {out!r}")
-    assert isinstance(out, str) and out.strip()
+    assert not hasattr(scheduler.engine, "generate")
 
 
 def test_generate_category(tmp_path):
-    """Authoring a category stub through the real decision model."""
+    """Authoring a category stub through the real `llm` provider."""
     config = load_config()
     require_real(config)
     scheduler, config = build_scheduler(config)
     draft = generate_category(
-        scheduler.engine,
+        scheduler.llm,
         Request("tell me if my package was delivered"),
         scheduler.tree,
     )
@@ -272,12 +266,12 @@ def test_generate_category(tmp_path):
 
 
 def test_generate_skill(tmp_path):
-    """Authoring a skill leaf stub through the real decision model."""
+    """Authoring a skill leaf stub through the real `llm` provider."""
     config = load_config()
     require_real(config)
     scheduler, config = build_scheduler(config)
     draft = generate_skill(
-        scheduler.engine,
+        scheduler.llm,
         Request("tell me if my package was delivered"),
         "tracking",
         scheduler.tree,
@@ -481,8 +475,14 @@ def test_create_category_chain_runs_new_skill(tmp_path):
     status, detail = scheduler.submit("track my drone delivery in real time")
     print(f"[{status}] {detail}")
     assert status in ("running", "preempted", "queued", "rejected")
-    assert scheduler.current is None, "gate must be free again right after the stub is created"
+    assert scheduler.current is None, "gate must be free again right after the draft is queued"
 
+    draft_deadline = time.monotonic() + 10 * 60
+    while time.monotonic() < draft_deadline:
+        kinds = [e["kind"] for e in scheduler.trace.read()]
+        if "category_created" in kinds and "skill_writing" in kinds:
+            break
+        time.sleep(5)
     kinds = [e["kind"] for e in scheduler.trace.read()]
     assert "category_created" in kinds, "category stub must be authored first"
     assert "skill_writing" in kinds, "the async body write must be launched"

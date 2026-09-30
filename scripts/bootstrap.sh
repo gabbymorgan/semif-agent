@@ -46,7 +46,7 @@ SIMPLEX_DISPLAY_NAME=""
 usage() {
   sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo
-  echo "  --llm-url URL                ollama API for the small self-assessment model (default: $LLM_URL; this machine)"
+  echo "  --llm-url URL                ollama API for the small title/description model (default: $LLM_URL; this machine)"
   echo "  --codegen-url URL            ollama API for codegen skill bodies (default: $CODEGEN_URL)"
   echo "  --threads N                  engine threads for config.json (default: config.example value)"
   echo "  --copy-data SRC              rsync SRC (e.g. abby@box:~/repos/semif-agent/data) to data/ — opt-in"

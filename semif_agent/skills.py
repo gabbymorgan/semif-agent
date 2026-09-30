@@ -2,10 +2,10 @@
 
 A skill is a leaf reached by a chain of SemIf choices (category -> skill).
 The category level carries a "create_category" branch and the leaf level a
-"create_skill" branch. Both are live: the decision model is driven in normal
-generation mode to propose a title + description — a broad new category or a
-specific new skill leaf — which is persisted to a category registry and merged
-into the running tree as a stub.
+"create_skill" branch. Both are live: a small OpenAI-compatible model (`llm`,
+separate from `codegen`) proposes a title + description — a broad new category
+or a specific new skill leaf — which is persisted to a category registry and
+merged into the running tree as a stub.
 
 Only the real skills live here; navigation uses the real decision engine.
 """
@@ -92,8 +92,8 @@ class Skill:
 class CreateSkill:
     """Suggestion that the current category needs a new skill.
 
-    Handled live, like CreateCategory: the decision model authors the new skill
-    stub, which is persisted and merged into the tree. `category` names the
+    Handled live, like CreateCategory: the small `llm` provider authors the new
+    skill stub, which is persisted and merged into the tree. `category` names the
     category that needs the new skill.
     """
 
@@ -104,8 +104,8 @@ class CreateSkill:
 class CreateCategory:
     """Suggestion that the request needs a brand-new top-level category.
 
-    Like CreateSkill this is handled live: the decision model is used in
-    normal generation mode to author the category stub.
+    Like CreateSkill this is handled live: the small `llm` provider authors the
+    category stub.
     """
 
 
@@ -894,10 +894,10 @@ def parse_category_draft(raw: str) -> CategoryDraft:
 
 
 def generate_category(
-    engine: SemIfEngine, request: Request, tree: dict[str, list[Skill]]
+    client: LLMClient, request: Request, tree: dict[str, list[Skill]]
 ) -> CategoryDraft:
-    """Author a new category stub with the decision model in generation mode."""
-    raw = engine.generate(build_category_prompt(request, tree), max_tokens=128)
+    """Author a new category stub with the `llm` provider."""
+    raw = client.chat(build_category_prompt(request, tree), max_tokens=128)
     return parse_category_draft(raw)
 
 
@@ -945,8 +945,8 @@ def parse_skill_draft(raw: str) -> SkillDraft:
 
 
 def generate_skill(
-    engine: SemIfEngine, request: Request, category: str, tree: dict[str, list[Skill]]
+    client: LLMClient, request: Request, category: str, tree: dict[str, list[Skill]]
 ) -> SkillDraft:
-    """Author a new skill leaf stub with the decision model in generation mode."""
-    raw = engine.generate(build_skill_prompt(request, category, tree), max_tokens=128)
+    """Author a new skill leaf stub with the `llm` provider."""
+    raw = client.chat(build_skill_prompt(request, category, tree), max_tokens=128)
     return parse_skill_draft(raw)

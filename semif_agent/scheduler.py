@@ -34,6 +34,7 @@ from .decisions import DecisionRequest, Option, Request
 from .engine import EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
+from .provider import ProviderError
 from .queue import UrgencyQueue
 from .skill import SkillRunner
 from .skills import (
@@ -108,10 +109,25 @@ class SkillWrite:
 
 
 @dataclass
+class DraftAuthor:
+    """One queued async draft authoring (single-slot `llm` worker).
+
+    `kind` is "category" (author a top-level category) or "skill" (author a
+    leaf inside `category`). A category job chains into its skill job so the
+    create_category -> create_skill order stays deterministic.
+    """
+
+    request: Request
+    category: str | None
+    weight: float
+    kind: str
+
+
+@dataclass
 class PendingQuestion:
     """A question waiting for the human (deferred elicitation or repair).
 
-    Posted by the codegen worker when no inline asker is wired; answered via
+    Posted by the codegen worker; answered via
     the dashboard (`/api/questions`) or `Scheduler.answer_question`. The worker
     waits (bounded by `codegen.elicitation.wait_timeout`) and continues with
     whatever answers arrived.
@@ -159,9 +175,7 @@ class DispatchResult:
     summary: str
     skill: str | None = None
     decisions_logged: int = 0
-    body_written: bool = False
     needs_input: str | None = None
-    draft: SkillDraft | None = None
 
 
 class Scheduler:
@@ -179,7 +193,6 @@ class Scheduler:
         | None = None,
         regen_decision_factory: Callable[[str], Callable[[str], str] | None]
         | None = None,
-        asker: Callable[[str], str | None] | None = None,
         on_request_requeued: Callable[[str, str], None] | None = None,
     ):
         self.engine = engine
@@ -195,7 +208,6 @@ class Scheduler:
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
         self.regen_decision_factory = regen_decision_factory
-        self.asker = asker
         self.on_request_requeued = on_request_requeued
         codegen_cfg = config.get("codegen", {}) or {}
         elicitation_cfg = codegen_cfg.get("elicitation", {}) or {}
@@ -234,6 +246,9 @@ class Scheduler:
         self.current: Process | None = None
         self.pending: PendingRun | None = None
         self._lock = threading.RLock()
+        self._drafts: deque[DraftAuthor] = deque()
+        self._draft_notify = threading.Condition(self._lock)
+        self._draft_thread: threading.Thread | None = None
         self._writes: deque[SkillWrite] = deque()
         self._write_notify = threading.Condition(self._lock)
         self._write_thread: threading.Thread | None = None
@@ -421,10 +436,7 @@ class Scheduler:
             create_margin=self.create_margin,
         )
         if isinstance(navigation, CreateCategory):
-            created = self._create_category(request)
-            if created.kind != "create_category":
-                return created
-            return self._dispatch_skill(request, created.skill, weight)
+            return self._dispatch_create_category(request, weight)
         if isinstance(navigation, CreateSkill):
             if navigation.category in CANNED_CATEGORIES:
                 fallback = self._canned_fallback(navigation.category)
@@ -460,16 +472,34 @@ class Scheduler:
                 return skill
         return skills[0] if skills else None
 
+    def _dispatch_create_category(
+        self, request: Request, weight: float = 0.0
+    ) -> DispatchResult:
+        """Queue a new top-level category for the `llm` draft worker.
+
+        The gate stays free: the small model authors the category in the
+        background and, once it lands, the same worker authors the skill leaf
+        inside it and hands off to the codegen body worker. On failure the
+        request is not re-dispatched and the user is told.
+        """
+        self._queue_draft(request, None, "category", weight)
+        return DispatchResult(
+            kind="create_category",
+            summary=(
+                "authoring a new category in the background; the request will "
+                "re-run when it is ready"
+            ),
+        )
+
     def _dispatch_skill(
         self, request: Request, category: str, weight: float = 0.0
     ) -> DispatchResult:
-        """create_skill in `category`, then launch an async body write.
+        """Queue a new skill leaf for the `llm` draft worker.
 
-        The stub is authored and registered synchronously so the leaf is
-        navigable immediately; the runnable body is written in the background
-        by the single-slot codegen worker. When the body lands, the original
-        request is re-queued and re-runs navigation onto the new leaf. A
-        re-dispatched request whose skill is still unwritten must not author a
+        The small model authors the title + description in the background, then
+        the codegen worker writes the runnable body; when the body lands the
+        original request is re-queued and re-runs navigation onto the new leaf.
+        A re-dispatched request whose skill is still unwritten must not author a
         second skill — it reports the pending write instead.
         """
         pending = request.meta.get("awaiting_skill_body")
@@ -483,70 +513,14 @@ class Scheduler:
                 ),
                 skill=name,
             )
-        created = self._create_skill(request, category)
-        if created.kind != "create_skill" or created.draft is None:
-            return created
-        if self.asker is not None:
-            self._elicit_requirements(request, category, created.draft)
-        elif self.elicitation_enabled:
-            if self.defer_questions:
-                self.trace.append(
-                    "requirements_deferred",
-                    request.id,
-                    category=category,
-                    skill=created.draft.name,
-                )
-            else:
-                self.trace.append(
-                    "requirements_skipped",
-                    request.id,
-                    category=category,
-                    skill=created.draft.name,
-                    reason="no asker wired",
-                )
-        self._start_skill_write(request, category, created.draft, weight)
-        return created
-
-    def _elicit_requirements(
-        self, request: Request, category: str, draft: SkillDraft
-    ) -> None:
-        """Ask the product owner implementation questions before the body is written.
-
-        Inline path (the REPL wires an asker): questions are generated and asked
-        synchronously at dispatch. The dashboard uses the deferred path instead —
-        the worker posts questions to `self.questions` and waits for answers.
-        Answers seed the draft's requirements and the intended integration. Any
-        failure degrades to no requirements — elicitation must never block
-        authoring.
-        """
-        if not self.elicitation_enabled or self.codegen is None:
-            return
-        try:
-            elicited = generate_elicitation(
-                self.codegen, request, category, draft, self.tree,
-                max_questions=self.elicitation_max,
-            )
-        except CodegenError:
-            return
-        if elicited.integration:
-            draft.integration = elicited.integration
-        for question in elicited.questions:
-            try:
-                answer = self.asker(question)
-            except Exception:
-                return
-            if answer is None or not answer.strip():
-                return
-            draft.requirements[question] = answer.strip()
-        if draft.requirements or draft.integration:
-            self.trace.append(
-                "requirements",
-                request.id,
-                category=category,
-                skill=draft.name,
-                questions=list(draft.requirements.keys()),
-                integration=draft.integration or None,
-            )
+        self._queue_draft(request, category, "skill", weight)
+        return DispatchResult(
+            kind="create_skill",
+            summary=(
+                f"authoring a new skill for {category} in the background; "
+                "the request will re-run when it is ready"
+            ),
+        )
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
         if skill.writing:
@@ -915,108 +889,146 @@ class Scheduler:
             requirements=dict(row.get("requirements") or {}),
         )
 
-    def _create_category(self, request: Request) -> DispatchResult:
-        """Author a new category stub with the decision model in generation mode.
+    # ---- async draft authoring (single-slot `llm` worker) ----
 
-        The engine is always real, so an EngineUnavailable is fatal: it is
-        recorded and re-raised for the caller to stop on.
+    def _queue_draft(
+        self,
+        request: Request,
+        category: str | None,
+        kind: str,
+        weight: float,
+    ) -> None:
+        """Queue a category or skill draft for the `llm` worker.
+
+        The gate stays free: this returns immediately and one draft at a time is
+        authored in the background. A category job chains into its skill job; a
+        skill job hands off to the codegen body worker.
         """
+        with self._lock:
+            self._drafts.append(
+                DraftAuthor(
+                    request=request, category=category, weight=weight, kind=kind
+                )
+            )
+            if self._draft_thread is None or not self._draft_thread.is_alive():
+                self._draft_thread = threading.Thread(
+                    target=self._draft_worker, name="draft-author", daemon=True
+                )
+                self._draft_thread.start()
+            self._draft_notify.notify()
+        target = category or "(new category)"
+        print(
+            f"[llm] queued {kind} authoring for {target}; "
+            "the request will re-run when it is ready."
+        )
+
+    def _draft_worker(self) -> None:
+        """Drain the draft queue one authoring call at a time."""
+        while True:
+            with self._draft_notify:
+                while not self._drafts and self._fatal is None:
+                    self._draft_notify.wait()
+                if self._fatal is not None:
+                    return
+                job = self._drafts.popleft()
+            self._author_draft(job)
+
+    def _author_draft(self, job: DraftAuthor) -> None:
         try:
-            draft = generate_category(self.engine, request, self.tree)
-        except EngineUnavailable as exc:
-            self._mark_fatal(exc)
-            raise
-        except ValueError as exc:
-            self.trace.append("error", request.id, phase="create_category", message=str(exc))
-            return DispatchResult(kind="error", summary=f"create_category failed: {exc}")
-        if draft.name in self.tree:
-            self.trace.append(
-                "error",
-                request.id,
-                phase="create_category",
-                message=f"category {draft.name} already exists",
-            )
-            return DispatchResult(
-                kind="error",
-                summary=f"create_category failed: {draft.name} already exists",
-            )
-        self.registry.register(draft.name, draft.description)
-        self.tree[draft.name] = []
-        self.trace.append(
-            "category_created",
-            request.id,
-            category=draft.name,
-            description=draft.description,
-        )
-        return DispatchResult(
-            kind="create_category",
-            summary=f"created category {draft.name}: {draft.description}",
-            skill=draft.name,
-        )
+            if job.kind == "category":
+                self._author_category(job)
+            else:
+                self._author_skill(job)
+        except (ProviderError, ValueError) as exc:
+            self._fail_draft(job, exc)
 
-    def _create_skill(self, request: Request, category: str) -> DispatchResult:
-        """Author a new skill leaf with the decision model in generation mode.
+    def _tree_snapshot(self) -> dict:
+        with self._lock:
+            return {category: list(skills) for category, skills in self.tree.items()}
 
-        The small model writes the title + description; the stub is registered
-        and merged into the tree so the leaf is navigable immediately. If
-        codegen is configured, the runnable body is written asynchronously (see
-        _start_skill_write) and the request is re-dispatched once the body
-        lands; the returned result carries the draft so _dispatch_skill can
-        launch that write. Without codegen the stub is final. The engine is
-        always real, so an EngineUnavailable is fatal: it is recorded and
-        re-raised for the caller to stop on.
+    def _author_category(self, job: DraftAuthor) -> None:
+        """Author a top-level category, then chain into its skill leaf.
+
+        An `llm` failure is graceful: only the user is told, the request is not
+        re-dispatched — the decision engine stays the single fatal dependency.
         """
-        try:
-            draft = generate_skill(self.engine, request, category, self.tree)
-        except EngineUnavailable as exc:
-            self._mark_fatal(exc)
-            raise
-        except ValueError as exc:
-            self.trace.append("error", request.id, phase="create_skill", message=str(exc))
-            return DispatchResult(kind="error", summary=f"create_skill failed: {exc}")
-        existing = {s.name for s in self.tree.get(category, [])}
-        if draft.name in existing:
+        draft = generate_category(self.llm, job.request, self._tree_snapshot())
+        with self._lock:
+            if draft.name in self.tree:
+                self.trace.append(
+                    "error",
+                    job.request.id,
+                    phase="create_category",
+                    message=f"category {draft.name} already exists",
+                )
+                return
+            self.registry.register(draft.name, draft.description)
+            self.tree[draft.name] = []
             self.trace.append(
-                "error",
-                request.id,
-                phase="create_skill",
-                category=category,
-                message=f"skill {draft.name} already exists",
-            )
-            return DispatchResult(
-                kind="error",
-                summary=f"create_skill failed: {draft.name} already exists",
-            )
-
-        self.registry.register_skill(
-            category, draft.name, draft.description, request_text=request.text
-        )
-        self.tree.setdefault(category, []).append(
-            Skill(name=draft.name, category=category, description=draft.description)
-        )
-        if self.codegen is None:
-            self.trace.append(
-                "skill_created",
-                request.id,
-                category=category,
-                skill=draft.name,
+                "category_created",
+                job.request.id,
+                category=draft.name,
                 description=draft.description,
-                body=None,
-                written=False,
             )
-            return DispatchResult(
-                kind="create_skill",
-                summary=f"created stub {category}.{draft.name}: {draft.description} (no codegen configured)",
-                skill=draft.name,
+        self._queue_draft(job.request, draft.name, "skill", job.weight)
+
+    def _author_skill(self, job: DraftAuthor) -> None:
+        """Author a skill leaf stub, then launch the codegen body write."""
+        draft = generate_skill(
+            self.llm, job.request, job.category, self._tree_snapshot()
+        )
+        with self._lock:
+            existing = {s.name for s in self.tree.get(job.category, [])}
+            if draft.name in existing:
+                self.trace.append(
+                    "error",
+                    job.request.id,
+                    phase="create_skill",
+                    category=job.category,
+                    message=f"skill {draft.name} already exists",
+                )
+                return
+            self.registry.register_skill(
+                job.category,
+                draft.name,
+                draft.description,
+                request_text=job.request.text,
             )
-        return DispatchResult(
-            kind="create_skill",
-            summary=(
-                f"created stub {category}.{draft.name}: {draft.description} — "
-                "body writing in background; request will re-run when ready"
-            ),
-            skill=draft.name,
-            draft=draft,
+            self.tree.setdefault(job.category, []).append(
+                Skill(
+                    name=draft.name,
+                    category=job.category,
+                    description=draft.description,
+                )
+            )
+            if self.codegen is None:
+                self.trace.append(
+                    "skill_created",
+                    job.request.id,
+                    category=job.category,
+                    skill=draft.name,
+                    description=draft.description,
+                    body=None,
+                    written=False,
+                )
+        if self.codegen is None:
+            return
+        self._start_skill_write(job.request, job.category, draft, job.weight)
+
+    def _fail_draft(self, job: DraftAuthor, exc: Exception) -> None:
+        """Surface a failed draft authoring; the request is not re-dispatched."""
+        target = job.category or "(new category)"
+        with self._lock:
+            self.trace.append(
+                "draft_failed",
+                job.request.id,
+                authoring=job.kind,
+                category=job.category,
+                message=str(exc),
+            )
+        print(
+            f"[llm] {job.kind} authoring for {target} FAILED: {exc}. "
+            "The request was not re-dispatched."
         )
 
     # ---- async skill-body writes (single-slot codegen worker) ----
@@ -1173,12 +1185,21 @@ class Scheduler:
     def _deferred_elicit(self, job: SkillWrite, tree: dict) -> None:
         """Generate questions in the background, post them, wait for answers.
 
-        The dashboard path: no inline asker exists, so the single-slot worker
-        itself asks. It pauses here for up to `elicitation.wait_timeout` while
-        the gate stays free and other requests proceed; whatever answers arrive
-        (possibly none) feed the body writer.
+        The single-slot worker itself asks: the REPL, dashboard, and gateway all
+        defer questions to `self.questions` now that authoring is async. It
+        pauses here for up to `elicitation.wait_timeout` while the gate stays
+        free and other requests proceed; whatever answers arrive (possibly none)
+        feed the body writer.
         """
         if not (self.defer_questions and self.elicitation_enabled and self.codegen):
+            if self.elicitation_enabled and self.codegen is not None:
+                self.trace.append(
+                    "requirements_skipped",
+                    job.request.id,
+                    category=job.category,
+                    skill=job.draft.name,
+                    reason="questions not deferred by this front end",
+                )
             return
         try:
             elicited = generate_elicitation(

@@ -19,12 +19,11 @@ import pytest
 from semif_agent.cli import REPO_ROOT, load_config
 from semif_agent.codegen import CodegenClient
 from semif_agent.decisions import Request
-from semif_agent.engine import EngineConfig, EngineUnavailable, SemIfEngine
-from semif_agent.llm import LLMClient
+from semif_agent.engine import EngineConfig, SemIfEngine
+from semif_agent.llm import LLMClient, LLMError
 from semif_agent.log import DecisionLog
 from semif_agent.skill import RunResult
 from semif_agent.scheduler import (
-    DispatchResult,
     PendingQuestion,
     RepairOffer,
     Scheduler,
@@ -280,16 +279,10 @@ def test_category_registry_roundtrip(tmp_path):
     assert loaded["delivery"]["skills"] == []
 
 
-def test_generate_category_without_engine_raises():
-    engine = SemIfEngine(EngineConfig())
-    with pytest.raises(EngineUnavailable):
-        generate_category(engine, Request("anything"), {})
-
-
-def test_generate_without_engine_raises():
-    engine = SemIfEngine(EngineConfig())
-    with pytest.raises(EngineUnavailable):
-        engine.generate([{"role": "user", "content": "hi"}])
+def test_generate_category_without_endpoint_raises():
+    client = LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
+    with pytest.raises(LLMError):
+        generate_category(client, Request("anything"), {})
 
 
 def test_build_tree_includes_registry_stubs(tmp_path):
@@ -359,10 +352,10 @@ def test_parse_skill_draft_rejects_unclean_title():
         parse_skill_draft('{"title": "ca$h!", "description": "nope"}')
 
 
-def test_generate_skill_without_engine_raises():
-    engine = SemIfEngine(EngineConfig())
-    with pytest.raises(EngineUnavailable):
-        generate_skill(engine, Request("anything"), "tracking", {})
+def test_generate_skill_without_endpoint_raises():
+    client = LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
+    with pytest.raises(LLMError):
+        generate_skill(client, Request("anything"), "tracking", {})
 
 
 def test_category_registry_register_skill(tmp_path):
@@ -796,12 +789,14 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
     scheduler.tree["simplex"] = [
         Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
     ]
-    scheduler._create_skill = lambda request, category: DispatchResult(
-        kind="create_skill", summary="authoring requested", skill="send_message"
+    queued: list = []
+    scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+        (category, kind)
     )
     request = Request("send a simplex message to pepper")
     result = scheduler._dispatch(request)
     assert result.kind == "create_skill"
+    assert queued == [("simplex", "skill")]
     phases = [r["extra"].get("phase") for r in scheduler.log.read()]
     assert "navigate:intent" in phases
 
@@ -832,14 +827,15 @@ def test_dispatch_intent_match_runs_skill(tmp_path):
 
 
 
-def test_dispatch_create_category_without_engine_is_fatal(tmp_path):
-    """An empty tree short-circuits to CreateCategory; without an engine the
-    category authoring is fatal — the app is marked and the caller stops."""
+def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
+    """An empty tree short-circuits to CreateCategory; the `llm` draft is
+    queued asynchronously. An unreachable llm endpoint is graceful — traced and
+    the request is not re-dispatched — never fatal (only SemIf is fatal)."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     scheduler = Scheduler(
         engine=SemIfEngine(EngineConfig()),
-        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        llm=LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2),
         log=log,
         config={
             "skills": {},
@@ -850,10 +846,16 @@ def test_dispatch_create_category_without_engine_is_fatal(tmp_path):
         trace=trace,
     )
     scheduler.tree = {}
-    with pytest.raises(EngineUnavailable):
-        scheduler._dispatch(Request("anything"))
-    assert scheduler.fatal is not None
-    assert "not available" in scheduler.fatal
+    result = scheduler._dispatch(Request("anything"))
+    assert result.kind == "create_category"
+    assert scheduler.fatal is None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if any(e["kind"] == "draft_failed" for e in trace.read()):
+            break
+        time.sleep(0.02)
+    assert any(e["kind"] == "draft_failed" for e in trace.read())
+    assert scheduler.fatal is None
 
 
 def test_skill_status_reflects_writing_and_noop():
@@ -1077,56 +1079,36 @@ def test_unresolved_variables_respects_tiered_config(tmp_path):
     assert unresolved_variables(store, skill2, {}) == ["sender_address", "tag"]
     assert unresolved_variables(store, skill2, {}, answered={"tag": "per-fire"}) == ["sender_address"]
 
-def test_elicit_requirements_asks_and_records(tmp_path):
-    """Opt-in elicitation asks the product owner refinement questions before
-    the body is written and rides the answers on the draft into the body prompt."""
+def test_deferred_elicitation_asks_and_records(tmp_path):
+    """Opt-in elicitation runs on the codegen worker (deferred): questions are
+    posted to the question queue, the worker waits, and the answers ride the
+    draft into the body prompt."""
     httpd, base = _pipeline_codegen_server(
         ['{"questions": ["Draft or send?"]}', GOOD_BODY, "{}", GOOD_TEST]
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
+        scheduler.defer_questions = True
         scheduler.elicitation_enabled = True
-        answers = []
-        scheduler.asker = lambda q: (answers.append(q), "draft first")[1]
+        request = Request("track my package")
         draft = SkillDraft(name="track_live", description="Follow a package.")
-        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
-        assert answers == ["Draft or send?"]
+        job = SkillWrite(request=request, category="tracking", draft=draft, weight=0.5)
+
+        def answerer() -> None:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                pending = scheduler.pending_questions()
+                if pending:
+                    scheduler.answer_question(pending[0]["id"], "draft first")
+                    return
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=answerer)
+        thread.start()
+        scheduler._deferred_elicit(job, scheduler.tree)
+        thread.join()
         assert draft.requirements == {"Draft or send?": "draft first"}
         assert any(e["kind"] == "requirements" for e in scheduler.trace.read())
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_elicit_requirements_disabled_skips(tmp_path):
-    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_TEST])
-    try:
-        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
-        scheduler.elicitation_enabled = False
-        scheduler.asker = lambda q: "answer"
-        draft = SkillDraft(name="track_live", description="Follow a package.")
-        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
-        assert draft.requirements == {}
-        assert httpd.RequestHandlerClass.chat_calls == 0
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_elicit_requirements_asker_none_stops(tmp_path):
-    """An asker that stops answering (None) halts collection without error."""
-    httpd, base = _pipeline_codegen_server(
-        ['{"questions": ["A?", "B?"]}', GOOD_BODY, "{}", GOOD_TEST]
-    )
-    try:
-        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
-        scheduler.elicitation_enabled = True
-        asked = []
-        scheduler.asker = lambda q: (asked.append(q), None)[1]
-        draft = SkillDraft(name="track_live", description="Follow a package.")
-        scheduler._elicit_requirements(Request("track my package"), "tracking", draft)
-        assert asked == ["A?"]
-        assert draft.requirements == {}
     finally:
         httpd.shutdown()
         httpd.server_close()

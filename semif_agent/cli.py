@@ -70,9 +70,19 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
             threads=config.get("engine", {}).get("threads"),
         )
     )
+    llm_cfg = config.get("llm", {}) or {}
     llm = LLMClient(
-        base_url=config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
-        model=config.get("llm", {}).get("model", "qwen2.5:3b"),
+        base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
+        model=llm_cfg.get("model", "qwen2.5:3b"),
+        timeout=float(llm_cfg.get("timeout", 600.0)),
+        stream=bool(llm_cfg.get("stream", False)),
+        idle_warn=float(llm_cfg.get("idle_warn", 30.0)),
+        idle_timeout=float(llm_cfg.get("idle_timeout", 120.0)),
+        context_window=float(llm_cfg.get("context_window", 0.0)),
+        temperature=float(llm_cfg.get("temperature", 0.2)),
+        top_p=float(llm_cfg.get("top_p", 0.9)),
+        presence_penalty=float(llm_cfg.get("presence_penalty", 0.0)),
+        frequency_penalty=float(llm_cfg.get("frequency_penalty", 0.0)),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
@@ -238,7 +248,7 @@ def _fatal_exit(scheduler: Scheduler) -> int | None:
 
 
 def repl(scheduler: Scheduler, config: dict) -> int:
-    scheduler.asker = lambda question: input(f"{question} ")
+    scheduler.defer_questions = True
     print(try_warm(scheduler))
     print(
         "type a request, or one of: busy <text> | idle | status | skills | dream | "
@@ -246,6 +256,7 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         "repairs | repair <offer-id> [action] | quit"
     )
     while True:
+        _answer_questions(scheduler)
         try:
             line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):

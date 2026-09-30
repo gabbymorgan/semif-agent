@@ -68,23 +68,26 @@ scheduler.py    no up-front gate: every input is dispatched
                 -> choice(tau) -> score -> queue; preempt + requeue;
                 a skill run paused for input (needs_input) keeps `current`
                 busy; `answer` routes straight to the pending run, bypassing
-                gate/score/navigation; skill-body authoring is an ASYNC single-slot
-                worker (stub authored sync, write queued, gate stays free, the
-                original request is re-queued and re-runs the new leaf when the
-                body lands); the worker runs the full pipeline: elicitation ->
+                gate/score/navigation; draft authoring (title+description by the
+                small `llm` provider) AND skill-body authoring (codegen) are ASYNC
+                single-slot workers: a create_category/create_skill request is
+                queued, the gate stays free, the category job chains into its
+                skill job, and the original request is re-queued and re-runs the
+                new leaf when the body lands; the body worker runs the full
+                pipeline: elicitation ->
                 codegen body -> fidelity gate -> data contract -> test ->
                 auto-run test (3-option SemIf regen ladder on failure); config
                 search auto-populates the skill config from global/category
-                config; elicitation asks implementation questions (REPL inline;
-                dashboard deferred via the question queue, `wait_timeout`); a
+                config; elicitation asks implementation questions (all front ends
+                defer via the question queue, `wait_timeout`); a
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 tree only), navigation = SemIf choices per level (logged),
                 create_category
-                and create_skill author + register stubs via the decision model
-                in generation mode; SkillStore persists one folder per skill
+                and create_skill author + register stubs via the small `llm`
+                provider (separate from codegen); SkillStore persists one folder per skill
                 (skill.py, skill.test.py, contract.json, config.json) and
                 materialize_skill / merge_skill_store
                 hot-load runnable skills from data/skills/;
@@ -124,9 +127,14 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 test: inline fixtures, loopback http.server for HTTP bodies, no
                 external network, no mock_data.json); run_skill_test executes
                 the test as a subprocess
-llm.py          dormant OpenAI-compatible client (stdlib urllib); the small
-                LLM is out of every decision path — assessment/fidelity are
-                SemIf — only `_parse_json` is still borrowed by the parsers
+llm.py          small OpenAI-compatible provider (LLMClient) that authors a
+                new category/skill title + description — its own endpoint/model,
+                deliberate separate from codegen; provider logic (SSE/budget/idle)
+                is shared from provider.py; `_parse_json` is also borrowed by the
+                authoring parsers
+provider.py    shared OpenAI-compatible chat transport (OpenAICompatClient:
+                SSE stream, token budget, idle watchdog, degeneration hook)
+                subclassed by llm.LLMClient and codegen.CodegenClient
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
@@ -199,7 +207,7 @@ Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)
 Machine split (Sep 2026): **guppy** hosts the remote **codegen** model (the
 12G `qwen38-iq3s`) only; **jarvis** is the staging/test target (semif-agent +
 SemIf engine + deps) and runs its **own local ollama** serving the small
-self-assessment model (`qwen3.5:4b`). Only codegen traffic travels to guppy.
+title/description model (`qwen3.5:4b`). Only codegen traffic travels to guppy.
 Provision jarvis with `scripts/bootstrap.sh` (see "### jarvis (staging)").
 
 **Connecting to jarvis (`ssh jarvis@192.168.8.130`)**: this is a plain `ssh`
@@ -258,9 +266,10 @@ CLI, unit tests (24) + box integration tests (2).
   validate (accuracy/ECE on a held-out slice, prompt-hash regression), swap the
   pinned model revision. GPU offload: train on a beefier GPU; the running agent
   keeps a frozen inference revision until a swap validates.
-- `create_skill` branch: live, mirroring `create_category`. The decision
-  model, driven in normal generation mode via `SemIfEngine.generate`, proposes a
-  specific skill title + description for the chosen category; the stub is
+- `create_skill` branch: live, mirroring `create_category`. The small `llm`
+  provider (a dedicated endpoint/model, separate from `codegen`; production may
+  point both at the same host) proposes a specific skill title + description for
+  the chosen category; the stub is
   persisted to `data/categories.json` (under that category's `skills` list) and
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body via the async authoring pipeline: a larger
@@ -268,13 +277,17 @@ CLI, unit tests (24) + box integration tests (2).
   `predict`/`act` code against `SKILL.md`, then a contract + test
   (against `TESTGEN.md`) are generated and the test is auto-run before the leaf
   is declared ready — all persisted to a folder in `data/skills/` and
-  hot-loaded. Authoring is **asynchronous**: the stub is created and the gate
-  freed immediately, the body write runs on a single-slot background worker, and
+  hot-loaded. Authoring is **asynchronous**: the draft is authored by a
+  single-slot `llm` worker, the stub is created and the gate
+  freed immediately, the body write runs on a separate single-slot codegen
+  worker, and
   once the body lands the request that prompted creation is re-queued and re-runs
   navigation onto the new leaf (an empty/in-progress leaf can be restarted via
   `restart <category> <skill>` or the dashboard). A request that prompted a whole
   new category runs the same chain deterministically: `create_category` →
-  `create_skill` → async body → re-dispatch. Authoring is still a single pass —
+  `create_skill` → async body → re-dispatch. An unreachable `llm` endpoint is
+  graceful (traced `draft_failed`, user notified, request not re-dispatched);
+  only SemIf availability is fatal. Authoring is still a single pass —
   validating/reusing written bodies across runs is future work.
   **Create-branch confidence gate** (Sep 2026): `create_skill`/`create_category`
   compete in a softmax with the real options, so a weak plurality win is not
@@ -300,7 +313,7 @@ CLI, unit tests (24) + box integration tests (2).
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which
   service/account, how to connect, where the credential comes from, what success
-  looks like); the REPL asks inline, the dashboard defers via the question queue
+  looks like); every front end defers via the question queue
   (`/api/questions`, worker waits `codegen.elicitation.wait_timeout`). Bodies
   must perform the real action via stdlib transports with values from
   `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
@@ -381,7 +394,7 @@ CLI, unit tests (24) + box integration tests (2).
   llama.cpp **CPU** backend (its llamacpp backend forces `n_gpu_layers=0`), so
   the GPU is NOT used by the decision engine — it IS used by ollama.
 - **jarvis box**: runs the agent and its **own local ollama** serving the small
-  self-assessment model (`qwen3.5:4b`). `config.json` `llm.base_url` points at
+  title/description model (`qwen3.5:4b`). `config.json` `llm.base_url` points at
   `http://127.0.0.1:11434/v1`; only `codegen.base_url` points at guppy.
 - The SemIf tokenizer is fetched from HF (`Qwen/Qwen3.5-4B` at the pinned
   revision), cached under each checkout's `.runtime/hf` (`HF_HOME`).
@@ -426,7 +439,7 @@ CLI, unit tests (24) + box integration tests (2).
   (`sudo systemctl restart ollama`) — the ROCm runner can wedge.
 - **jarvis = local small model.** Runs its own ollama (`/usr/local/bin/ollama`,
   systemd `ollama.service`, `127.0.0.1:11434`) serving `qwen3.5:4b` for
-  self-assessment (assess/elicitation/fidelity, ~3s). `bootstrap.sh` ensures
+  new-skill title/description authoring (~3s). `bootstrap.sh` ensures
   that model is pulled; `config.json` `llm.base_url` points here.
 - `bootstrap.sh` installs **no ollama**: it expects the target box to already
   run one for `llm` (and pulls `llm.model` into it), while codegen is remote.
@@ -503,9 +516,9 @@ CLI, unit tests (24) + box integration tests (2).
 ### codegen (skill bodies, box)
 - Skill **bodies** are written by a separate OpenAI-compatible model, configured
   under `codegen` in config.json (default model `qwen38-iq3s`, the 12G 27B
-  IQ3_S GGUF — huge/slow). Title + description for new skills still come from
-  the **small** decision model (`engine.generate`); only the runnable code body
-  uses codegen.
+  IQ3_S GGUF — huge/slow). Title + description for new skills come from the
+  separate small `llm` provider (its own endpoint/model, shared transport in
+  `provider.py`); only the runnable code body uses codegen.
 - **Do NOT cap `max_tokens`** on the codegen call. qwen38-iq3s reasons first
   and a cap truncates the hidden reasoning, leaving `content` empty
   (`finish_reason: length`) and the body write fails with "skill body is
@@ -553,14 +566,14 @@ CLI, unit tests (24) + box integration tests (2).
   as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the
   endpoint as trusted.
-- Flow in `scheduler._dispatch_skill`: small model authors title+description →
-  stub registered + hot-merged into the tree (navigable immediately) → trace
-  `skill_writing` (dashboard shows title/description + a "writing skill body…"
-  badge) → the body write is queued to a **single-slot background worker** (the
-  12G codegen model can't run twice), the gate stays free for new input. The
-  worker runs the full authoring pipeline:
+- Flow in `scheduler._dispatch_skill`: the request is queued to the **single-slot
+  `llm` draft worker** (small model authors title+description) → stub registered
+  + hot-merged into the tree → the body write is queued to a **separate
+  single-slot codegen worker** (the 12G codegen model can't run twice), the gate
+  stays free for new input. A category request chains the same way in one worker.
+  The codegen worker runs the full authoring pipeline:
   1. **elicitation** (`generate_elicitation`): implementation questions +
-     integration hint. REPL asks inline at dispatch; the dashboard sets
+     integration hint. Every front end (REPL, dashboard, gateway) sets
      `defer_questions` and the worker posts to the question queue and waits
      (`codegen.elicitation.wait_timeout`) for answers.
   2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
@@ -613,8 +626,8 @@ CLI, unit tests (24) + box integration tests (2).
 - **Requirements elicitation (implementation questions, default on).**
   `codegen.elicitation.enabled` asks the product owner how the new skill should
   connect (which service/account, how to connect, where the credential comes
-  from, what success looks like, how failure should behave). The REPL asks
-  inline at dispatch; the dashboard defers — the single-slot worker posts
+  from, what success looks like, how failure should behave). Every front end
+  defers — the single-slot worker posts
   questions to `scheduler.questions` (`GET/POST /api/questions`) and waits up to
   `codegen.elicitation.wait_timeout` seconds, then proceeds with whatever
   answers arrived (`questions_timeout` trace). Answers ride on the draft into
@@ -897,7 +910,7 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   up the stdlib HTTP server on an ephemeral port with the engine never loaded;
   `tests/test_codegen.py` for prompt/parse/validate, integration
   extraction/findings, and body store round-trips; and `tests/test_llm.py` for
-  the retained `_parse_json` helper. `tests/conftest.py``s `ScriptedEngine`
+  the `_parse_json` helper and the LLMClient provider. `tests/conftest.py``s `ScriptedEngine`
   drives scheduling mechanics (assessment is now a SemIf decision) without a
   GGUF.
 - `tests/integration/` — jarvis only (staging); requires real SemIf + real

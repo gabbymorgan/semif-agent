@@ -148,17 +148,18 @@ observe baseline → predict → act → observe outcome → assess
 
 ### Authoring a new skill
 
-When navigation chooses a create branch, `scheduler._dispatch_skill` runs the
-authoring pipeline. It is **asynchronous** and single-slot, so the gate stays
-free while the big codegen model thinks:
+When navigation chooses a create branch, the scheduler queues the draft to a
+single-slot `llm` worker and the body write to a separate single-slot codegen
+worker. It is **asynchronous**, so the gate stays free while either model thinks:
 
-1. **Stub.** The small decision model (`SemIfEngine.generate`) authors a title +
-   description. The stub is registered and hot-merged into the running tree
-   immediately (navigable right away); a `skill_writing` trace event is emitted.
+1. **Stub.** The small `llm` provider (`generate_skill`) authors a title +
+   description on its own worker. The stub is registered and hot-merged into the
+   running tree as
+   soon as it lands; a `skill_writing` trace event is emitted.
 2. **Elicitation** (`generate_elicitation`, default on): implementation
    questions — which service/account, how to connect, where the credential
-   comes from, what success looks like. The REPL asks inline; the dashboard
-   defers to a question queue and the worker waits
+   comes from, what success looks like. Every front end (REPL, dashboard,
+   gateway) defers to a question queue and the worker waits
    (`codegen.elicitation.wait_timeout`).
 3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
    (`codegen`, default `qwen38-iq3s`) writes `predict`/`act` against `SKILL.md`,
@@ -285,8 +286,9 @@ semif_agent/
                     create gates, intent guard, tiered config resolution
   codegen.py        OpenAI-compatible client; body/elicitation/contract/test
                     generation; parse/validate; INTEGRATION extraction; test runner
+  provider.py       shared OpenAI-compatible transport (SSE/budget/idle/watchdog)
   engine.py         SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
-  llm.py            dormant OpenAI-compatible client (`_parse_json` is reused)
+  llm.py            small OpenAI-compatible provider; authors new title + description
   log.py            decisions.jsonl rows {state, question, options, probs, ...}
   trace.py          runs.jsonl lifecycle events keyed by run_id
   dream.py          NLL / weighted CE / accuracy / ECE cost report
@@ -323,11 +325,11 @@ machines:
 
 - **`codegen`** — the large model that writes skill bodies (e.g.
   `qwen38-iq3s`, a 27B IQ3_S GGUF). This is slow and ideally on a beefier host.
-- **`llm`** — an OpenAI-compatible endpoint retained but **dormant**: assessment,
-  fidelity and requeue are SemIf decisions now, so the LLM is out of every
-  decision path (only its `_parse_json` helper is borrowed by the authoring
-  parsers). It is configured for backlogged retirement; skill titles and
-  descriptions come from the SemIf decision model itself, not this endpoint.
+- **`llm`** — a small, fast model (e.g. `qwen3.5:4b`) that authors the title +
+  description of a newly created category/skill. Deliberately its own
+  endpoint/model, so it can stay local even when `codegen` is remote; it uses
+  the same provider transport (`provider.py`) and an unreachable endpoint is
+  graceful (the request is not re-dispatched), never fatal.
 
 The **decision engine is separate** and runs via llama.cpp CPU (or Vulkan if your
 build enables it), not ollama.
@@ -391,7 +393,7 @@ Key blocks:
 | Block | What it controls |
 | --- | --- |
 | `engine` | SemIf source/revision, GGUF path, context, threads |
-| `llm` | dormant OpenAI-compatible endpoint (out of every decision path) |
+| `llm` | small model endpoint that authors new category/skill title + description |
 | `codegen` | skill-body model endpoint, timeouts, sampler, elicitation, fidelity, repair, test, degeneration watchdog, token budget |
 | `navigation` | create-gate `create_tau` / `create_margin` |
 | `tau` | decision threshold; `max_reentries` requeue bound |
