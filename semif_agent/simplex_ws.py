@@ -23,12 +23,36 @@ import json
 import queue
 import random
 import threading
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 #: One received direct text message, normalized across the v7 wire shapes.
 InboundDict = dict[str, Any]
 #: Callback invoked in the event loop for each received direct text message.
 MessageHandler = Callable[[InboundDict], None]
+#: Async callback invoked in the event loop once a connection is established.
+ConnectedHandler = Callable[[], Awaitable[None]]
+
+
+def contact_entry(contact: dict) -> dict | None:
+    """Normalize one daemon `Contact` into `{"id", "display_name"}`, or None.
+
+    The single source of truth for contact identity across the wire: the same
+    shape appears in `newChatItems` items and in the `/_contacts` list. v7's
+    `Contact.displayName` is null and the real peer name lives in
+    `profile.displayName`; `localDisplayName` is auto-suffixed on collisions
+    (e.g. a second contact becomes `pepper_1`).
+    """
+    contact_id = str(contact.get("contactId") or contact.get("chatId") or "")
+    if not contact_id:
+        return None
+    profile = contact.get("profile") or {}
+    display_name = (
+        profile.get("displayName")
+        or contact.get("displayName")
+        or contact.get("localDisplayName")
+        or ""
+    )
+    return {"id": contact_id, "display_name": display_name}
 
 
 def contact_link(resp: dict) -> dict:
@@ -84,23 +108,16 @@ def parse_direct_text_item(item: dict) -> InboundDict | None:
     text = str(msg_content.get("text", "")).strip()
     if not text:
         return None
-    contact = chat_info.get("contact") or {}
-    contact_id = str(contact.get("contactId") or chat_info.get("chatId") or "")
-    if not contact_id:
+    contact = dict(chat_info.get("contact") or {})
+    if not contact.get("contactId") and not contact.get("chatId"):
+        contact["chatId"] = chat_info.get("chatId")
+    entry = contact_entry(contact)
+    if entry is None:
         return None
-    profile = contact.get("profile") or {}
-    # v7's Contact has `displayName: null`; the real peer name lives in
-    # `profile.displayName`, and `localDisplayName` is auto-suffixed on
-    # collisions (e.g. a second contact becomes `pepper_1`).
-    display_name = (
-        profile.get("displayName")
-        or contact.get("displayName")
-        or contact.get("localDisplayName")
-    )
     return {
         "text": text,
-        "contact_id": contact_id,
-        "display_name": display_name,
+        "contact_id": entry["id"],
+        "display_name": entry["display_name"],
         "raw": item,
     }
 
@@ -149,6 +166,7 @@ class SimplexDaemon:
         user_id: int = 1,
         auto_accept: bool = True,
         reconnect: dict | None = None,
+        on_connected: ConnectedHandler | None = None,
         trace=None,
         name: str = "simplex",
     ):
@@ -159,6 +177,7 @@ class SimplexDaemon:
         self.reconnect_initial = float(settings.get("initial", 1.0))
         self.reconnect_max = float(settings.get("max", 60.0))
         self.reconnect_jitter = float(settings.get("jitter", 0.2))
+        self.on_connected = on_connected
         self.trace = trace
         self.name = name
         self._corr = 0
@@ -168,6 +187,7 @@ class SimplexDaemon:
         self._outbound: "queue.Queue[tuple[str, str] | None]" = queue.Queue()
         self._stop = threading.Event()
         self._on_message: MessageHandler | None = None
+        self._active_user_id: int | None = None
 
     # ---- requirements ----
 
@@ -208,6 +228,7 @@ class SimplexDaemon:
                     self._ws = ws
                     backoff = self.reconnect_initial
                     self._event("gateway_connected", url=self.ws_url)
+                    await self._notify_connected()
                     sender = asyncio.create_task(self._outbound_loop(ws))
                     try:
                         async for raw in ws:
@@ -230,6 +251,20 @@ class SimplexDaemon:
     async def _stop_wait(self) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(0.2)
+
+    async def _notify_connected(self) -> None:
+        """Run the optional `on_connected` hook; a hook failure must not drop
+        the socket (it is traced and the connection stays up)."""
+        if self.on_connected is None:
+            return
+        try:
+            await self.on_connected()
+        except Exception as exc:
+            self._event(
+                "gateway_error",
+                phase="on_connected",
+                message=str(exc)[:300],
+            )
 
     async def _outbound_loop(self, ws) -> None:
         loop = asyncio.get_running_loop()
@@ -312,6 +347,54 @@ class SimplexDaemon:
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
             raise TimeoutError("simplex address request timed out") from exc
+
+    # ---- contacts ----
+
+    async def active_user(self, timeout: float = 20.0) -> int:
+        """Resolve the active user id via `/user`, caching it after first use.
+
+        Falls back to the configured `user_id` when the daemon does not report
+        one, so a profile with a single user keeps working even on a shape drift.
+        """
+        if self._active_user_id is not None:
+            return self._active_user_id
+        resp = await self._roundtrip("/user", timeout)
+        user = resp.get("user") or {}
+        user_id = user.get("userId")
+        self._active_user_id = int(user_id) if user_id is not None else self.user_id
+        return self._active_user_id
+
+    async def contacts(self, timeout: float = 20.0) -> list[dict]:
+        """The daemon's contact list as `[{"id", "display_name"}]`.
+
+        `/_contacts <userId>` returns `contactsList` with a `Contact` array.
+        A `chatCmdError` or malformed reply yields an empty list rather than a
+        fabricated contact.
+        """
+        user_id = await self.active_user(timeout)
+        resp = await self._roundtrip(f"/_contacts {user_id}", timeout)
+        contacts: list[dict] = []
+        for contact in resp.get("contacts") or []:
+            entry = contact_entry(contact)
+            if entry is not None:
+                contacts.append(entry)
+        return contacts
+
+    def request_contacts(self, timeout: float = 20.0) -> list[dict]:
+        """Thread-safe contact-list lookup for callers off the event loop.
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated list.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(self.contacts(timeout=timeout), loop)
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex contacts request timed out") from exc
 
     # ---- inbound ----
 

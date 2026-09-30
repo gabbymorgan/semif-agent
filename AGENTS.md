@@ -160,10 +160,12 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
 bridges/        standalone third-party API bridges (SimpleX first). base.py:
                 BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
                 `X-Semif-Token` guard). inbox.py: MessagingInbox (bounded FIFO +
-                contacts, bridge-owned read cursor). simplex.py: SimplexBridge —
+                contacts learned from inbound DMs and the daemon contact list,
+                bridge-owned read cursor). simplex.py: SimplexBridge —
                 owns its OWN simplex-chat daemon/profile (separate from the
-                gateway's), buffers every inbound DM, serves invite-link/read/
-                send. registry.py: CATALOG, describe_bridges() (catalog injected
+                gateway's), buffers every inbound DM, refreshes the daemon
+                contact list on (re)connect + on demand, serves invite-link/
+                read/send. registry.py: CATALOG, describe_bridges() (catalog injected
                 into the codegen prompts), run_bridges(). Run with `python -m
                 semif_agent.cli bridge [--name NAME]`; config under `bridges`.
 simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
@@ -833,11 +835,15 @@ CLI, unit tests (24) + box integration tests (2).
   localhost-bound, optional shared-secret `X-Semif-Token` header. `SimplexBridge`
   buffers **every** inbound DM (no allowlist — the user wants to see who reached
   the bot through its invite link) in a bounded `MessagingInbox` that owns the
-  read cursor, and serves `GET /health`, `GET /contacts`, `GET /inbox` (peek),
-  `GET /inbox/next?contact=<id>` (pop oldest), `GET /address` (show/create the
-  forwarding bot's contact link; 503 when the daemon is not connected, 502 when
-  the lookup fails), and `POST /send` `{"recipient","text"}` (resolves a numeric
-  id or a known display name and enqueues on the bridge's own daemon).
+  read cursor, and serves `GET /health`, `GET /contacts` (the daemon's contact
+  list, refreshed on (re)connect and on demand — best-effort, falling back to
+  the cached/inbound-learned set when the daemon is unavailable), `GET /inbox`
+  (peek), `GET /inbox/next?contact=<id>` (pop oldest), `GET /address`
+  (show/create the forwarding bot's contact link; 503 when the daemon is not
+  connected, 502 when the lookup fails), and `POST /send`
+  `{"recipient","text"}` (resolves a numeric id or a known display name —
+  refreshing the daemon contact list once on a miss — and enqueues on the
+  bridge's own daemon).
 - **Skill-facing config.** The top-level `simplex_bridge_url` is the address a
   body calls (the data-contract config search auto-populates it); bootstrap keeps
   it in sync with the bridge port. Skills reach a bridge with the ordinary `http`
@@ -849,13 +855,15 @@ CLI, unit tests (24) + box integration tests (2).
 The bridge read path (`simplex.next_message`) and contact-link lookup
 (`simplex.connect_link`) are covered. Deferred follow-ups:
 
-- [ ] **1. Contact-list refresh from the daemon** (`bridges/simplex.py`,
-  `simplex_ws.py`). The bridge learns contacts only from observed inbound
-  senders, so `/send` cannot address a contact it has never received from.
-  Query `/_contacts <userId>` (active user from `/user` →
-  `activeUser.userId`) at startup and on demand, caching `contactId` +
-  `profile.displayName`. Reuse the daemon's corrId→Future path
-  (`SimplexDaemon._roundtrip`) rather than opening a second WebSocket client.
+- [x] **1. Contact-list refresh from the daemon** (`bridges/simplex.py`,
+  `simplex_ws.py`). Shipped: `SimplexDaemon.contacts()` /
+  `request_contacts()` query `/_contacts <userId>` (active user from `/user` →
+  `activeUser.userId`, cached, falling back to the configured `user_id`) over
+  the existing corrId→Future path; `SimplexBridge` merges the result into the
+  inbox on (re)connect via an `on_connected` hook and on demand (`GET
+  /contacts`, and a send-resolution miss), so `/send` can address a contact it
+  has never received from. Best-effort: a disconnected daemon keeps the cached
+  set.
 - [ ] **2. Message history + true unread** (`bridges/simplex.py`). The in-memory
   inbox is a receive buffer, not the daemon's read state. Use `/_get chats
   <userId> count=<n> <json(PaginationByTime)>` with a `ChatListQuery` unread

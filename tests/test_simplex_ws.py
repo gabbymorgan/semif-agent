@@ -14,6 +14,7 @@ import pytest
 from semif_agent.simplex_ws import (
     SimplexDaemon,
     accept_command,
+    contact_entry,
     contact_link,
     parse_direct_text_item,
     send_text_command,
@@ -133,6 +134,21 @@ def test_contact_link_reads_both_shapes():
     assert contact_link(flat)["connFullLink"] == "https://a"
     assert contact_link(direct)["connShortLink"] == "simplex:/b"
     assert contact_link({}) == {}
+
+
+def test_contact_entry_reads_v7_shape():
+    assert contact_entry(
+        {"contactId": 4, "displayName": None, "profile": {"displayName": "Alice"}}
+    ) == {"id": "4", "display_name": "Alice"}
+    assert contact_entry({"contactId": 7, "localDisplayName": "bob_1"}) == {
+        "id": "7",
+        "display_name": "bob_1",
+    }
+    assert contact_entry({"chatId": 9, "profile": {"displayName": "Carol"}}) == {
+        "id": "9",
+        "display_name": "Carol",
+    }
+    assert contact_entry({"profile": {"displayName": "no id"}}) is None
 
 
 # ---- daemon: accept + round-trips ----
@@ -269,3 +285,118 @@ def test_request_address_without_connection_raises():
     daemon = SimplexDaemon("ws://x")
     with pytest.raises(RuntimeError):
         daemon.request_address(timeout=1)
+
+
+# ---- daemon: contacts + on_connected hook ----
+
+def test_contacts_parses_contacts_list():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "activeUser", "user": {"userId": 3}},
+                {
+                    "type": "contactsList",
+                    "contacts": [
+                        {"contactId": 4, "profile": {"displayName": "Alice"}},
+                        {"contactId": 7, "localDisplayName": "bob_1"},
+                        {"profile": {"displayName": "no id"}},
+                    ],
+                },
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.contacts(timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert result == [
+        {"id": "4", "display_name": "Alice"},
+        {"id": "7", "display_name": "bob_1"},
+    ]
+    assert [m["cmd"] for m in ws.sent] == ["/user", "/_contacts 3"]
+
+
+def test_contacts_falls_back_to_configured_user_id():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "chatCmdError", "chatError": {"type": "error"}},
+                {"type": "contactsList", "contacts": []},
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.contacts(timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert result == []
+    assert [m["cmd"] for m in ws.sent] == ["/user", "/_contacts 1"]
+
+
+def test_active_user_is_cached_across_calls():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "activeUser", "user": {"userId": 3}},
+                {"type": "contactsList", "contacts": []},
+                {"type": "contactsList", "contacts": []},
+            ],
+        )
+        daemon._ws = ws
+        await daemon.contacts(timeout=5)
+        await daemon.contacts(timeout=5)
+        return ws
+
+    ws = asyncio.run(scenario())
+    assert [m["cmd"] for m in ws.sent] == ["/user", "/_contacts 3", "/_contacts 3"]
+
+
+def test_contacts_returns_empty_on_error_response():
+    daemon = SimplexDaemon("ws://x", user_id=1)
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {"type": "activeUser", "user": {"userId": 1}},
+                {"type": "chatCmdError", "chatError": {"type": "error"}},
+            ],
+        )
+        daemon._ws = ws
+        return await daemon.contacts(timeout=5)
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_request_contacts_without_connection_raises():
+    daemon = SimplexDaemon("ws://x")
+    with pytest.raises(RuntimeError):
+        daemon.request_contacts(timeout=1)
+
+
+def test_on_connected_hook_runs_and_failures_are_swallowed():
+    calls = []
+
+    async def hook():
+        calls.append(1)
+
+    asyncio.run(SimplexDaemon("ws://x", on_connected=hook)._notify_connected())
+    assert calls == [1]
+
+    async def bad():
+        raise ValueError("nope")
+
+    # A hook failure must not propagate (it would tear down the connection).
+    asyncio.run(SimplexDaemon("ws://x", on_connected=bad)._notify_connected())
+    asyncio.run(SimplexDaemon("ws://x")._notify_connected())

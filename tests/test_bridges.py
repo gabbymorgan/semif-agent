@@ -7,6 +7,7 @@ mechanics a skill depends on: peek/pop of buffered inbound messages, recipient
 resolution, outbound routing, address lookup, and token/body validation.
 """
 
+import asyncio
 import json
 import urllib.error
 import urllib.request
@@ -20,9 +21,12 @@ from semif_agent.bridges.simplex import SimplexBridge
 class FakeDaemon:
     """Stands in for the bridge's own simplex-chat connection."""
 
-    def __init__(self, link=None, error=None):
+    def __init__(self, link=None, error=None, contacts=None, contacts_error=None):
         self.link = link
         self.error = error
+        self.contacts_list = contacts or []
+        self.contacts_error = contacts_error
+        self.refresh_count = 0
         self.sent = []
         self.closed = False
         self.on_message = None
@@ -41,6 +45,15 @@ class FakeDaemon:
         if self.error is not None:
             raise self.error
         return self.link
+
+    def request_contacts(self, timeout=20.0):
+        self.refresh_count += 1
+        if self.contacts_error is not None:
+            raise self.contacts_error
+        return list(self.contacts_list)
+
+    async def contacts(self, timeout=20.0):
+        return self.request_contacts(timeout)
 
     def close(self):
         self.closed = True
@@ -157,6 +170,67 @@ def test_send_resolves_known_display_name():
         result = post(f"{base}/send", {"recipient": "Alice", "text": "hello"})
         assert result["contact_id"] == "4"
         assert daemon.sent == [("4", "hello")]
+    finally:
+        bridge.stop()
+
+
+def test_contacts_refreshed_from_daemon():
+    # A contact the bridge has never received from must still be visible: the
+    # daemon knows them, so /send can address them.
+    daemon = FakeDaemon(contacts=[{"id": "42", "display_name": "Zed"}])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        assert get(f"{base}/contacts") == {
+            "contacts": [{"id": "42", "display_name": "Zed"}]
+        }
+        assert daemon.refresh_count >= 1
+    finally:
+        bridge.stop()
+
+
+def test_send_resolves_daemon_only_contact():
+    daemon = FakeDaemon(contacts=[{"id": "42", "display_name": "Zed"}])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        result = post(f"{base}/send", {"recipient": "Zed", "text": "hello"})
+        assert result == {"ok": True, "contact_id": "42"}
+        assert daemon.sent == [("42", "hello")]
+    finally:
+        bridge.stop()
+
+
+def test_refresh_on_connect_primes_contacts():
+    daemon = FakeDaemon(contacts=[{"id": "42", "display_name": "Zed"}])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        asyncio.run(bridge._refresh_on_connect())
+        assert get(f"{base}/contacts")["contacts"] == [
+            {"id": "42", "display_name": "Zed"}
+        ]
+    finally:
+        bridge.stop()
+
+
+def test_contacts_failure_keeps_cached_and_stays_available():
+    bridge, _, base = start_bridge()
+    try:
+        bridge._on_message(inbound("hi", contact_id="4", display_name="Alice"))
+        bridge.daemon.contacts_error = RuntimeError("not connected")
+        assert get(f"{base}/contacts") == {
+            "contacts": [{"id": "4", "display_name": "Alice"}]
+        }
+    finally:
+        bridge.stop()
+
+
+def test_daemon_refresh_does_not_clobber_inbound_name():
+    daemon = FakeDaemon(contacts=[{"id": "4", "display_name": ""}])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        bridge._on_message(inbound("hi", contact_id="4", display_name="Alice"))
+        assert get(f"{base}/contacts") == {
+            "contacts": [{"id": "4", "display_name": "Alice"}]
+        }
     finally:
         bridge.stop()
 

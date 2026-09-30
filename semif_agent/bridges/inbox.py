@@ -55,6 +55,23 @@ class MessagingInbox:
                     return entry
             return None
 
+    def merge_contacts(self, contacts: list[dict]) -> None:
+        """Upsert contacts learned from the daemon (not from a message).
+
+        A non-empty incoming name overwrites a cached one; an empty name never
+        clobbers a name already learned from an inbound message.
+        """
+        with self._lock:
+            for contact in contacts:
+                contact_id = str(contact.get("id") or "")
+                if not contact_id:
+                    continue
+                name = contact.get("display_name") or ""
+                if name:
+                    self._contacts[contact_id] = name
+                else:
+                    self._contacts.setdefault(contact_id, "")
+
     def contacts(self) -> list[dict]:
         with self._lock:
             return [

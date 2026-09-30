@@ -35,7 +35,8 @@ class SimplexBridge(BridgeService):
             "GET /health -> 200 {\"ok\": true, \"platform\": \"simplex\"} — the "
             "bridge is up",
             "GET /contacts -> 200 {\"contacts\": [{\"id\", \"display_name\"}]} — "
-            "contacts learned from inbound messages",
+            "contacts known to the daemon (learned from inbound messages and "
+            "refreshed from the daemon's contact list)",
             "GET /inbox -> 200 {\"messages\": [{\"id\", \"contact_id\", "
             "\"display_name\", \"text\", \"received_at\"}]} — peek buffered "
             "inbound messages; does not consume",
@@ -88,6 +89,7 @@ class SimplexBridge(BridgeService):
             user_id=int(cfg.get("user_id", 1)),
             auto_accept=bool(cfg.get("auto_accept", True)),
             reconnect=cfg.get("reconnect", {}) or {},
+            on_connected=self._refresh_on_connect,
             trace=trace,
             name=self.name,
         )
@@ -115,13 +117,23 @@ class SimplexBridge(BridgeService):
     def _on_message(self, message: dict) -> None:
         self.inbox.record(message)
 
+    async def _refresh_on_connect(self) -> None:
+        """Prime the contact list from the daemon on (re)connect.
+
+        Runs on the daemon's event loop, so it awaits `contacts()` directly
+        rather than the thread-safe wrapper. A failure is traced, not fatal.
+        """
+        contacts = await self.daemon.contacts()
+        self.inbox.merge_contacts(contacts)
+        self._event("contacts_refreshed", count=len(contacts))
+
     # ---- routes ----
 
     def handle_get(self, path: str, query: dict) -> tuple[int, dict]:
         if path == "/health":
             return 200, {"ok": True, "platform": self.name}
         if path == "/contacts":
-            return 200, {"contacts": self.inbox.contacts()}
+            return 200, {"contacts": self.refresh_contacts()}
         if path == "/inbox":
             return 200, {"messages": self.inbox.peek()}
         if path == "/inbox/next":
@@ -148,6 +160,22 @@ class SimplexBridge(BridgeService):
 
     # ---- actions ----
 
+    def refresh_contacts(self) -> list[dict]:
+        """Best-effort refresh of the daemon's contact list into the inbox.
+
+        Never raises: when the daemon is not connected (or is slow) it returns
+        whatever contacts are already cached, so `/contacts` and `/send` stay
+        available. The read cursor and inbound-learned names are preserved.
+        """
+        try:
+            contacts = self.daemon.request_contacts()
+        except Exception as exc:  # RuntimeError, TimeoutError, daemon error
+            self._event("contacts_refresh_failed", message=str(exc)[:200])
+            return self.inbox.contacts()
+        self.inbox.merge_contacts(contacts)
+        self._event("contacts_refreshed", count=len(contacts))
+        return self.inbox.contacts()
+
     def _address(self) -> tuple[int, dict]:
         try:
             link = self.daemon.request_address()
@@ -168,13 +196,25 @@ class SimplexBridge(BridgeService):
         return contact_id
 
     def resolve(self, recipient: str) -> str | None:
-        """A numeric id (with or without `@`) or a known display name."""
+        """A numeric id (with or without `@`) or a known display name.
+
+        On a display-name miss, refresh the daemon's contact list once and
+        retry: a contact the bridge has never received from is still addressable
+        as long as the daemon knows them.
+        """
         recipient = str(recipient or "").strip()
         if not recipient:
             return None
         bare = recipient.lstrip("@")
         if bare.isdigit():
             return bare
+        match = self._match_contact(recipient)
+        if match is None:
+            self.refresh_contacts()
+            match = self._match_contact(recipient)
+        return match
+
+    def _match_contact(self, recipient: str) -> str | None:
         for contact in self.inbox.contacts():
             if contact["display_name"] == recipient or contact["id"] == recipient:
                 return contact["id"]
