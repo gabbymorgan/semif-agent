@@ -49,7 +49,6 @@ from .skills import (
     SkillStore,
     build_skills,
     build_tree,
-    compose_state,
     confirm_skill_fit,
     generate_category,
     generate_skill,
@@ -273,7 +272,7 @@ class Scheduler:
 
     def _interrupt_choice(self, request: Request, current: Process) -> bool:
         decision = DecisionRequest(
-            state=compose_state(request, current=current.skill),
+            state=f"{request.text} [current process: {current.skill}]",
             question="Should this be allowed to interrupt the current process?",
             options=[
                 Option(CHOICE_INTERRUPT, "Yes, interrupt the current process."),
@@ -290,7 +289,7 @@ class Scheduler:
 
     def _priority_score(self, request: Request, current: str | None = None) -> tuple[float, str]:
         decision = DecisionRequest(
-            state=compose_state(request, current=current),
+            state=f"{request.text} [current process: {current}]",
             question="How urgent is this request?",
             options=[Option(option_id, description) for option_id, description in URGENCY_OPTIONS],
         )

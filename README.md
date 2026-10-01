@@ -229,7 +229,7 @@ the request, the tree, the elicitation answers, the runtime **bridge catalog**
 | `interrupt:choice` | `scheduler.py:279` | request text + `[current process: <skill>]` | `interrupt` / `defer` |
 | `priority:score` | `scheduler.py:296` | request text (+ `[current process: …]` when busy) | critical / high / medium / low |
 | `navigate:category` | `skills.py:682` | request text | every category name (+ `create_category`) |
-| `navigate:leaf` | `skills.py:736` | request text + `[current process: <category>]` | every skill name + description (+ `create_skill`) |
+| `navigate:leaf` | `skills.py:736` | request text + current category | every skill name + description (+ `create_skill`) |
 | `navigate:response` | `skills.py:634` | request text + category | canned reply names + descriptions (catchall last) |
 | `navigate:intent` | `skills.py:811` | `Requested action: <text>` + `Action of the existing skill: <description>` | `same` / `different` |
 | `assess:outcome` | `skill.py:257` | skill label + goal + action log | `success` / `failure` |
