@@ -59,6 +59,7 @@ class Skill:
     contract: dict = field(default_factory=dict)
     integration: dict = field(default_factory=dict)
     integration_source: str = "unknown"
+    category_description: str = ""
 
     def is_noop(self) -> bool:
         """A stub leaf: authored (title + description) but no runnable body yet."""
@@ -349,6 +350,9 @@ def merge_skill_store(
         for skill in entry.get("skills", []):
             if skill.get("name") == name:
                 description = skill.get("description", "")
+        category_description = str(
+            entry.get("description") or CATEGORY_DESCRIPTIONS.get(category, "")
+        )
         try:
             module = load_skill_module(category, name, store.path)
         except Exception:
@@ -371,6 +375,7 @@ def merge_skill_store(
             contract=contract,
             integration=integration,
             integration_source=integration_source,
+            category_description=category_description,
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -425,6 +430,7 @@ def merge_seed_store(
             contract=contract,
             integration=integration,
             integration_source=integration_source,
+            category_description=CATEGORY_DESCRIPTIONS.get(category, ""),
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -527,6 +533,27 @@ _CANNED_RESPONSES = [
 
 _RESPONSE_MESSAGES = {f"response.{name}": message for name, _, message in _CANNED_RESPONSES}
 
+# Built-in category descriptions. A category level that offers only bare names
+# carries no signal (real runs sent "book a flight to japan" to the `simplex`
+# bucket 0.49 vs create_category 0.12); giving the model the category's scope
+# flips that to create_category 0.87 vs simplex 0.02. Authored categories carry
+# their own description from the registry; this is the seed for the built-ins and
+# the fallback for a legacy entry with no description.
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    "response": (
+        "Anything that is not a request to perform an action: greetings, thanks, "
+        "chit-chat, off-topic statements, and inputs the agent cannot act on."
+    ),
+    "calendar": (
+        "Calendar and scheduling: reading or changing the user's calendar "
+        "events and reminders."
+    ),
+    "simplex": (
+        "SimpleX messaging: reading incoming messages, sending messages to "
+        "contacts, and showing the user's contact link."
+    ),
+}
+
 
 def build_skills(config: dict) -> list[Skill]:
     """The hardcoded built-ins: internal behaviors only.
@@ -547,9 +574,30 @@ def build_skills(config: dict) -> list[Skill]:
             category="response",
             description=description,
             act=_canned_response(f"response.{name}", message),
+            category_description=CATEGORY_DESCRIPTIONS["response"],
         )
         for name, description, message in _CANNED_RESPONSES
     ]
+
+
+def category_descriptions(tree: dict[str, list[Skill]]) -> dict[str, str]:
+    """The description to offer for each category, best-effort.
+
+    An authored skill carries the registry description on its `Skill`
+    (merge_registry/merge_skill_store); a seed or a legacy entry with no
+    description falls back to `CATEGORY_DESCRIPTIONS`. An empty category bucket
+    (no skills to carry it) falls back too, so a category is never offered bare.
+    """
+    merged: dict[str, str] = {}
+    for category, skills in tree.items():
+        for skill in skills:
+            if skill.category_description:
+                merged[category] = skill.category_description
+                break
+    for category in tree:
+        if not merged.get(category):
+            merged[category] = CATEGORY_DESCRIPTIONS.get(category, "")
+    return merged
 
 
 
@@ -570,6 +618,7 @@ def merge_registry(tree: dict[str, list[Skill]], categories: dict[str, dict]) ->
     """
     for category, data in categories.items():
         tree.setdefault(category, [])
+        description = str(data.get("description") or CATEGORY_DESCRIPTIONS.get(category, ""))
         existing = {s.name for s in tree[category]}
         for skill in data.get("skills", []):
             name = skill.get("name")
@@ -580,34 +629,10 @@ def merge_registry(tree: dict[str, list[Skill]], categories: dict[str, dict]) ->
                     name=name,
                     category=category,
                     description=skill.get("description", ""),
+                    category_description=description,
                 )
             )
             existing.add(name)
-
-
-def _clears_create_gate(
-    result,
-    create_id: str,
-    existing_ids: list[str],
-    tau: float,
-    margin: float,
-) -> bool:
-    """Should the create branch actually fire, or is it a weak plurality win?
-
-    The create option shares a softmax with the real categories/skills, so its
-    probability is diluted by every existing option — it is not a measure of
-    "confidence that nothing matches". Require both an absolute floor (`tau`)
-    and a clear lead over the best existing option (`margin`); a create that
-    only squeaks past on a crowded tree is suppressed and navigation falls back
-    to the best existing branch (the intent guard remains a second door to
-    authoring). Returns True when the gate is effectively disabled.
-    """
-    probs = result.probs
-    if create_id not in probs:
-        return True
-    create_p = probs[create_id]
-    best = max((probs[i] for i in existing_ids if i in probs), default=0.0)
-    return create_p >= tau and (create_p - best) >= margin
 
 
 def _navigate_canned(
@@ -656,30 +681,39 @@ def navigate(
     trace: TraceLog,
     request: Request,
     tree: dict[str, list[Skill]],
-    create_tau: float = 0.5,
-    create_margin: float = 0.35,
+    category_tau: float = 0.75,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
-    The category level offers a "create_category" branch and the leaf level a
-    "create_skill" branch; both are handled live by dispatch and log a
-    suggestion event to the trace. A level with nothing to choose from
-    (an empty tree, or a category with no skills yet) short-circuits straight to
-    the create branch: SemIf decisions need at least two options, and asking
-    "which of one?" is meaningless.
+    The category level is **two-stage** (mirroring the leaf). The softmax offers
+    every existing category **with its description** plus a `create_category`
+    branch; the winner is then confirmed by `confirm_category_fit`, a name-anchored
+    scope check. A confirmed winner is descended into; a winner that does not
+    cover the request (or a `create_category` win) authors a new category. Bare
+    category names carry no signal — real runs sent "book a flight to japan" to
+    the `simplex` bucket (0.49 vs create_category 0.12) until the descriptions
+    were added — so the descriptions are load-bearing, and the confirm guard is
+    the create door (there is no threshold gate any more). A level with nothing
+    to choose from (an empty tree) short-circuits straight to create: SemIf
+    decisions need at least two options.
 
-    A create branch that wins the softmax but fails the confidence gate
-    (`create_tau` floor and `create_margin` lead over the best existing option)
-    is suppressed: navigation falls back to the best existing option so a
-    genuinely unmatched action still reaches authoring through the intent guard,
-    while a crowded tree no longer drifts into create on a weak plurality.
+    The leaf level is two-stage too: navigation only ever picks among the
+    existing skills (`create_skill` is deliberately NOT in the softmax), and the
+    reuse-vs-create decision is the intent guard in dispatch
+    (`confirm_skill_fit`), keyed by `navigation.intent_tau`.
     """
     categories = sorted(tree.keys())
-    create_category = Option("create_category", "Suggest a new category for this.")
+    descriptions = category_descriptions(tree)
+    create_category = Option(
+        "create_category",
+        "No existing category covers this request; a new top-level category is "
+        "needed.",
+    )
     top = DecisionRequest(
         state=compose_state(request),
         question="Which top-level category handles this request?",
-        options=[Option(c, c) for c in categories] + [create_category],
+        options=[Option(c, descriptions.get(c, c)) for c in categories]
+        + [create_category],
     )
     if not categories:
         trace.append(
@@ -695,23 +729,17 @@ def navigate(
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
-    if category == "create_category" and not _clears_create_gate(
-        top_result, "create_category", categories, create_tau, create_margin
+    if category != "create_category" and not confirm_category_fit(
+        engine, log, trace, request, category, descriptions.get(category, ""),
+        category_tau,
     ):
-        fallback = max(
-            (c for c in categories if c in top_result.probs),
-            key=lambda c: top_result.probs[c],
-        )
         trace.append(
-            "create_suppressed",
+            "category_scope_rejected",
             request.id,
-            level="category",
-            fallback=fallback,
+            category=category,
             probs=top_result.probs,
-            tau=create_tau,
-            margin=create_margin,
         )
-        category = fallback
+        category = "create_category"
     if category == "create_category":
         trace.append(
             "create_category",
@@ -726,62 +754,96 @@ def navigate(
     skills = tree[category]
     if category in CANNED_CATEGORIES:
         return _navigate_canned(engine, log, trace, request, category, skills)
-    create_skill = Option(
-        "create_skill",
-        "No existing skill performs this action; create a new skill for it.",
-    )
-    leaf = DecisionRequest(
-        state=compose_state(request, current=category),
-        question=f"Which {category} skill performs the action this request asks for? "
-        "Choose create_skill if none does.",
-        options=[Option(s.name, s.description) for s in skills] + [create_skill],
-    )
     if not skills:
         trace.append(
             "skill_needed",
             request.id,
             category=category,
-            state=leaf.state,
-            question=leaf.question,
-            options=[o.id for o in leaf.options],
+            state=compose_state(request, current=category),
+            question="(this category has no skills yet)",
+            options=[],
             selected="create_skill",
             probs={},
         )
         return CreateSkill(category=category)
+    if len(skills) == 1:
+        # A one-option softmax is meaningless; hand the sole skill to the intent
+        # guard, which owns the reuse-vs-create decision.
+        return skills[0]
+    leaf = DecisionRequest(
+        state=compose_state(request, current=category),
+        question=f"Which {category} skill performs the action this request asks for?",
+        options=[Option(s.name, s.description) for s in skills],
+    )
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
-    if pick == "create_skill" and not _clears_create_gate(
-        leaf_result, "create_skill", [s.name for s in skills], create_tau, create_margin
-    ):
-        fallback = max(
-            (s.name for s in skills if s.name in leaf_result.probs),
-            key=lambda n: leaf_result.probs[n],
-        )
-        trace.append(
-            "create_suppressed",
-            request.id,
-            level="leaf",
-            category=category,
-            fallback=fallback,
-            probs=leaf_result.probs,
-            tau=create_tau,
-            margin=create_margin,
-        )
-        pick = fallback
-    if pick == "create_skill":
-        trace.append(
-            "skill_needed",
-            request.id,
-            category=category,
-            state=leaf.state,
-            question=leaf.question,
-            options=[o.id for o in leaf.options],
-            selected=leaf_result.selected,
-            probs=leaf_result.probs,
-        )
-        return CreateSkill(category=category)
-    return next(s for s in skills if s.name == pick)
+    return next((s for s in skills if s.name == pick), skills[0])
+
+
+def confirm_category_fit(
+    engine: SemIfEngine,
+    log: DecisionLog,
+    trace: TraceLog,
+    request: Request,
+    category: str,
+    description: str,
+    tau: float = 0.75,
+) -> bool:
+    """Does this category's scope actually cover what the request asks for?
+
+    The category-level counterpart of `confirm_skill_fit`, and the create door
+    at that level: the described-category softmax proposes the best category,
+    and this name-anchored scope check confirms it. A rejected winner (or a
+    `create_category` win) authors a new category instead. The threshold is
+    `navigation.category_tau` (default 0.75 — measured so true non-tasks, which
+    score 0.87–0.999 on `response`, sit above it and a task misrouted into
+    `response` at 0.61 sits below).
+
+    Name-anchored on purpose: asking whether *the winner we picked* covers the
+    request is far cleaner than a global "does any category cover this?" — the
+    global wording collapsed in-scope and out-of-scope requests into one band
+    (0.47-0.98) and over-covered a non-task ("thank pepper ..."). This compares
+    one category's stated scope to the request. The check is deliberately
+    permissive: with real descriptions the in-scope cases score 0.9-1.0, so a
+    borderline over-cover routes into a plausible category and the leaf intent
+    guard catches it (a skill is only authored if no existing leaf matches).
+    """
+    decision = DecisionRequest(
+        state=(
+            f"Request: {request.text}\n"
+            f"Category: {category}\n"
+            f"Scope: {description}"
+        ),
+        question=f"Does the scope of the {category} category cover this request?",
+        options=[
+            Option("covers", "Yes, this category covers the request."),
+            Option(
+                "none",
+                "No, this category does not cover the request; a new category is needed.",
+            ),
+        ],
+    )
+    result = engine.call(decision)
+    log.append(
+        decision,
+        result,
+        extra={
+            "phase": "navigate:category_scope",
+            "run_id": request.id,
+            "category": category,
+        },
+    )
+    fits = result.prob("covers") >= tau
+    trace.append(
+        "category_scope",
+        request.id,
+        category=category,
+        selected=result.selected,
+        probs=result.probs,
+        fits=fits,
+    )
+    return fits
 
 
 def confirm_skill_fit(
@@ -794,16 +856,21 @@ def confirm_skill_fit(
 ) -> bool:
     """Does this skill's action actually match what the request asks for?
 
-    Navigation picks the closest leaf; a seeded read skill can outscore the
-    generic "create a new skill" branch on a request whose verb (send) no
-    existing action performs. This one SemIf decision guards against silently
-    running the wrong skill: a mismatch sends dispatch to author a new leaf
-    instead. Wording tuned against the real model: comparing the two *actions*
+    Navigation picks the closest existing leaf; this guard is now the **sole**
+    leaf-level reuse-vs-create decision (create_skill is no longer an option in
+    the leaf softmax). If the skill's action is not the same action the request
+    asks for, dispatch authors a new leaf instead. The threshold is
+    `navigation.intent_tau` (deliberately separate from the run-assessment
+    `tau`, so tuning reuse-vs-create does not move assessment/fidelity).
+
+    Wording tuned against the real model: comparing the two *actions*
     ("different action") is unambiguous where "can this serve the request" was
     not — e.g. "message Sam" (an implicit send in instant-messaging syntax)
     reads as a different action from "read the next message". Do not add an
     instant-messaging context hint: it over-fires and pulls read phrasings to
-    the send side.
+    the send side. The comparison is over-permissive on near-synonyms (read vs
+    send score "same" ~0.74-0.78), so it is paired with the softmax that
+    disambiguates them — the guard only ever sees the softmax winner.
     """
     decision = DecisionRequest(
         state=(

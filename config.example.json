@@ -3,9 +3,9 @@
   "tau": 0.6,
   "max_reentries": 3,
   "navigation": {
-    "_comment": "Confidence gate on the create branches. create_skill/create_category share a softmax with the real skills/categories, so a weak plurality win is not evidence that nothing matches. The create branch only fires when P(create) >= create_tau AND it leads the best existing option by create_margin; otherwise navigation falls back to the best existing option (a genuinely unmatched action still reaches authoring through the intent guard). Suppressed picks are traced as create_suppressed with their probs so the thresholds can be calibrated from real runs. A level with nothing to choose from still short-circuits to create.",
-    "create_tau": 0.5,
-    "create_margin": 0.35
+    "_comment": "Navigation is two-stage at BOTH levels and the guards are the create doors (no threshold gate). Category: the softmax offers each existing category WITH its description (bare names carried no signal) plus create_category; confirm_category_fit then confirms the winner's scope (phase navigate:category_scope, P(covers) >= category_tau) and a rejected winner authors a new category. Leaf: the softmax offers only existing skills; confirm_skill_fit then compares the winner's action to the request (phase navigate:intent, P(same) >= intent_tau) and a mismatch authors a new leaf. Both taus are separate from the top-level tau so tuning reuse-vs-create does not move run assessment/fidelity. The check is deliberately permissive: with real descriptions in-scope requests score 0.9-1.0, so a borderline over-cover routes into a plausible category and the leaf guard catches it.",
+    "intent_tau": 0.6,
+    "category_tau": 0.75
   },
   "queue": {"max_size": 100, "age_rate": 0.01},
   "engine": {

@@ -27,7 +27,6 @@ from semif_agent.scheduler import SkillWrite
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
-    CreateSkill,
     Skill,
     SkillDraft,
     SkillStore,
@@ -93,6 +92,7 @@ def _install_tracking_fixture(scheduler):
             category="tracking",
             description="Check the delivery status of a package.",
             act=act,
+            category_description="Package tracking: checking the delivery status of parcels and shipments.",
         )
     ]
 
@@ -120,7 +120,6 @@ def test_pipeline_end_to_end(tmp_path):
 
     phases = [r.get("extra", {}).get("phase") for r in rows]
     assert "navigate:category" in phases, "navigation decisions must be logged"
-    assert "navigate:leaf" in phases, "navigation decisions must be logged"
     for row in rows:
         assert row.get("extra", {}).get("run_id"), "every decision must carry a run_id"
 
@@ -150,7 +149,18 @@ def test_navigation_routes_noise_into_the_response_tree(tmp_path):
         "what is the next event in my nextcloud calendar?",
         "tell me the next even in my calendar",
     ]
-    noise = ["hello there", "thanks!", "the sky is blue", "what's up"]
+    noise = [
+        "hello there",
+        "thanks!",
+        "the sky is blue",
+        "what's up",
+        # Stray statements not addressed to the agent: these have no action to
+        # perform, so they must fall to the `response` catchall, not author a
+        # category. Regression: an under-covering `response` description sent
+        # "the sky is blue"/"1+1=2"/"random thought here" to create_category.
+        "1+1=2",
+        "random thought here",
+    ]
     for text in lookups:
         result = navigate(
             scheduler.engine, scheduler.log, scheduler.trace, Request(text), scheduler.tree
@@ -166,23 +176,32 @@ def test_navigation_routes_noise_into_the_response_tree(tmp_path):
 
 
 def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
-    """A send request must navigate to create_skill, not silently to the read
-    skill that merely shares the word 'message'.
+    """Two-stage leaf: navigation picks the closest existing skill, then the
+    intent guard decides reuse-vs-create. A send request must reach create_skill
+    for simplex — not silently run the read skill that merely shares the word
+    'message'; a read request must reuse next_message.
 
-    Regression: every send phrasing picked simplex.next_message (P 0.46-0.73)
-    while the create_skill fallback scored only 0.007-0.09, because its option
-    description named the mechanism ("suggest creating a new skill") instead of
-    the trigger. This asserts the navigation outcome only — no codegen write.
+    Regression: the old single-stage leaf put create_skill in the softmax with
+    the real skills, so a send phrasing could win on a weak plurality while the
+    read skill stayed high. Now create_skill is never an option; the guard's
+    action comparison is the door. Asserts the routing outcome only — the draft
+    queue is stubbed and the read leaf's act is a stub, so no codegen write and
+    no network.
     """
     config = load_config()
     require_real(config)
     _isolate_runtime(config, tmp_path)
     scheduler, config = build_scheduler(config)
+
+    def read_act(ctx, request):
+        return ActionResult(action_log="read fixture", new_state="read")
+
     scheduler.tree["simplex"] = [
         Skill(
             name="next_message",
             category="simplex",
             description="Read the next unread SimpleX message bridge.",
+            act=read_act,
         ),
         Skill(
             name="connect_link",
@@ -190,36 +209,29 @@ def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
             description="Show (creating if needed) the SimpleX contact link others use to connect to this agent.",
         ),
     ]
+    queued: list = []
+    scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+        (category, kind)
+    )
 
     for text in [
         "send a simplex message to pepper saying hi",
         "send a new simplex message to pepper: hey",
     ]:
         before = len(scheduler.log.read())
-        result = navigate(
-            scheduler.engine,
-            scheduler.log,
-            scheduler.trace,
-            Request(text),
-            scheduler.tree,
-        )
+        result = scheduler._dispatch(Request(text))
         leaf_rows = [
             r for r in scheduler.log.read()[before:]
             if r.get("extra", {}).get("phase") == "navigate:leaf"
         ]
-        print(f"[nav] {leaf_rows[-1]['predicted_probs'] if leaf_rows else '-'} :: {text!r} -> {result}")
-        assert isinstance(result, CreateSkill), f"send must route to create_skill, got {result!r}"
-        assert result.category == "simplex"
+        print(f"[nav] {leaf_rows[-1]['predicted_probs'] if leaf_rows else '-'} :: {text!r} -> {result.kind}")
+        assert result.kind == "create_skill", f"send must route to create_skill, got {result!r}"
+    assert queued and all(category == "simplex" for category, _ in queued)
 
-    read = navigate(
-        scheduler.engine,
-        scheduler.log,
-        scheduler.trace,
-        Request("read the next simplex message"),
-        scheduler.tree,
-    )
-    print(f"[nav control] read -> {read}")
-    assert getattr(read, "name", None) == "next_message", "a read request must still route to the read skill"
+    read = scheduler._dispatch(Request("read the next simplex message"))
+    print(f"[nav control] read -> {read.kind} {read.skill}")
+    assert read.kind == "ran", "a read request must still run the read skill"
+    assert read.skill == "next_message"
 
 
 def test_busy_choice_path(tmp_path):

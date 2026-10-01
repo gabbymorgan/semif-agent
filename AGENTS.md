@@ -313,14 +313,29 @@ CLI, unit tests (24) + box integration tests (2).
   graceful (traced `draft_failed`, user notified, request not re-dispatched);
   only SemIf availability is fatal. Authoring is still a single pass —
   validating/reusing written bodies across runs is future work.
-  **Create-branch confidence gate** (Sep 2026): `create_skill`/`create_category`
-  compete in a softmax with the real options, so a weak plurality win is not
-  evidence that nothing matches. Navigation fires a create branch only when
-  `P(create) >= navigation.create_tau` **and** it leads the best existing option
-  by `navigation.create_margin`; otherwise it falls back to the best existing
-  option (a genuinely unmatched action still reaches authoring through the
-  intent guard) and traces `create_suppressed` with the probs. An empty
-  tree/category still short-circuits straight to create.
+  **Navigation is two-stage at both levels; the guards are the create doors**
+  (Oct 2026). Category level: the softmax offers every existing category **with
+  its description** plus `create_category`, and the winner is confirmed by
+  `confirm_category_fit` (phase `navigate:category_scope`, P(covers) >=
+  `navigation.category_tau`); a rejected winner or a `create_category` win
+  authors a new category. Descriptions are load-bearing — with bare names the
+  model sent "book a flight to japan" to `simplex` (0.49 vs create_category
+  0.12); with descriptions it picks `create_category` 0.87. `Skill` carries
+  `category_description`, seeded by `CATEGORY_DESCRIPTIONS` for the built-ins
+  (response/calendar/simplex) and read from the registry for authored
+  categories; `category_descriptions(tree)` collapses it per category so an
+  empty bucket is never offered bare. The old category threshold gate
+  (`create_tau`/`create_margin`) is **retired**. Leaf level: the softmax
+  contains **only existing skills** — `create_skill` was removed because sharing
+  a softmax with the real skills diluted its probability and let a crowded tree
+  drift into create on a weak plurality (real runs scored `create_skill`
+  0.585–0.803 on requests a seed skill clearly matched). The reuse-vs-create
+  decision is the **intent guard** (`confirm_skill_fit`, phase
+  `navigate:intent`) at `navigation.intent_tau`. Both taus are separate from the
+  top-level `tau`, so tuning reuse-vs-create does not move
+  assessment/fidelity. The guards are deliberately permissive (in-scope scores
+  0.9–1.0): a borderline over-cover routes into a plausible category and the
+  leaf guard catches it. Empty and single-skill categories skip their softmax.
 - **No handle/ignore gate; the `response` tree is the catchall** (Sep 2026):
   the top-level `_contains_request` handle/ignore gate is gone. Every input is
   scored and dispatched; inputs that are not tasks fall through navigation into

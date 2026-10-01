@@ -198,8 +198,8 @@ class Scheduler:
         self.config = config
         self.tau = tau
         nav_cfg = config.get("navigation", {}) or {}
-        self.create_tau = float(nav_cfg.get("create_tau", 0.5))
-        self.create_margin = float(nav_cfg.get("create_margin", 0.35))
+        self.intent_tau = float(nav_cfg.get("intent_tau", 0.6))
+        self.category_tau = float(nav_cfg.get("category_tau", 0.75))
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
@@ -428,8 +428,7 @@ class Scheduler:
             self.trace,
             request,
             self.tree,
-            create_tau=self.create_tau,
-            create_margin=self.create_margin,
+            category_tau=self.category_tau,
         )
         if isinstance(navigation, CreateCategory):
             return self._dispatch_create_category(request, weight)
@@ -438,9 +437,8 @@ class Scheduler:
                 fallback = self._canned_fallback(navigation.category)
                 if fallback is not None:
                     self.trace.append(
-                        "create_suppressed",
+                        "canned_fallback",
                         request.id,
-                        level="canned_category",
                         category=navigation.category,
                         fallback=fallback.name,
                     )
@@ -449,7 +447,7 @@ class Scheduler:
         if navigation.category in CANNED_CATEGORIES:
             return self._run_skill(navigation, request)
         if not confirm_skill_fit(
-            self.engine, self.log, self.trace, request, navigation, self.tau
+            self.engine, self.log, self.trace, request, navigation, self.intent_tau
         ):
             self.trace.append(
                 "intent_mismatch",

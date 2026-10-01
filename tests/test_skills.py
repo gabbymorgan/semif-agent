@@ -42,7 +42,10 @@ from semif_agent.skills import (
     build_skill_prompt,
     build_skills,
     build_tree,
+    confirm_category_fit,
     confirm_skill_fit,
+    category_descriptions,
+    CATEGORY_DESCRIPTIONS,
     generate_category,
     generate_skill,
     merge_registry,
@@ -392,6 +395,28 @@ def test_merge_registry_loads_categories_and_skills(tmp_path):
     assert tree["delivery"][0].category == "delivery"
 
 
+def test_category_descriptions_never_bare_and_seeded(tmp_path):
+    """Every category must carry a usable description at the softmax — a bare
+    name carries no signal. Built-ins come from CATEGORY_DESCRIPTIONS; an
+    authored category carries its registry description; a legacy/empty entry
+    falls back to the built-in or empty string without crashing."""
+    tree = build_tree(build_skills({"skills": {}}))
+    assert tree["response"][0].category_description  # built-in seed
+
+    registry = CategoryRegistry(str(tmp_path / "categories.json"))
+    registry.register("travel", "Booking flights, hotels, and trips.")
+    registry.register_skill("travel", "book_flight", "Book a flight.")
+    merge_registry(tree, registry.read())
+    assert tree["travel"][0].category_description == "Booking flights, hotels, and trips."
+
+    descriptions = category_descriptions(tree)
+    assert descriptions["response"] == CATEGORY_DESCRIPTIONS["response"]
+    assert descriptions["travel"] == "Booking flights, hotels, and trips."
+    # an empty bucket (no skill to carry the description) still resolves to text
+    tree["orphan"] = []
+    assert category_descriptions(tree)["orphan"] == ""
+
+
 def _write_seed(seed_store, category, name, description=""):
     directory = seed_store.dir(category, name)
     directory.mkdir(parents=True, exist_ok=True)
@@ -581,11 +606,10 @@ def test_canned_response_runs_without_assessment(tmp_path):
 
 
 
-def test_navigate_leaf_offers_create_for_unmatched_action(tmp_path):
-    """The create_skill fallback must describe the *trigger* (no skill performs
-    the action), not the mechanism ('suggest creating a new skill'): the
-    decision model only sees option descriptions, and the generic wording lost
-    0.03-0.06 to a read skill on send requests."""
+def test_navigate_leaf_picks_among_existing_skills_only(tmp_path):
+    """Two-stage leaf: create_skill is NOT an option in the leaf softmax. The
+    leaf decision offers only the existing skills, and navigation returns the
+    best-matching one; the intent guard in dispatch owns reuse-vs-create."""
 
     class Recording:
         def __init__(self):
@@ -601,16 +625,22 @@ def test_navigate_leaf_offers_create_for_unmatched_action(tmp_path):
     engine = Recording()
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    tree = {"simplex": [Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")]}
-    navigate(engine, log, trace, Request("send a simplex message"), tree)
-    create = next(o for o in engine.request.options if o.id == "create_skill")
-    assert "No existing skill performs this action" in create.description
-    assert "action" in engine.request.question
+    tree = {
+        "simplex": [
+            Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
+            Skill(name="connect_link", category="simplex", description="Show the contact link."),
+        ]
+    }
+    result = navigate(engine, log, trace, Request("send a simplex message"), tree)
+    ids = [o.id for o in engine.request.options]
+    assert ids == ["next_message", "connect_link"]
+    assert "create_skill" not in ids
+    assert getattr(result, "name", None) in ids
 
 
 class _ProbEngine:
     """Returns caller-specified probabilities, keyed by a substring of the
-    decision question, so a test can force a weak create plurality."""
+    decision question, so a test can force a specific navigation outcome."""
 
     def __init__(self, by_question: dict[str, dict[str, float]]):
         self.by_question = by_question
@@ -628,6 +658,9 @@ class _ProbEngine:
                 break
         if not probs_map:
             probs_map = {ids[0]: 1.0}
+        probs_map = {k: v for k, v in probs_map.items() if k in ids}
+        if not probs_map:
+            probs_map = {ids[0]: 1.0}
         return DecisionResult(
             request=request,
             option_ids=ids,
@@ -642,110 +675,196 @@ def _leaf_tree():
                 name="next_message",
                 category="simplex",
                 description="Read the next SimpleX message.",
-            )
+            ),
+            Skill(
+                name="connect_link",
+                category="simplex",
+                description="Show the contact link.",
+            ),
         ]
     }
 
 
-def test_navigate_suppresses_weak_create_plurality(tmp_path):
-    """create_skill wins the softmax by a hair but fails the margin gate: the
-    weak plurality must fall back to the best existing skill, not author."""
+def test_navigate_leaf_returns_best_existing_skill(tmp_path):
+    """The leaf softmax picks the highest-probability existing skill; no create
+    branch competes with it (that was the dilution bug)."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
         {
             "top-level category": {"simplex": 1.0},
-            "skill performs": {"next_message": 0.45, "create_skill": 0.5},
+            "Does the scope": {"covers": 1.0},
+            "skill performs": {"next_message": 0.45, "connect_link": 0.55},
         }
     )
     result = navigate(
         engine, log, trace, Request("send a simplex message"), _leaf_tree()
     )
+    assert getattr(result, "name", None) == "connect_link"
+    assert not isinstance(result, CreateSkill)
+
+
+def test_navigate_single_skill_category_skips_the_softmax(tmp_path):
+    """A one-option softmax is meaningless; the sole skill is returned directly
+    and the guard decides reuse-vs-create."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {"top-level category": {"simplex": 1.0}, "Does the scope": {"covers": 1.0}}
+    )
+    tree = {
+        "simplex": [
+            Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")
+        ]
+    }
+    result = navigate(engine, log, trace, Request("read the next message"), tree)
     assert getattr(result, "name", None) == "next_message"
-    suppressed = [e for e in trace.read() if e["kind"] == "create_suppressed"]
-    assert len(suppressed) == 1
-    assert suppressed[0]["level"] == "leaf"
-    assert suppressed[0]["fallback"] == "next_message"
+    # only the category decision was made; the leaf softmax was skipped
+    assert all("Which simplex skill" not in c.question for c in engine.calls)
 
 
-def test_navigate_create_clears_margin_and_tau(tmp_path):
-    """A create that leads the best skill by >= margin and clears tau fires."""
+def test_navigate_empty_category_short_circuits_to_create(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = _ProbEngine(
-        {
-            "top-level category": {"simplex": 1.0},
-            "skill performs": {"next_message": 0.2, "create_skill": 0.7},
-        }
-    )
-    result = navigate(
-        engine, log, trace, Request("send a simplex message"), _leaf_tree()
-    )
+    engine = _ProbEngine({"top-level category": {"simplex": 1.0}})
+    result = navigate(engine, log, trace, Request("anything"), {"simplex": []})
     assert isinstance(result, CreateSkill)
     assert result.category == "simplex"
-    assert not [e for e in trace.read() if e["kind"] == "create_suppressed"]
+    assert any(e["kind"] == "skill_needed" for e in trace.read())
 
 
-def test_navigate_create_below_tau_is_suppressed(tmp_path):
-    """Even with a clear lead, a create below the absolute floor is suppressed
-    (all options weak => nothing is a confident match)."""
+def test_navigate_category_options_carry_descriptions(tmp_path):
+    """The category softmax must offer each category WITH its description — bare
+    names carry no signal (the misroute bug)."""
+    engine = _ProbEngine({"top-level category": {"simplex": 1.0}})
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = {
+        "simplex": [
+            Skill(
+                name="next_message",
+                category="simplex",
+                description="Read the next SimpleX message.",
+                category_description="SimpleX messaging: read/send messages.",
+            )
+        ]
+    }
+    navigate(engine, log, trace, Request("read the next message"), tree)
+    cat_decision = next(c for c in engine.calls if "top-level category" in c.question)
+    by_id = {o.id: o.description for o in cat_decision.options}
+    assert by_id["simplex"] == "SimpleX messaging: read/send messages."
+    assert "new top-level category is needed" in by_id["create_category"]
+
+
+def test_navigate_category_rejected_scope_authors_category(tmp_path):
+    """The confirm guard is the category create door: a softmax winner whose
+    scope the guard rejects authors a new category."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = _leaf_tree()
     engine = _ProbEngine(
         {
             "top-level category": {"simplex": 1.0},
-            "skill performs": {"next_message": 0.1, "create_skill": 0.3},
-        }
-    )
-    result = navigate(
-        engine, log, trace, Request("send a simplex message"), _leaf_tree()
-    )
-    assert getattr(result, "name", None) == "next_message"
-    assert any(e["kind"] == "create_suppressed" for e in trace.read())
-
-
-def test_navigate_category_create_gate_suppresses_and_falls_back(tmp_path):
-    """The same gate applies to create_category: a weak plurality win falls back
-    to the best existing category and descends into it."""
-    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
-    trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    tree = _leaf_tree()
-    tree["calendar"] = [
-        Skill(name="next_event", category="calendar", description="Report the next event.")
-    ]
-    engine = _ProbEngine(
-        {
-            "top-level category": {
-                "calendar": 0.30,
-                "simplex": 0.32,
-                "create_category": 0.38,
-            },
-            "skill performs": {"next_message": 1.0},
-        }
-    )
-    result = navigate(engine, log, trace, Request("send a simplex message"), tree)
-    assert getattr(result, "name", None) == "next_message"
-    suppressed = [e for e in trace.read() if e["kind"] == "create_suppressed"]
-    assert len(suppressed) == 1 and suppressed[0]["level"] == "category"
-    assert suppressed[0]["fallback"] == "simplex"
-
-
-def test_navigate_category_create_clears_gate(tmp_path):
-    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
-    trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    tree = _leaf_tree()
-    engine = _ProbEngine(
-        {
-            "top-level category": {
-                "simplex": 0.1,
-                "create_category": 0.8,
-            },
+            "Does the scope": {"none": 1.0},
         }
     )
     result = navigate(engine, log, trace, Request("book a flight"), tree)
     assert isinstance(result, CreateCategory)
-    assert not [e for e in trace.read() if e["kind"] == "create_suppressed"]
+    assert any(e["kind"] == "category_scope_rejected" for e in trace.read())
+    assert any(e["kind"] == "create_category" for e in trace.read())
 
+
+def test_navigate_category_confirmed_scope_descends(tmp_path):
+    """A softmax winner the guard confirms is descended into (no create)."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "Does the scope": {"covers": 1.0},
+            "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("read a message"), _leaf_tree())
+    assert getattr(result, "name", None) == "next_message"
+    assert not isinstance(result, CreateCategory)
+    assert any(e["kind"] == "category_scope" and e["fits"] for e in trace.read())
+
+
+def test_confirm_category_fit_threshold(tmp_path):
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = ScriptedEngine(choices={"Does the scope": "covers"})
+    assert (
+        confirm_category_fit(
+            engine, log, trace, Request("check my calendar"), "calendar", "Calendars.", tau=0.5
+        )
+        is True
+    )
+    assert log.read()[-1]["extra"]["phase"] == "navigate:category_scope"
+
+    engine = ScriptedEngine(choices={"Does the scope": "none"})
+    assert (
+        confirm_category_fit(
+            engine, log, trace, Request("order pizza"), "calendar", "Calendars.", tau=0.5
+        )
+        is False
+    )
+
+
+
+def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
+    """The leaf reuse-vs-create knob is navigation.intent_tau, separate from the
+    top-level tau: a borderline guard verdict flips on it while assessment is
+    untouched."""
+    def build(intent_tau: float):
+        engine = _ProbEngine(
+            {
+                "top-level category": {"simplex": 1.0},
+                "Does the scope": {"covers": 1.0},
+                "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+                "same action": {"same": 0.8, "different": 0.2},
+            }
+        )
+        scheduler = Scheduler(
+            engine=engine,
+            llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+            log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+            config={
+                "skills": {},
+                "navigation": {"intent_tau": intent_tau},
+                "category_registry": str(tmp_path / "categories.json"),
+                "skill_bodies": str(tmp_path / "skills"),
+                "skill_seeds": str(tmp_path / "seeds"),
+            },
+            trace=TraceLog(str(tmp_path / "runs.jsonl")),
+        )
+
+        def act(ctx, request):
+            return ActionResult(action_log="read fixture", new_state="read")
+
+        scheduler.tree = {
+            "simplex": [
+                Skill(name="next_message", category="simplex", description="Read the next SimpleX message.", act=act),
+                Skill(name="connect_link", category="simplex", description="Show the contact link."),
+            ]
+        }
+        queued: list = []
+        scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+            (category, kind)
+        )
+        return scheduler, queued
+
+    low, queued_low = build(0.5)
+    assert low.intent_tau == 0.5
+    ran = low._dispatch(Request("read the next simplex message"))
+    assert ran.kind == "ran", "guard same=0.8 clears intent_tau=0.5: reuse"
+    assert not queued_low
+
+    high, queued_high = build(0.95)
+    created = high._dispatch(Request("read the next simplex message"))
+    assert created.kind == "create_skill", "guard same=0.8 fails intent_tau=0.95: author"
+    assert queued_high == [("simplex", "skill")]
 
 
 def test_confirm_skill_fit_returns_true_when_action_matches(tmp_path):
