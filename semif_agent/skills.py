@@ -465,10 +465,10 @@ def unresolved_variables(
     return [name for name in (skill.contract or {}) if name not in merged]
 
 
-def compose_state(request: Request, current: str | None = None) -> str:
+def compose_state(request: Request, additional_context: str | None = None) -> str:
     parts = [request.text]
     if current:
-        parts.append(f"[current process: {current}]")
+        parts.append(f"({additional_context})")
     return " ".join(parts)
 
 
@@ -629,7 +629,7 @@ def _navigate_canned(
     if len(ordered) == 1:
         return ordered[0]
     leaf = DecisionRequest(
-        state=compose_state(request, current=category),
+        state=compose_state(request, additional_context: f"all choices are within the {category} category"),
         question=(
             "Which canned response best fits this input? "
             f"Choose {ordered[-1].name} if none of the others does."
@@ -731,7 +731,7 @@ def navigate(
         "No existing skill performs this action; create a new skill for it.",
     )
     leaf = DecisionRequest(
-        state=compose_state(request, current=category),
+        state=compose_state(request),
         question=f"Which {category} skill performs the action this request asks for? "
         "Choose create_skill if none does.",
         options=[Option(s.name, s.description) for s in skills] + [create_skill],
