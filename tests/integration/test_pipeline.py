@@ -453,14 +453,15 @@ def test_create_skill_empty_category_does_not_wedge(tmp_path):
     assert scheduler.current is None
 
 
-def test_create_category_chain_runs_new_skill(tmp_path):
-    """A request that needs a brand-new category must end with a skill run.
+def test_create_simplex_send_skill(tmp_path):
+    """A send request with no matching leaf must author a new simplex skill.
 
-    Deterministic chain: create_category -> create_skill in the new category ->
-    async codegen body write -> re-dispatch of the original request -> run that
-    skill (the leaf answers the request, not the category stub). Slow: uses real
-    codegen (~25-45 min) and the worker runs in the background, so the test
-    polls the trace for the completion + assessed events. Run in the background.
+    The `simplex` category already ships the read (`next_message`) and
+    `connect_link` seeds; "send a message" is a genuinely unmatched action, so
+    navigation routes it to create_skill. Deterministic chain: create_skill ->
+    async codegen body write -> re-dispatch of the original request -> run the
+    new leaf. Slow: uses real codegen (~25-45 min) and the worker runs in the
+    background, so the test polls the trace. Run in the background.
     """
     config = load_config()
     require_real(config)
@@ -470,29 +471,51 @@ def test_create_category_chain_runs_new_skill(tmp_path):
     config["skill_bodies"] = str(tmp_path / "skills")
     config["codegen"] = {**config.get("codegen", {}), "stream": True}
     scheduler, config = build_scheduler(config)
-    scheduler.tree = {}
 
-    status, detail = scheduler.submit("track my drone delivery in real time")
+    seeded = {s.name for s in scheduler.tree.get("simplex", [])}
+    assert {"next_message", "connect_link"} <= seeded, (
+        f"the simplex seeds must be loaded, got {seeded}"
+    )
+
+    status, detail = scheduler.submit("send a simplex message to pepper saying hi")
     print(f"[{status}] {detail}")
     assert status in ("running", "preempted", "queued", "rejected")
+    assert "new skill for simplex" in detail, (
+        "a send request must route to create_skill for simplex"
+    )
     assert scheduler.current is None, "gate must be free again right after the draft is queued"
 
     draft_deadline = time.monotonic() + 10 * 60
     while time.monotonic() < draft_deadline:
-        kinds = [e["kind"] for e in scheduler.trace.read()]
-        if "category_created" in kinds and "skill_writing" in kinds:
+        rows = scheduler.trace.read()
+        if any(e["kind"] == "skill_writing" for e in rows):
             break
         time.sleep(5)
-    kinds = [e["kind"] for e in scheduler.trace.read()]
-    assert "category_created" in kinds, "category stub must be authored first"
-    assert "skill_writing" in kinds, "the async body write must be launched"
+    rows = scheduler.trace.read()
+    assert not any(e["kind"] == "draft_failed" for e in rows), (
+        "the skill draft must be authored"
+    )
+    writing = [e for e in rows if e["kind"] == "skill_writing"]
+    assert writing and writing[-1]["category"] == "simplex", (
+        "the async body write must be launched for simplex"
+    )
 
     deadline = time.monotonic() + 55 * 60
     created = assessed = None
     while time.monotonic() < deadline:
         rows = scheduler.trace.read()
-        created = next((e for e in rows if e["kind"] == "skill_created"), None)
-        if created and created.get("written"):
+        created = next(
+            (
+                e
+                for e in rows
+                if e["kind"] == "skill_created"
+                and e.get("category") == "simplex"
+                and e.get("written")
+                and e.get("skill") not in seeded
+            ),
+            None,
+        )
+        if created:
             assessed = next(
                 (e for e in rows if e["kind"] == "assessed" and e.get("skill") == created["skill"]),
                 None,
@@ -500,8 +523,8 @@ def test_create_category_chain_runs_new_skill(tmp_path):
             if assessed:
                 break
         time.sleep(10)
-    assert created is not None and created.get("written"), (
-        "codegen must produce a runnable body"
+    assert created is not None, (
+        "codegen must produce a runnable simplex send body"
     )
     assert assessed is not None, "the created skill must run after the body lands"
     assert assessed["skill"] == created["skill"], "the created skill must run"
