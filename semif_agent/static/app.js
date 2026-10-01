@@ -590,6 +590,20 @@ async function resolveRepair(id, action) {
   await refreshAll();
 }
 
+async function resolveApproval(id, approve) {
+  try {
+    const res = await getJSON("/api/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, approve }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`approval failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
 function skillStatusBadge(status, category, name) {
   const span = document.createElement("span");
   if (status === "writing") {
@@ -735,6 +749,28 @@ function renderQuestions() {
       btn.addEventListener("click", () => resolveRepair(r.id, action));
       actions.appendChild(btn);
     }
+    box.appendChild(actions);
+    el.appendChild(box);
+  }
+  for (const a of state.status.approvals || []) {
+    const box = document.createElement("div");
+    box.className = "pending-line";
+    const target = a.kind === "category" ? a.category : `${a.category}.${a.skill}`;
+    const label = document.createElement("div");
+    label.textContent = `approve new ${a.kind} ${target}: ${a.description}`;
+    box.appendChild(label);
+    const actions = document.createElement("div");
+    const yes = document.createElement("button");
+    yes.type = "button";
+    yes.textContent = "approve";
+    yes.className = "primary";
+    yes.addEventListener("click", () => resolveApproval(a.id, true));
+    const no = document.createElement("button");
+    no.type = "button";
+    no.textContent = "deny";
+    no.addEventListener("click", () => resolveApproval(a.id, false));
+    actions.appendChild(yes);
+    actions.appendChild(no);
     box.appendChild(actions);
     el.appendChild(box);
   }

@@ -24,6 +24,7 @@ from semif_agent.llm import LLMClient, LLMError
 from semif_agent.log import DecisionLog
 from semif_agent.skill import RunResult
 from semif_agent.scheduler import (
+    DraftAuthor,
     PendingQuestion,
     RepairOffer,
     Scheduler,
@@ -963,6 +964,162 @@ def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
     assert scheduler.fatal is None
 
 
+def _answer_approval_when_posted(scheduler, approved, timeout=5.0):
+    """Approve/deny the first pending creation proposal, as a front end would."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pending = scheduler.pending_approvals()
+        if pending:
+            scheduler.answer_approval(pending[0]["id"], approved)
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_creation_approval_off_proceeds(tmp_path):
+    """The default (no `creation_approval`) leaves creation unchanged: the gate
+    returns immediately and posts nothing."""
+    scheduler = _scheduler(tmp_path)
+    job = DraftAuthor(
+        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+    )
+    assert scheduler._request_approval(job, "category", "travel", "Trips.") is True
+    assert scheduler.pending_approvals() == []
+
+
+def test_creation_approval_approved_proceeds(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    job = DraftAuthor(
+        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+    )
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__(
+            "ok", scheduler._request_approval(job, "category", "travel", "Trips.")
+        )
+    )
+    thread.start()
+    assert _answer_approval_when_posted(scheduler, approved=True)
+    thread.join()
+    assert result["ok"] is True
+    kinds = [e["kind"] for e in scheduler.trace.read()]
+    assert "creation_approval_requested" in kinds
+    assert "creation_approval_approved" in kinds
+    assert scheduler.pending_approvals() == []
+
+
+def test_creation_approval_denied_aborts(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    job = DraftAuthor(
+        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+    )
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__(
+            "ok", scheduler._request_approval(job, "skill", "book_flight", "Book.")
+        )
+    )
+    thread.start()
+    assert _answer_approval_when_posted(scheduler, approved=False)
+    thread.join()
+    assert result["ok"] is False
+    assert any(
+        e["kind"] == "creation_approval_denied" for e in scheduler.trace.read()
+    )
+
+
+def test_creation_approval_timeout_denies(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    scheduler.elicitation_wait = 0.1
+    job = DraftAuthor(
+        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+    )
+    assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is False
+    assert any(
+        e["kind"] == "creation_approval_timeout" for e in scheduler.trace.read()
+    )
+
+
+def test_creation_approval_without_front_end_denies(tmp_path):
+    """With no deferring front end there is nobody to answer, so creation is
+    denied immediately rather than stalling the draft worker."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = False
+    job = DraftAuthor(
+        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+    )
+    assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is False
+    assert any(
+        e["kind"] == "creation_approval_skipped" for e in scheduler.trace.read()
+    )
+
+
+def test_creation_approval_chain_skips_second_prompt(tmp_path):
+    """A skill job chained from an approved category is already covered."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    job = DraftAuthor(
+        request=Request("book a trip"),
+        category="travel",
+        weight=0.5,
+        kind="skill",
+        approved=True,
+    )
+    assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is True
+    assert scheduler.pending_approvals() == []
+
+
+def test_author_category_denied_does_not_register(tmp_path, monkeypatch):
+    """The category hook: a denied proposal registers nothing and queues no
+    chained skill draft."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    monkeypatch.setattr(
+        "semif_agent.scheduler.generate_category",
+        lambda client, request, tree: CategoryDraft(name="travel", description="Trips."),
+    )
+    job = DraftAuthor(
+        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+    )
+    thread = threading.Thread(target=scheduler._author_category, args=(job,))
+    thread.start()
+    assert _answer_approval_when_posted(scheduler, approved=False)
+    thread.join()
+    assert "travel" not in scheduler.tree
+    assert not any(e["kind"] == "category_created" for e in scheduler.trace.read())
+    assert list(scheduler._drafts) == []
+
+
+def test_author_skill_denied_does_not_register(tmp_path, monkeypatch):
+    scheduler = _scheduler(tmp_path)
+    scheduler.creation_approval = True
+    scheduler.defer_questions = True
+    monkeypatch.setattr(
+        "semif_agent.scheduler.generate_skill",
+        lambda client, request, category, tree: SkillDraft(
+            name="book_flight", description="Book a flight."
+        ),
+    )
+    job = DraftAuthor(
+        request=Request("book a flight"), category="travel", weight=0.5, kind="skill"
+    )
+    thread = threading.Thread(target=scheduler._author_skill, args=(job,))
+    thread.start()
+    assert _answer_approval_when_posted(scheduler, approved=False)
+    thread.join()
+    assert scheduler.tree.get("travel", []) == []
+    assert not any(e["kind"] == "skill_created" for e in scheduler.trace.read())
+
+
 def test_skill_status_reflects_writing_and_noop():
     """A fresh Skill is a stub; marking it writing shows `writing`; a real body
     shows `ready`."""
@@ -1291,9 +1448,9 @@ def test_answer_question_unknown_id_errors(tmp_path):
     assert "no pending question" in detail
 
 
-def test_post_questions_waits_for_answers(tmp_path):
+def test_post_questions_asks_one_at_a_time(tmp_path):
     scheduler = _scheduler(tmp_path)
-    scheduler.elicitation_wait = 5.0
+    scheduler.elicitation_answer_timeout = 5.0
     job = SkillWrite(
         request=Request("track it"),
         category="tracking",
@@ -1305,26 +1462,62 @@ def test_post_questions_waits_for_answers(tmp_path):
         target=lambda: result.update(scheduler._post_questions(job, ["Q1?", "Q2?"]))
     )
     thread.start()
+
+    def next_pending(deadline: float) -> list:
+        while time.monotonic() < deadline:
+            pending = scheduler.pending_questions()
+            if pending:
+                return pending
+            time.sleep(0.02)
+        return []
+
     deadline = time.monotonic() + 5
-    pending = []
-    while time.monotonic() < deadline:
-        pending = scheduler.pending_questions()
-        if len(pending) == 2:
-            break
-        time.sleep(0.02)
-    assert len(pending) == 2
-    scheduler.answer_question(pending[0]["id"], "A1")
-    scheduler.answer_question(pending[1]["id"], "")
+    first = next_pending(deadline)
+    assert [q["question"] for q in first] == ["Q1?"]
+    scheduler.answer_question(first[0]["id"], "A1")
+    second = next_pending(deadline)
+    assert [q["question"] for q in second] == ["Q2?"]
+    scheduler.answer_question(second[0]["id"], "")
     thread.join(timeout=5)
     assert result == {"Q1?": "A1"}
     assert scheduler.pending_questions() == []
     kinds = [e["kind"] for e in scheduler.trace.read()]
     assert "questions_asked" in kinds
+    # An empty answer is accepted (the question is dismissed), not a timeout.
+    assert "questions_timeout" not in kinds
+
+
+def test_post_questions_timeout_drops_remaining(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.elicitation_answer_timeout = 0.2
+    job = SkillWrite(
+        request=Request("track it"),
+        category="tracking",
+        draft=SkillDraft(name="probe", description="Probe."),
+        weight=0.5,
+    )
+    result: dict = {}
+    thread = threading.Thread(
+        target=lambda: result.update(scheduler._post_questions(job, ["Q1?", "Q2?"]))
+    )
+    thread.start()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        pending = scheduler.pending_questions()
+        if pending:
+            scheduler.answer_question(pending[0]["id"], "A1")
+            break
+        time.sleep(0.02)
+    thread.join(timeout=3)
+    assert result == {"Q1?": "A1"}
+    assert scheduler.pending_questions() == []
+    events = [e for e in scheduler.trace.read() if e["kind"] == "questions_timeout"]
+    assert events and events[-1]["answered"] == 1 and events[-1]["asked"] == 2
 
 
 def test_post_questions_times_out(tmp_path):
     scheduler = _scheduler(tmp_path)
-    scheduler.elicitation_wait = 0.1
+    scheduler.elicitation_answer_timeout = 0.1
     job = SkillWrite(
         request=Request("track it"),
         category="tracking",

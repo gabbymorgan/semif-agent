@@ -2,6 +2,7 @@
   "_comment": "Per-machine config. config.json is gitignored; copy this file to config.json and adjust paths. The box (guppy) keeps its own config.json with local paths.",
   "tau": 0.6,
   "max_reentries": 3,
+  "creation_approval": false,
   "navigation": {
     "_comment": "Navigation is two-stage at BOTH levels and the guards are the create doors (no threshold gate). Category: the softmax offers each existing category WITH its description (bare names carried no signal) plus create_category; confirm_category_fit then confirms the winner's scope (phase navigate:category_scope, P(covers) >= category_tau) and a rejected winner authors a new category. Leaf: the softmax offers only existing skills; confirm_skill_fit then compares the winner's action to the request (phase navigate:intent, P(same) >= intent_tau) and a mismatch authors a new leaf. Both taus are separate from the top-level tau so tuning reuse-vs-create does not move run assessment/fidelity. The check is deliberately permissive: with real descriptions in-scope requests score 0.9-1.0, so a borderline over-cover routes into a plausible category and the leaf guard catches it.",
     "intent_tau": 0.6,
@@ -64,9 +65,10 @@
     "frequency_penalty": 1,
     "max_attempts": 3,
     "elicitation": {
-      "_comment": "Ask the product owner implementation questions before the body is written: which service/account, how to connect, where the credential comes from, what success looks like. Every front end defers questions to the questions panel and the single-slot writer waits up to wait_timeout seconds. Questions never ask for operational data values (collected at first fire) or config-vs-input cadence (the config step owns that).",
+      "_comment": "Ask the product owner implementation questions before the body is written: which service/account, how to connect, where the credential comes from, what success looks like. Every front end defers questions to the questions panel; the single-slot writer asks them one at a time and waits answer_timeout seconds for each (the clock resets on every answer submit, so the user only ever sees the next question after answering the current one; a timeout stops the sequence). wait_timeout is the separate, longer wait for the optional creation-approval gate. Questions never ask for operational data values (collected at first fire) or config-vs-input cadence (the config step owns that).",
       "enabled": true,
       "max_questions": 4,
+      "answer_timeout": 30,
       "wait_timeout": 900
     },
     "fidelity": {

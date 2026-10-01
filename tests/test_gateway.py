@@ -19,7 +19,7 @@ from semif_agent.gateway.service import GatewayService
 from semif_agent.gateway.simplex import SimplexAdapter
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
-from semif_agent.scheduler import Scheduler
+from semif_agent.scheduler import PendingApproval, Scheduler
 from semif_agent.skills import ActionResult, Skill
 from semif_agent.trace import TraceLog
 
@@ -251,3 +251,28 @@ def test_service_answered_question_routes_back(tmp_path):
 
     service.handle_inbound(InboundMessage(text="work", chat_id="4", contact_id="4"))
     assert not scheduler.pending_questions()
+
+
+def test_service_surfaces_and_resolves_approval(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    scheduler.approvals.append(
+        PendingApproval(
+            id="a1",
+            run_id="r1",
+            kind="skill",
+            category="tracking",
+            skill="track_live",
+            description="Follow a package.",
+        )
+    )
+    service._owners["r1"] = "4"
+    service.surface()
+    assert any(
+        "Approve creating new skill tracking.track_live" in text
+        for text in drain_outbound(service)
+    )
+
+    service.handle_inbound(InboundMessage(text="yes", chat_id="4", contact_id="4"))
+    assert scheduler.pending_approvals() == []
+    assert any("approved" in text for text in drain_outbound(service))

@@ -16,7 +16,7 @@ from semif_agent.decisions import DecisionRequest, DecisionResult, Option, Reque
 from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
-from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler
+from semif_agent.scheduler import PendingApproval, PendingQuestion, RepairOffer, Scheduler
 from semif_agent.skills import ActionResult, Skill
 from semif_agent.trace import TraceLog
 
@@ -356,11 +356,43 @@ def test_status_carries_questions_and_repairs(tmp_path):
             selected="retry", reason="boom", request_text="track", failure="boom",
         )
     )
+    scheduler.approvals.append(
+        PendingApproval(
+            id="a1", run_id="run-1", kind="skill", category="tracking",
+            skill="track_live", description="Follow a package.",
+        )
+    )
     server = Server(scheduler)
     try:
         status, payload = server.get("/api/status")
         assert payload["questions"][0]["id"] == "q1"
         assert payload["repairs"][0]["id"] == "r1"
+        assert payload["approvals"][0]["id"] == "a1"
+    finally:
+        server.close()
+
+
+def test_approvals_endpoint_roundtrip(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.approvals.append(
+        PendingApproval(
+            id="a1", run_id="run-1", kind="category", category="travel",
+            skill="", description="Trips.",
+        )
+    )
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/approvals")
+        assert status == 200
+        assert payload["approvals"][0]["id"] == "a1"
+        assert payload["approvals"][0]["kind"] == "category"
+
+        status, payload = server.post("/api/approvals", {"id": "a1", "approve": True})
+        assert payload["status"] == "ok"
+        assert scheduler.pending_approvals() == []
+
+        status, payload = server.post("/api/approvals", {"id": "missing", "approve": False})
+        assert payload["status"] == "error"
     finally:
         server.close()
 

@@ -73,14 +73,19 @@ scheduler.py    no up-front gate: every input is dispatched
                 single-slot workers: a create_category/create_skill request is
                 queued, the gate stays free, the category job chains into its
                 skill job, and the original request is re-queued and re-runs the
-                new leaf when the body lands; the body worker runs the full
+                new leaf when the body lands; an optional human approval gate
+                (`creation_approval`, off by default) blocks the draft worker
+                after the proposal is authored and before anything is
+                registered — one prompt per request, denial/timeout aborts
+                creation, surfaced via the approval queue; the body worker runs the full
                 pipeline: elicitation ->
                 codegen body (declares its own flat `CONTRACT`) -> fidelity
                 gate -> test -> auto-run test (SemIf regen ladder on failure,
                 code/test); config
                 search auto-populates the skill config from the full config
-                cascade; elicitation asks implementation questions (all front ends
-                defer via the question queue, `wait_timeout`); a
+                cascade; elicitation asks implementation questions one at a
+                time (all front ends defer via the question queue, `answer_timeout`
+                per question); a
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
@@ -349,11 +354,26 @@ CLI, unit tests (24) + box integration tests (2).
   canned line has no side effect to assess. The leaf choice logs phase
   `navigate:response` and traces `response_selected`. `response.reject` (a stub
   that never ran) is gone.
+- **Optional human approval on creation** (Oct 2026): `creation_approval`
+  (top-level, default `false`) is a single boolean. When on, the single-slot
+  `llm` draft worker blocks after it authors a proposal and before anything is
+  registered; the human approves/denies via the REPL prompt, the dashboard
+  approvals panel (`GET/POST /api/approvals`), or a gateway chat reply
+  (`yes`/`no`). One prompt per creation request — a new category's chained skill
+  is covered by the category approval (`DraftAuthor.approved`). Denial or
+  timeout aborts creation: nothing is registered, no body is written, and the
+  request is not re-dispatched; the wait reuses
+  `codegen.elicitation.wait_timeout`. With no deferring front end it denies
+  immediately rather than stalling the worker. Traced as
+  `creation_approval_requested` / `_approved` / `_denied` / `_timeout` /
+  `_skipped`; it is a human veto, not a decision row — the SemIf create doors
+  still make and log the routing decision.
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which
   service/account, how to connect, where the credential comes from, what success
   looks like); every front end defers via the question queue
-  (`/api/questions`, worker waits `codegen.elicitation.wait_timeout`). Bodies
+  (`/api/questions`, worker waits `codegen.elicitation.answer_timeout` per
+  question, one at a time). Bodies
   must perform the real action via stdlib transports with values from
   `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
   fidelity gate (`authoring:fidelity`, a SemIf accept/reconsider decision) plus
@@ -652,8 +672,9 @@ CLI, unit tests (24) + box integration tests (2).
   The codegen worker runs the full authoring pipeline:
   1. **elicitation** (`generate_elicitation`): implementation questions +
      integration hint. Every front end (REPL, dashboard, gateway) sets
-     `defer_questions` and the worker posts to the question queue and waits
-     (`codegen.elicitation.wait_timeout`) for answers.
+     `defer_questions` and the worker posts them to the question queue one at a
+     time, waiting `codegen.elicitation.answer_timeout` seconds for each (the
+     clock resets on every answer submit; a timeout stops the sequence).
   2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
      repair): SKILL.md + request + tree + requirements answers; the body is a
      single `act(ctx, request)`, reads every operational value from `ctx.config`,
@@ -716,9 +737,11 @@ CLI, unit tests (24) + box integration tests (2).
   connect (which service/account, how to connect, where the credential comes
   from, what success looks like, how failure should behave). Every front end
   defers — the single-slot worker posts
-  questions to `scheduler.questions` (`GET/POST /api/questions`) and waits up to
-  `codegen.elicitation.wait_timeout` seconds, then proceeds with whatever
-  answers arrived (`questions_timeout` trace). Answers ride on the draft into
+  questions to `scheduler.questions` (`GET/POST /api/questions`) one at a time
+  and waits up to `codegen.elicitation.answer_timeout` seconds for each (the
+  clock resets on every answer submit, so the next question is only shown after
+  the current is answered; a timeout stops the sequence), then proceeds with
+  whatever answers arrived (`questions_timeout` trace). Answers ride on the draft into
   every body attempt (including retries and regens) and are persisted in the
   registry so a `restart` does not ask again. The prompt keeps an explicit
   anti-pattern block: never config-vs-input cadence questions ("should the

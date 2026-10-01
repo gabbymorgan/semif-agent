@@ -118,6 +118,7 @@ def build_status(scheduler: Scheduler) -> dict:
         queue_max = scheduler.queue.max_size
         questions = scheduler.pending_questions()
         repairs = scheduler.pending_repairs()
+        approvals = scheduler.pending_approvals()
     return {
         "current": current,
         "pending": pending,
@@ -126,6 +127,7 @@ def build_status(scheduler: Scheduler) -> dict:
         "queue_max": queue_max,
         "questions": questions,
         "repairs": repairs,
+        "approvals": approvals,
     }
 
 
@@ -228,6 +230,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/repairs":
             self._send(200, {"repairs": self.scheduler.pending_repairs()})
             return
+        if path == "/api/approvals":
+            self._send(200, {"approvals": self.scheduler.pending_approvals()})
+            return
         self._send_error(404, "no such endpoint")
 
     def do_POST(self):
@@ -296,6 +301,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     status, detail = self.scheduler.resolve_repair(
                         str(body.get("id", "")),
                         None if action is None else str(action),
+                    )
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
+            return
+        if path == "/api/approvals":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    status, detail = self.scheduler.answer_approval(
+                        str(body.get("id", "")), bool(body.get("approve"))
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))

@@ -109,13 +109,16 @@ class DraftAuthor:
 
     `kind` is "category" (author a top-level category) or "skill" (author a
     leaf inside `category`). A category job chains into its skill job so the
-    create_category -> create_skill order stays deterministic.
+    create_category -> create_skill order stays deterministic. `approved` marks
+    a chained skill job whose parent category was already approved, so the
+    creation-approval prompt is asked once per request, not once per level.
     """
 
     request: Request
     category: str | None
     weight: float
     kind: str
+    approved: bool = False
 
 
 @dataclass
@@ -123,8 +126,9 @@ class PendingQuestion:
     """A question waiting for the human (deferred elicitation or repair).
 
     Posted by the codegen worker; answered via
-    the dashboard (`/api/questions`) or `Scheduler.answer_question`. The worker
-    waits (bounded by `codegen.elicitation.wait_timeout`) and continues with
+    the dashboard (`/api/questions`) or `Scheduler.answer_question`. Elicitation
+    posts one at a time and waits `codegen.elicitation.answer_timeout` seconds
+    for each (the clock resets on every answer); the worker then continues with
     whatever answers arrived.
     """
 
@@ -161,6 +165,27 @@ class RepairOffer:
     failure: str
     evidence: dict = field(default_factory=dict)
     status: str = "offered"
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class PendingApproval:
+    """A proposed category/skill awaiting the human's yes/no.
+
+    Posted by the single-slot `llm` draft worker after the proposal is authored
+    and before anything is registered. `creation_approval` is off by default;
+    when on, a denial or timeout aborts creation (nothing registered, no body
+    written, the request is not re-dispatched). One prompt per creation request:
+    the category prompt covers its chained skill, so a new category asks once.
+    """
+
+    id: str
+    run_id: str
+    kind: str  # category | skill
+    category: str
+    skill: str
+    description: str
+    status: str = "pending"  # pending | approved | denied | timeout
     created_at: float = field(default_factory=time.time)
 
 
@@ -209,7 +234,11 @@ class Scheduler:
         self.elicitation_enabled = bool(elicitation_cfg.get("enabled", True))
         self.elicitation_max = int(elicitation_cfg.get("max_questions", 4))
         self.elicitation_wait = float(elicitation_cfg.get("wait_timeout", 900.0))
+        self.elicitation_answer_timeout = float(
+            elicitation_cfg.get("answer_timeout", 30.0)
+        )
         self.defer_questions = False
+        self.creation_approval = bool(config.get("creation_approval", False))
         fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
         self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
         self.fidelity_max_attempts = int(fidelity_cfg.get("max_attempts", 1))
@@ -251,6 +280,8 @@ class Scheduler:
         self.questions: list[PendingQuestion] = []
         self.repairs: list[RepairOffer] = []
         self._repair_counts: dict[str, int] = {}
+        self._approval_notify = threading.Condition(self._lock)
+        self.approvals: list[PendingApproval] = []
 
     # ---- fatal handling ----
 
@@ -742,6 +773,50 @@ class Scheduler:
             return self._repair_with_answer(offer_id, answer)
         return "ok", "answer recorded" if answer else "question skipped"
 
+    def pending_approvals(self) -> list[dict]:
+        """Creation proposals awaiting the human's yes/no."""
+        with self._lock:
+            return [
+                {
+                    "id": a.id,
+                    "run_id": a.run_id,
+                    "kind": a.kind,
+                    "category": a.category,
+                    "skill": a.skill,
+                    "description": a.description,
+                    "created_at": a.created_at,
+                }
+                for a in self.approvals
+                if a.status == "pending"
+            ]
+
+    def answer_approval(self, approval_id: str, approved: bool) -> tuple[str, str]:
+        """Approve or deny a pending creation proposal.
+
+        The draft worker is blocked in `_request_approval`; setting the status
+        and notifying releases it (True registers + writes the body, False
+        aborts). The terminal trace event is written by the worker, not here.
+        """
+        with self._lock:
+            approval = next(
+                (a for a in self.approvals if a.id == approval_id), None
+            )
+            if approval is None:
+                return "error", f"no pending approval {approval_id}"
+            if approval.status != "pending":
+                return "error", f"approval {approval_id} is already {approval.status}"
+            approval.status = "approved" if approved else "denied"
+            self._approval_notify.notify_all()
+            target = (
+                approval.category
+                if approval.kind == "category"
+                else f"{approval.category}.{approval.skill}"
+            )
+        return (
+            "ok",
+            f"{'approved' if approved else 'denied'} {approval.kind} {target}",
+        )
+
     def pending_repairs(self) -> list[dict]:
         with self._lock:
             return [
@@ -888,17 +963,23 @@ class Scheduler:
         category: str | None,
         kind: str,
         weight: float,
+        approved: bool = False,
     ) -> None:
         """Queue a category or skill draft for the `llm` worker.
 
         The gate stays free: this returns immediately and one draft at a time is
         authored in the background. A category job chains into its skill job; a
-        skill job hands off to the codegen body worker.
+        skill job hands off to the codegen body worker. `approved` marks a
+        chained skill job whose category was already approved.
         """
         with self._lock:
             self._drafts.append(
                 DraftAuthor(
-                    request=request, category=category, weight=weight, kind=kind
+                    request=request,
+                    category=category,
+                    weight=weight,
+                    kind=kind,
+                    approved=approved,
                 )
             )
             if self._draft_thread is None or not self._draft_thread.is_alive():
@@ -940,10 +1021,14 @@ class Scheduler:
     def _author_category(self, job: DraftAuthor) -> None:
         """Author a top-level category, then chain into its skill leaf.
 
-        An `llm` failure is graceful: only the user is told, the request is not
-        re-dispatched — the decision engine stays the single fatal dependency.
+        When `creation_approval` is on, the human approves the proposed category
+        first; the chained skill is covered by that approval. An `llm` failure is
+        graceful: only the user is told, the request is not re-dispatched — the
+        decision engine stays the single fatal dependency.
         """
         draft = generate_category(self.llm, job.request, self._tree_snapshot())
+        if not self._request_approval(job, "category", draft.name, draft.description):
+            return
         with self._lock:
             if draft.name in self.tree:
                 self.trace.append(
@@ -961,13 +1046,19 @@ class Scheduler:
                 category=draft.name,
                 description=draft.description,
             )
-        self._queue_draft(job.request, draft.name, "skill", job.weight)
+        self._queue_draft(job.request, draft.name, "skill", job.weight, approved=True)
 
     def _author_skill(self, job: DraftAuthor) -> None:
-        """Author a skill leaf stub, then launch the codegen body write."""
+        """Author a skill leaf stub, then launch the codegen body write.
+
+        When `creation_approval` is on, the human approves the proposed skill
+        (a chained skill inside an already-approved category skips this).
+        """
         draft = generate_skill(
             self.llm, job.request, job.category, self._tree_snapshot()
         )
+        if not self._request_approval(job, "skill", draft.name, draft.description):
+            return
         with self._lock:
             existing = {s.name for s in self.tree.get(job.category, [])}
             if draft.name in existing:
@@ -1021,6 +1112,103 @@ class Scheduler:
             f"[llm] {job.kind} authoring for {target} FAILED: {exc}. "
             "The request was not re-dispatched."
         )
+
+    # ---- creation approval (opt-in human veto on new categories/skills) ----
+
+    def _request_approval(
+        self, job: DraftAuthor, kind: str, name: str, description: str
+    ) -> bool:
+        """Ask the human to approve a proposed creation. Returns True to proceed.
+
+        Off by default (`creation_approval`). When on, the single-slot `llm`
+        worker blocks here after the proposal is authored and before anything is
+        registered; the main gate stays free. One prompt per creation request —
+        a chained skill job (`job.approved`) is already covered by the category
+        approval. Denial or timeout aborts creation: nothing is registered, no
+        body is written, and the request is not re-dispatched. Without a
+        deferring front end there is nobody to answer, so it denies immediately
+        rather than stalling the worker.
+        """
+        if not self.creation_approval or job.approved:
+            return True
+        target = name if kind == "category" else f"{job.category}.{name}"
+        if not self.defer_questions:
+            self.trace.append(
+                "creation_approval_skipped",
+                job.request.id,
+                target_kind=kind,
+                category=target if kind == "category" else job.category,
+                skill="" if kind == "category" else name,
+                reason="no front end to answer; creation denied",
+            )
+            print(
+                f"[approval] {kind} {target} needs approval but no front end is "
+                "deferring questions; creation denied."
+            )
+            return False
+        approval = PendingApproval(
+            id=uuid.uuid4().hex[:12],
+            run_id=job.request.id,
+            kind=kind,
+            category=target if kind == "category" else (job.category or ""),
+            skill="" if kind == "category" else name,
+            description=description,
+        )
+        with self._lock:
+            self.approvals.append(approval)
+            self._approval_notify.notify_all()
+        self.trace.append(
+            "creation_approval_requested",
+            job.request.id,
+            target_kind=kind,
+            category=approval.category,
+            skill=approval.skill,
+            description=description,
+        )
+        print(
+            f"[approval] new {kind} {target} — {description}. "
+            "Approve in the REPL/dashboard (denies on timeout)."
+        )
+        deadline = (
+            None
+            if self.elicitation_wait <= 0
+            else time.monotonic() + self.elicitation_wait
+        )
+        with self._lock:
+            while approval.status == "pending":
+                if deadline is not None and time.monotonic() >= deadline:
+                    approval.status = "timeout"
+                    break
+                self._approval_notify.wait(timeout=1.0)
+            self.approvals = [a for a in self.approvals if a.id != approval.id]
+            self._approval_notify.notify_all()
+            status = approval.status
+        if status == "approved":
+            self.trace.append(
+                "creation_approval_approved",
+                job.request.id,
+                target_kind=kind,
+                category=approval.category,
+                skill=approval.skill,
+            )
+            return True
+        event = (
+            "creation_approval_timeout"
+            if status == "timeout"
+            else "creation_approval_denied"
+        )
+        self.trace.append(
+            event,
+            job.request.id,
+            target_kind=kind,
+            category=approval.category,
+            skill=approval.skill,
+        )
+        print(
+            f"[approval] {kind} {target} "
+            f"{'timed out' if status == 'timeout' else 'denied'}; creation aborted."
+        )
+        return False
 
     # ---- async skill-body writes (single-slot codegen worker) ----
 
@@ -1175,10 +1363,11 @@ class Scheduler:
         """Generate questions in the background, post them, wait for answers.
 
         The single-slot worker itself asks: the REPL, dashboard, and gateway all
-        defer questions to `self.questions` now that authoring is async. It
-        pauses here for up to `elicitation.wait_timeout` while the gate stays
-        free and other requests proceed; whatever answers arrive (possibly none)
-        feed the body writer.
+        defer questions to `self.questions` now that authoring is async. It asks
+        them one at a time, waiting up to `elicitation.answer_timeout` seconds
+        for each (the clock resets on every answer); the gate stays free while
+        it waits and other requests proceed. A timeout stops the sequence and
+        the worker proceeds with whatever answers arrived (possibly none).
         """
         if not (self.defer_questions and self.elicitation_enabled and self.codegen):
             if self.elicitation_enabled and self.codegen is not None:
@@ -1217,20 +1406,14 @@ class Scheduler:
     def _post_questions(
         self, job: SkillWrite, questions: list[str]
     ) -> dict[str, str]:
-        """Post a question group and block the worker until answered or timed out."""
-        group = [
-            PendingQuestion(
-                id=uuid.uuid4().hex[:12],
-                run_id=job.request.id,
-                category=job.category,
-                skill=job.draft.name,
-                question=question,
-            )
-            for question in questions
-        ]
-        with self._lock:
-            self.questions.extend(group)
-            self._question_notify.notify_all()
+        """Ask the questions one at a time, waiting for each answer.
+
+        Only one question is live at a time: the next is posted only after the
+        current is answered (an empty answer is accepted) or skipped. Each
+        question gets a fresh `elicitation.answer_timeout` seconds — the clock
+        resets on every answer submit. A timeout stops the sequence so the
+        worker proceeds with whatever answers arrived.
+        """
         self.trace.append(
             "questions_asked",
             job.request.id,
@@ -1239,29 +1422,50 @@ class Scheduler:
             questions=questions,
         )
         print(
-            f"[codegen] {len(group)} question(s) waiting about "
+            f"[codegen] {len(questions)} question(s) about "
             f"{job.category}.{job.draft.name} — answer in the dashboard."
         )
-        deadline = (
-            None if self.elicitation_wait <= 0
-            else time.monotonic() + self.elicitation_wait
-        )
-        with self._lock:
-            while not all(q.answer is not None or q.skipped for q in group):
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-                self._question_notify.wait(timeout=1.0)
-            answers = {q.question: q.answer for q in group if q.answer}
-            self.questions = [q for q in self.questions if q not in group]
-            self._question_notify.notify_all()
-        if len(answers) < len(group):
+        answers: dict[str, str] = {}
+        asked = 0
+        timed_out = False
+        for question in questions:
+            pending = PendingQuestion(
+                id=uuid.uuid4().hex[:12],
+                run_id=job.request.id,
+                category=job.category,
+                skill=job.draft.name,
+                question=question,
+            )
+            with self._lock:
+                self.questions.append(pending)
+                self._question_notify.notify_all()
+            asked += 1
+            deadline = (
+                None
+                if self.elicitation_answer_timeout <= 0
+                else time.monotonic() + self.elicitation_answer_timeout
+            )
+            with self._lock:
+                while pending.answer is None and not pending.skipped:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    self._question_notify.wait(timeout=1.0)
+                if pending.answer is not None:
+                    answers[question] = pending.answer
+                self.questions = [q for q in self.questions if q is not pending]
+                self._question_notify.notify_all()
+            if pending.answer is None and not pending.skipped:
+                # The current question timed out; don't post the rest.
+                break
+        if timed_out:
             self.trace.append(
                 "questions_timeout",
                 job.request.id,
                 category=job.category,
                 skill=job.draft.name,
                 answered=len(answers),
-                asked=len(group),
+                asked=asked,
             )
         return answers
 

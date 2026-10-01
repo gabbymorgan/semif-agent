@@ -34,6 +34,17 @@ _REPAIR_ACTIONS = {
     "no_repair": "no_repair",
 }
 
+_APPROVAL_ACTIONS = {
+    "yes": True,
+    "y": True,
+    "approve": True,
+    "ok": True,
+    "no": False,
+    "n": False,
+    "deny": False,
+    "skip": False,
+}
+
 
 def _strip_run_id(text: str) -> str:
     return _LEADING_RUN_ID.sub("", text or "")
@@ -65,6 +76,7 @@ class GatewayService:
         self._pending_owner: str | None = None
         self._question_for_chat: dict[str, str] = {}
         self._repair_for_chat: dict[str, str] = {}
+        self._approval_for_chat: dict[str, str] = {}
         self._surfaced: set[str] = set()
         self._route_lock = threading.Lock()
         self._stop = threading.Event()
@@ -131,6 +143,12 @@ class GatewayService:
                 status, detail = self.scheduler.resolve_repair(offer_id, action)
                 self._surfaced.add(offer_id)
                 self._reply(reply_to, detail)
+            elif msg.chat_id in self._approval_for_chat and msg.text.strip().lower() in _APPROVAL_ACTIONS:
+                approval_id = self._approval_for_chat.pop(msg.chat_id)
+                approved = _APPROVAL_ACTIONS[msg.text.strip().lower()]
+                status, detail = self.scheduler.answer_approval(approval_id, approved)
+                self._surfaced.add(approval_id)
+                self._reply(reply_to, detail)
             else:
                 status, detail, run_id = self.scheduler.submit_request(
                     msg.text, source=self.source_for(msg.chat_id)
@@ -196,6 +214,31 @@ class GatewayService:
                     (
                         f"{offer['category']}.{offer['skill']} failed: "
                         f"{offer['failure'][:200]}\nReply retry / repair / ask / no."
+                    ),
+                )
+
+        approvals = self.scheduler.pending_approvals()
+        live_ids = {a["id"] for a in approvals}
+        self._approval_for_chat = {
+            chat: aid for chat, aid in self._approval_for_chat.items() if aid in live_ids
+        }
+        for item in approvals:
+            if item["id"] in self._surfaced:
+                continue
+            self._surfaced.add(item["id"])
+            chat = self._owner_of(item["run_id"]) or origin or self.home_channel
+            if chat:
+                self._approval_for_chat[chat] = item["id"]
+                target = (
+                    item["category"]
+                    if item["kind"] == "category"
+                    else f"{item['category']}.{item['skill']}"
+                )
+                self._reply(
+                    chat,
+                    (
+                        f"Approve creating new {item['kind']} {target}: "
+                        f"{item['description']}\nReply yes / no."
                     ),
                 )
 

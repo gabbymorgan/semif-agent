@@ -291,6 +291,42 @@ def _print_repairs(scheduler: Scheduler) -> None:
         )
 
 
+def _answer_approvals(scheduler: Scheduler) -> None:
+    """Ask any pending creation approvals at the REPL.
+
+    Only prompts when `creation_approval` is on (the scheduler posts nothing
+    otherwise). An empty answer denies.
+    """
+    while True:
+        pending = scheduler.pending_approvals()
+        if not pending:
+            return
+        item = pending[0]
+        target = (
+            item["category"]
+            if item["kind"] == "category"
+            else f"{item['category']}.{item['skill']}"
+        )
+        answer = input(
+            f"[approval] create new {item['kind']} {target}: {item['description']}\n"
+            "approve? (y/N): "
+        ).strip().lower()
+        status, detail = scheduler.answer_approval(
+            item["id"], answer in ("y", "yes")
+        )
+        print(f"[{status}] {detail}")
+
+
+def _print_approvals(scheduler: Scheduler) -> None:
+    for item in scheduler.pending_approvals():
+        target = (
+            item["category"]
+            if item["kind"] == "category"
+            else f"{item['category']}.{item['skill']}"
+        )
+        print(f"[approval] {item['id']}  new {item['kind']} {target}: {item['description']}")
+
+
 def _fatal_exit(scheduler: Scheduler) -> int | None:
     """If the scheduler hit a fatal engine failure, print it and return non-zero.
 
@@ -309,10 +345,11 @@ def repl(scheduler: Scheduler, config: dict) -> int:
     print(
         "type a request, or one of: busy <text> | idle | status | skills | dream | "
         "relabel <id> <outcome> | restart <category> <skill> | "
-        "repairs | repair <offer-id> [action] | quit"
+        "repairs | repair <offer-id> [action] | approvals | quit"
     )
     while True:
         _answer_questions(scheduler)
+        _answer_approvals(scheduler)
         try:
             line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -335,6 +372,9 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         if lower == "repairs":
             _print_repairs(scheduler)
             continue
+        if lower == "approvals":
+            _print_approvals(scheduler)
+            continue
         if lower.startswith(("repair ", "/repair ")):
             parts = line.lstrip("/").split()
             if len(parts) not in (2, 3):
@@ -345,6 +385,7 @@ def repl(scheduler: Scheduler, config: dict) -> int:
             )
             print(f"[{status}] {detail}")
             _answer_questions(scheduler)
+            _answer_approvals(scheduler)
             for result_status, result_detail in scheduler.run_queue():
                 print(f"[{result_status}] {result_detail}")
             continue
@@ -387,6 +428,7 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         if _fatal_exit(scheduler) is not None:
             return 1
         _answer_questions(scheduler)
+        _answer_approvals(scheduler)
         _print_repairs(scheduler)
     return _fatal_exit(scheduler) or 0
 
