@@ -308,12 +308,18 @@ class SimplexDaemon:
                     self._ws = ws
                     backoff = self.reconnect_initial
                     self._event("gateway_connected", url=self.ws_url)
-                    await self._notify_connected()
                     sender = asyncio.create_task(self._outbound_loop(ws))
+                    # The on_connected hook may issue correlated commands (e.g.
+                    # the startup contact-address lookup), so run it
+                    # CONCURRENTLY with the read loop: awaiting it inline would
+                    # block the loop that resolves its own response and the
+                    # request would time out.
+                    hook = asyncio.create_task(self._notify_connected())
                     try:
                         async for raw in ws:
                             await self._consume(raw)
                     finally:
+                        hook.cancel()
                         sender.cancel()
             except Exception as exc:  # reconnect on any transport failure
                 self._event("gateway_error", message=str(exc)[:300])

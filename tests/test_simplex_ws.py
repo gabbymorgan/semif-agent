@@ -404,6 +404,49 @@ def test_on_connected_hook_runs_and_failures_are_swallowed():
     asyncio.run(SimplexDaemon("ws://x")._notify_connected())
 
 
+def test_on_connected_hook_may_roundtrip_while_reading():
+    """The hook runs concurrently with the read loop, not blocking it.
+
+    Regression: `on_connected` was awaited inline before the read loop started,
+    so a hook that issued a correlated command (the gateway's startup contact
+    link) could never receive its own response and always timed out.
+    """
+    daemon = SimplexDaemon("ws://x", user_id=1)
+    seen = []
+
+    async def hook():
+        link = await daemon.address(timeout=2)
+        seen.append(link)
+
+    daemon.on_connected = hook
+    daemon._loop = asyncio.new_event_loop()
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon,
+            [
+                {
+                    "type": "userContactLink",
+                    "contactLink": {
+                        "connLinkContact": {"connShortLink": "simplex:/a", "connFullLink": ""}
+                    },
+                }
+            ],
+        )
+        daemon._ws = ws
+        hook_task = asyncio.create_task(daemon._notify_connected())
+        # The read loop is what resolves the correlated response.
+        for message in list(ws.sent):
+            pass
+        await hook_task
+        return ws
+
+    ws = asyncio.run(scenario())
+    assert seen == [{"short_link": "simplex:/a", "full_link": "", "created": False}]
+    assert [m["cmd"] for m in ws.sent] == ["/_show_address 1"]
+
+
 # ---- chat previews / history (true unread) ----
 
 def chat_item(item_id=10, text="hello", status="rcvNew", direction="directRcv", shape="api"):

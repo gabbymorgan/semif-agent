@@ -11,6 +11,7 @@ integration concern, not a dev-box unit test.
 import asyncio
 import json
 
+from semif_agent.cli import _gateway_address_callback
 from semif_agent.decisions import Request
 from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.gateway.base import InboundMessage
@@ -64,6 +65,55 @@ def test_check_requirements_needs_url():
     ok, hint = SimplexAdapter({"ws_url": ""}).check_requirements()
     assert ok is False
     assert "ws_url" in hint
+
+
+# ---- startup contact-link announcement ----
+
+class _FakeDaemon:
+    def __init__(self, result):
+        self._result = result
+        self.calls = 0
+
+    async def address(self, timeout=20.0):
+        self.calls += 1
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class _FakeAdapter:
+    def __init__(self, daemon):
+        self.daemon = daemon
+
+
+def test_gateway_address_callback_prints_link_once(capsys):
+    daemon = _FakeDaemon(
+        {"short_link": "simplex:/abc", "full_link": "simplex://full"}
+    )
+    announce = _gateway_address_callback(_FakeAdapter(daemon))
+    asyncio.run(announce())
+    asyncio.run(announce())  # a reconnect must not reprint
+    out = capsys.readouterr()
+    assert "simplex:/abc" in out.out
+    assert "simplex://full" in out.out
+    assert daemon.calls == 1
+
+
+def test_gateway_address_callback_failure_is_not_fatal(capsys):
+    daemon = _FakeDaemon(RuntimeError("not connected"))
+    announce = _gateway_address_callback(_FakeAdapter(daemon))
+    asyncio.run(announce())  # must not raise
+    asyncio.run(announce())  # retried on the next connect
+    captured = capsys.readouterr()
+    assert "could not read contact link" in captured.err
+    assert daemon.calls == 2
+
+
+def test_gateway_address_callback_no_link_warns(capsys):
+    daemon = _FakeDaemon({"short_link": "", "full_link": ""})
+    announce = _gateway_address_callback(_FakeAdapter(daemon))
+    asyncio.run(announce())
+    assert "no contact link available" in capsys.readouterr().err
 
 
 # ---- adapter: send command ----

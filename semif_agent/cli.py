@@ -404,6 +404,49 @@ def scripted(scheduler: Scheduler, path: str) -> int:
     return _fatal_exit(scheduler) or 0
 
 
+def _gateway_address_callback(adapter):
+    """Return an `on_connected` coroutine that prints the bot's contact link once.
+
+    A human cannot reach the gateway without the bot's SimpleX contact address,
+    and the only thing that surfaced it before was `scripts/simplex-address.py`
+    run once at provision time. Print it on connect, from the operator front end
+    (the CLI), through the daemon the gateway already owns — show-or-create, no
+    second connection, no new transport surface. The lookup is best-effort: a
+    failure is reported once (to stderr) and retried on the next connect, and it
+    never takes the socket down.
+    """
+    printed = False
+    warned = False
+
+    async def _announce() -> None:
+        nonlocal printed, warned
+        if printed:
+            return
+        try:
+            link = await adapter.daemon.address()
+        except Exception as exc:
+            if not warned:
+                warned = True
+                print(
+                    f"gateway simplex: could not read contact link: {exc}",
+                    file=sys.stderr,
+                )
+            return
+        short = (link or {}).get("short_link") or ""
+        full = (link or {}).get("full_link") or ""
+        if not (short or full):
+            if not warned:
+                warned = True
+                print("gateway simplex: no contact link available", file=sys.stderr)
+            return
+        printed = True
+        print(f"gateway simplex contact link: {short}")
+        if full:
+            print(full)
+
+    return _announce
+
+
 def run_gateway(
     scheduler: Scheduler,
     config: dict,
@@ -420,6 +463,9 @@ def run_gateway(
         from .gateway.simplex import SimplexAdapter
 
         adapter = SimplexAdapter(cfg, trace=scheduler.trace)
+        # Print the bot's own contact link once, on connect, so the operator can
+        # actually reach the gateway (see _gateway_address_callback).
+        adapter.daemon.on_connected = _gateway_address_callback(adapter)
     else:
         print(f"unknown gateway platform {platform!r}")
         return 1

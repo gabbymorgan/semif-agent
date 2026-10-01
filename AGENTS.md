@@ -816,7 +816,11 @@ CLI, unit tests (24) + box integration tests (2).
   `semif-gateway.service` agent process, so the gateway runs across
   logout/reboot. The gateway is its own process — the REPL and the gateway are
   independent front ends onto the same on-disk logs/registry (do not run two
-  scheduler processes over one skill store concurrently).
+  scheduler processes over one skill store concurrently). **On connect the
+  gateway prints the bot's own SimpleX contact link once** (show-or-create via
+  the daemon it already owns, from the CLI, `_gateway_address_callback`) so a
+  human can reach it without running `scripts/simplex-address.py` — the operator
+  front end prints it; the command adapter itself gains no address surface.
 - **Bot address / v7 relay gotcha.** The daemon must NOT run with `--headless`
   or `--relay`: in SimpleX Chat v7 `--headless` means "chat relay" (requires
   `--relay`) and yields a *relay* address, not a user contact address. Run bot
