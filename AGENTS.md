@@ -75,10 +75,11 @@ scheduler.py    no up-front gate: every input is dispatched
                 skill job, and the original request is re-queued and re-runs the
                 new leaf when the body lands; the body worker runs the full
                 pipeline: elicitation ->
-                codegen body -> fidelity gate -> data contract -> test ->
-                auto-run test (3-option SemIf regen ladder on failure); config
-                search auto-populates the skill config from global/category
-                config; elicitation asks implementation questions (all front ends
+                codegen body (declares its own flat `CONTRACT`) -> fidelity
+                gate -> test -> auto-run test (SemIf regen ladder on failure,
+                code/test); config
+                search auto-populates the skill config from the full config
+                cascade; elicitation asks implementation questions (all front ends
                 defer via the question queue, `wait_timeout`); a
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user
@@ -95,25 +96,33 @@ skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 their recorded config read from data/skills/;
                 ActionResult.needs_input pauses a run for human input;
                 Skill.integration / integration_source read the body's
-                INTEGRATION declaration (or infer it);
+                INTEGRATION declaration (or infer it); Skill.contract is read
+                from the body's `CONTRACT` constant (contract.json is a derived
+                mirror);
                 resolve_skill_config / unresolved_variables drive the tiered
-                config merge (global -> category -> skill) + pre-predict
+                config merge (global -> category -> skill) + pre-act
                 contract collection
-skill.py        loop: observe -> predict -> act -> observe -> assess;
+skill.py        loop: observe -> act -> observe -> assess; the body is a single
+                act(ctx, request) phase that returns ActionResult (its own
+                SemIf sub-decisions ride on ActionResult.decisions and are
+                logged with the run outcome, phase `act`);
                 assess is a SemIf decision (`assess:outcome` success/failure at
                 tau; on failure `assess:requeue` complete/retry) and the run
                 summary is deterministic (no generation), built from
-                category.skill + ok/failed + action_log;
+                category.skill + ok/failed + action_log; the assess state carries
+                the resolved inputs (secrets redacted);
                 a run paused for input is resumed by re-invoking act with the
-                answer on request.user_input (predict is never re-run); a
+                answer on request.user_input; a
                 contract variable the runner cannot satisfy pauses BEFORE
-                predict (pre_predict), collects it, and re-runs the full path
+                act (pre_act), collects it, and re-runs the full path
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 bodies against SKILL.md (real actions via stdlib transports,
                 data from the runner via ctx.config, never embedded; bodies
-                declare INTEGRATION service/transport/config_vars);
-                parse/validate (compile + predict/act) + parse_integration /
+                declare INTEGRATION service/transport/config_vars, and declare
+                their own flat `CONTRACT` {var: description});
+                parse/validate (compile + act + CONTRACT keys all read from
+                ctx.config) + parse_contract / parse_integration /
                 infer_integration / integration_findings; the bridge catalog
                 (describe_bridges()) is injected into the body, retry, regen,
                 elicitation, and testgen prompts — it is the single source of
@@ -122,10 +131,10 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 TESTGEN.md carry only the generic pattern; the advisory
                 elicitation integration hint rides on every body/retry/regen
                 prompt; elicitation questions
-                + integration hint; TESTGEN.md drives two shared-context calls
-                producing contract.json then skill.test.py (hermetic mechanics
-                test: inline fixtures, loopback http.server for HTTP bodies, no
-                external network, no mock_data.json); run_skill_test executes
+                + integration hint; TESTGEN.md drives the shared-context test
+                call producing skill.test.py (hermetic mechanics test: inline
+                fixtures, loopback http.server for HTTP bodies, no external
+                network, no mock_data.json); run_skill_test executes
                 the test as a subprocess
 llm.py          small OpenAI-compatible provider (LLMClient) that authors a
                 new category/skill title + description — its own endpoint/model,
@@ -288,9 +297,9 @@ CLI, unit tests (24) + box integration tests (2).
   persisted to `data/categories.json` (under that category's `skills` list) and
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body via the async authoring pipeline: a larger
-  OpenAI-compatible model (`codegen`, default `qwen38-iq3s`) writes
-  `predict`/`act` code against `SKILL.md`, then a contract + test
-  (against `TESTGEN.md`) are generated and the test is auto-run before the leaf
+  OpenAI-compatible model (`codegen`, default `qwen38-iq3s`) writes an `act`-only
+  body plus its own flat `CONTRACT` against `SKILL.md`, then a test
+  (against `TESTGEN.md`) is generated and auto-run before the leaf
   is declared ready — all persisted to a folder in `data/skills/` and
   hot-loaded. Authoring is **asynchronous**: the draft is authored by a
   single-slot `llm` worker, the stub is created and the gate
@@ -347,16 +356,16 @@ CLI, unit tests (24) + box integration tests (2).
 - Dashboard: run-requeue cross-linking (child run references its parent),
   scheduler sim controls (busy/idle/tau) as a first-class panel.
 - **Data-contract tiered data lookup on skill creation** (BRAINSTORM item 1):
-  the contract `contract.json` (single flat object of variable name -> semantic
-  description, for user input + SemIf only) lands after the codegen body. The
-  config step searches a tiered source of truth — global config → category
+  the body declares its own flat `CONTRACT` (variable name -> semantic
+  description, for user input + SemIf only); `contract.json` is a persisted
+  mirror. The config step searches the full cascade — global config → category
   config → skill config — via SemIf `choice` per variable, reusing an existing
   source when one matches (`config:search`, decision-logged) and auto-populating
   the skill `config.json`. Variables with no match are asked of the human AFTER
-  code generation, on first fire, via a pre-predict `needs_input` pause; each
+  code generation, on first fire, via a pre-act `needs_input` pause; each
   answer gets a SemIf `record-as-config vs ask-again-each-fire` choice
   (`config:record`). On successive firings only unresolved variables are asked.
-  **Shipped with item 1 (Sep 2026).**
+  **Shipped with item 1 (Sep 2026); contract now lives in the body (Sep 2026).**
 - **Post-codegen mock-data test** (BRAINSTORM item 1): after the body +
   contract land, a shared-context testgen call produces `skill.test.py` with
   fixture data embedded inline (no separate mock_data.json), and
@@ -617,7 +626,7 @@ CLI, unit tests (24) + box integration tests (2).
   bridge specifics live in the runtime catalog, not SKILL.md — recording a
   catalog revision on the trace is future work.
 - **Trust boundary**: generated skill code is executed locally (it is imported
-  as a module and its `predict`/`act` run in-process; `skill.test.py` runs as a
+  as a module and its `act` runs in-process; `skill.test.py` runs as a
   subprocess in the skill folder). The box is the intended target; treat the
   endpoint as trusted.
 - Flow in `scheduler._dispatch_skill`: the request is queued to the **single-slot
@@ -631,26 +640,31 @@ CLI, unit tests (24) + box integration tests (2).
      `defer_questions` and the worker posts to the question queue and waits
      (`codegen.elicitation.wait_timeout`) for answers.
   2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
-     repair): SKILL.md + request + tree + requirements answers; the body reads
-     every operational value from `ctx.config`, performs the real action, and
-     declares `INTEGRATION`.
+     repair): SKILL.md + request + tree + requirements answers; the body is a
+     single `act(ctx, request)`, reads every operational value from `ctx.config`,
+     performs the real action, and declares `INTEGRATION` and its own flat
+     `CONTRACT` (every contract key must be read from `ctx.config`, enforced by
+     `parse_skill_body`).
   3. **fidelity gate** (`authoring:fidelity` SemIf decision +
      `integration_findings`): a rapid sanity check (accept/reconsider) — is the
      action real or simulated/declared-but-unused? It only triggers a rewrite,
      never a diagnosis. One corrective regen with the raw evidence bundle
      (`codegen.fidelity.max_attempts`), then accept with a trace rather than
      hard-failing authoring.
-  4. **data contract** (`generate_data_contract`): a separate call sharing
-     TESTGEN.md + `skill.py` context derives `contract.json` — a single flat
-     object of snake_case variable name -> semantic description, for user input
-     and SemIf only (no types/validation; that lives in the code + test).
-  5. **test** (`generate_skill_tests`): a second shared-context call
-     (appending the contract) produces `skill.test.py` — hermetic mechanics,
-     loopback fixture injects the endpoint through config, fixtures inline.
+  4. **contract** (`parse_contract`): read from the body's own flat `CONTRACT`
+     constant — a single flat object of snake_case variable name -> semantic
+     description, for user input and SemIf only (no types/validation; that lives
+     in the code + test). No separate generation call; `materialize_skill`
+     rewrites `contract.json` as a mirror.
+  5. **test** (`generate_skill_tests`): a shared-context call (seeded with
+     TESTGEN.md + `skill.py` + the body's `CONTRACT`) produces `skill.test.py` —
+     hermetic mechanics, loopback fixture injects the endpoint through config,
+     fixtures inline.
   6. **auto-run test** (`run_skill_test`): subprocess in the skill folder,
-     `codegen.test_timeout`; on failure a **3-option SemIf decision**
-     (`codegen_regen`, trace-only) picks code/contract/test to regenerate,
-     the error + existing files are fed back, bounded by `codegen.test_max_attempts`.
+     `codegen.test_timeout`; on failure a **2-option SemIf decision**
+     (`codegen_regen`, trace-only) picks code/test to regenerate (the contract
+     rides in the code), the error + existing files are fed back, bounded by
+     `codegen.test_max_attempts`.
   On success the body is materialized (`materialize_skill`), hot-merged, the
   leaf's `writing` flag clears, and the **original request is re-queued** at its
   scored weight and re-runs navigation onto the new leaf (`skill_requeued`). On
@@ -669,14 +683,19 @@ CLI, unit tests (24) + box integration tests (2).
   because qwen38-iq3s's card sampler writes routinely run 25–45 min. Raise
   `codegen.timeout` in config for harder prompts.
 - **Config tiering + first-fire collection.** After the contract lands, a SemIf
-  `choice` per variable auto-populates the skill `config.json` from the global
-  config + the category config (`data/skills/<category>/config.json`)
-  (`codegen.contract_search`, phase `config:search`, decision-logged). At
-  runtime the runner merges global -> category -> skill config (+ per-fire
-  answers) into `ctx.config`; contract variables it cannot satisfy pause the run
-  **before predict** (`pre_predict`), asking the human one at a time. Each
-  answer gets a SemIf `record-as-config vs ask-again-each-fire` choice (phase
-  `config:record`); recorded values persist to the skill `config.json`.
+  `choice` per variable auto-populates the skill `config.json` from the whole
+  cascade — global config → category config (`data/skills/<category>/config.json`)
+  → skill config (`codegen.contract_search`, phase `config:search`,
+  decision-logged). At runtime the runner merges global -> category -> skill
+  config (+ per-fire answers) into `ctx.config`; contract variables it cannot
+  satisfy pause the run **before act** (`pre_act`), asking the human one at a
+  time. Each answer gets a SemIf `record-as-config vs ask-again-each-fire` choice
+  (phase `config:record`); recorded values persist to the skill `config.json`.
+- **Resolved-input observation.** The `assess:outcome` / `assess:requeue` state
+  includes the resolved contract values (`resolved inputs:` block) so the
+  decision sees the full query → resolution → action path; secret-named
+  variables (pass/token/secret/key/credential/auth) are redacted to `***` so
+  credentials never reach the decision log.
 - **Requirements elicitation (implementation questions, default on).**
   `codegen.elicitation.enabled` asks the product owner how the new skill should
   connect (which service/account, how to connect, where the credential comes

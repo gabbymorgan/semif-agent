@@ -76,8 +76,7 @@ def test_reports_existing_link():
     try:
         ctx = ActionContext(engine=None, config=config(url))
         request = Request("give me your simplex link")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "simplex:/contact#abc" in action.action_log, action.action_log
         assert "https://smp/short" in action.action_log, action.action_log
         assert "current" in action.action_log, action.action_log
@@ -95,8 +94,7 @@ def test_reports_freshly_created_link():
     try:
         ctx = ActionContext(engine=None, config=config(url))
         request = Request("create a simplex invitation link")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "simplex:/contact#new" in action.action_log, action.action_log
         assert "created" in action.action_log, action.action_log
         print(action.action_log)
@@ -110,8 +108,7 @@ def test_no_provider_is_reported_honestly():
     try:
         ctx = ActionContext(engine=None, config=config(url))
         request = Request("give me your simplex link")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "503" in action.action_log, action.action_log
         assert action.new_state == request.text, "a failed lookup must not fake a result"
         print(action.action_log)
@@ -125,8 +122,7 @@ def test_empty_link_is_reported_honestly():
     try:
         ctx = ActionContext(engine=None, config=config(url))
         request = Request("give me your simplex link")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "no SimpleX" in action.action_log, action.action_log
         assert action.new_state == request.text
         print(action.action_log)
@@ -138,10 +134,8 @@ def test_empty_link_is_reported_honestly():
 def test_unreachable_bridge_fails_honestly():
     ctx = ActionContext(engine=None, config=config("http://127.0.0.1:1"))
     request = Request("give me your simplex link")
-    prediction = skill.predict(ctx, request)
-    assert prediction.text.startswith("bridge error:"), prediction.text
-    action = skill.act(ctx, request, prediction)
-    assert action.action_log.startswith("bridge error:"), action.action_log
+    action = skill.act(ctx, request)
+    assert action.action_log.startswith("simplex.connect_link:"), action.action_log
     assert action.new_state == request.text
     print(action.action_log)
 
@@ -153,8 +147,7 @@ def test_auth_token_is_sent_when_configured():
     try:
         ctx = ActionContext(engine=None, config=config(url, token="sekret"))
         request = Request("give me your simplex link")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "simplex:/contact#abc" in action.action_log, action.action_log
         assert set(handler.tokens) == {"sekret"}, handler.tokens
         print(action.action_log)

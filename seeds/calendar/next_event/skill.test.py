@@ -154,12 +154,9 @@ def main():
         engine = FakeEngine(pick="work")
         ctx = ActionContext(engine=engine, config=fixture_config(url))
         request = Request("what is the next event on my work calendar?")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "calendar: work", prediction.text
-        assert len(prediction.decisions) == 1, "predict must log the calendar choice"
+        action = skill.act(ctx, request)
+        assert len(action.decisions) == 1, "act must log the calendar choice"
         assert len(engine.decisions) == 1
-
-        action = skill.act(ctx, request, prediction)
         assert "Team sync" in action.action_log, action.action_log
         assert action.new_state, "act must set a new state"
 
@@ -182,10 +179,8 @@ def main():
         engine = FakeEngine()
         ctx = ActionContext(engine=engine, config=fixture_config(url))
         request = Request("what is the next event on my calendar?")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "calendar: personal", prediction.text
+        action = skill.act(ctx, request)
         assert engine.decisions == [], "a single calendar needs no SemIf decision"
-        action = skill.act(ctx, request, prediction)
         assert "Team sync" in action.action_log, action.action_log
         assert handler.requests[1]["path"] == "/remote.php/dav/calendars/testuser/personal/"
         print(action.action_log)
@@ -198,8 +193,7 @@ def main():
         engine = FakeEngine(pick="personal")
         ctx = ActionContext(engine=engine, config=fixture_config(url))
         request = Request("what is the next event on my calendar?")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "failed" in action.action_log, action.action_log
         assert action.new_state == request.text, "a failed query must not fake a result"
         print(action.action_log)

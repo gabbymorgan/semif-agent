@@ -54,7 +54,7 @@ function shortPhase(phase) {
   return phase.replace("navigate:", "nav:");
 }
 
-const ALL_PHASES = ["gate", "choice", "score", "navigate:category", "navigate:leaf", "predict"];
+const ALL_PHASES = ["gate", "choice", "score", "navigate:category", "navigate:leaf", "act"];
 
 function optionProbs(row) {
   return (row.options || []).map((o) => ({

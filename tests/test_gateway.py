@@ -19,7 +19,7 @@ from semif_agent.gateway.simplex import SimplexAdapter
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import Scheduler
-from semif_agent.skills import ActionResult, Prediction, Skill
+from semif_agent.skills import ActionResult, Skill
 from semif_agent.trace import TraceLog
 
 from tests.conftest import ScriptedEngine
@@ -101,10 +101,7 @@ def test_batching_concatenates_rapid_messages():
 # ---- service: routing ----
 
 def need_input_skill(seen):
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
             seen.append(request.user_input)
             return ActionResult(action_log=f"got {request.user_input}", new_state="done")
@@ -116,8 +113,7 @@ def need_input_skill(seen):
         name="track.manual",
         category="tracking",
         description="Resolve a tracking number with the human.",
-        predict=predict,
-        act=act,
+                act=act,
     )
 
 

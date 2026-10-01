@@ -129,23 +129,26 @@ choice is logged** (`navigate:category`, `navigate:leaf`, `navigate:response`).
 Every skill (`semif_agent/skill.py`) follows the same loop:
 
 ```
-observe baseline → predict → act → observe outcome → assess
+observe baseline → act → observe outcome → assess
 ```
 
-- `predict(ctx, request)` forecasts and makes any SemIf **sub-decisions**
-  (e.g. which contact is "girlfriend") using the real engine; they are returned
-  inside `Prediction.decisions` and logged as training rows.
-- `act(ctx, request, prediction)` performs the real action via stdlib transports
-  and returns an `ActionResult(action_log, new_state, needs_input)`.
+- `act(ctx, request)` is the single body phase. It reads resolved values from
+  `ctx.config` and performs the real action via stdlib transports, returning an
+  `ActionResult(action_log, new_state, needs_input, decisions)`. Any SemIf
+  **sub-decisions** it makes (e.g. which contact is "girlfriend", resolved over
+  a live candidate set) are returned on `ActionResult.decisions` and logged as
+  training rows with the run outcome.
 - `assess` is a **SemIf decision**, not generation:
-  - `assess:outcome` — success/failure at `tau`.
+  - `assess:outcome` — success/failure at `tau`; its state includes the resolved
+    inputs (secrets redacted) so a wrong resolution is visible.
   - `assess:requeue` — on failure, `complete` vs `retry` (bounded by
     `max_reentries`).
 - The run summary is **deterministic** (same inputs ⇒ same string):
   `f"{category}.{name}: {'ok'|'failed'} — {action_log or new_state}"`.
-- A skill can pause for human input two ways: `act` returns `needs_input`
-  (predict is not re-run on resume), or — for a contract variable the runner
-  cannot satisfy — a **pre-predict** pause collects config before predict runs.
+- A skill can pause for human input two ways: `act` returns `needs_input` (act
+  re-runs on resume, with `request.user_input` set), or — for a contract
+  variable the runner cannot satisfy — a **pre-act** pause collects config
+  before act runs.
 
 ### Authoring a new skill
 
@@ -163,22 +166,24 @@ worker. It is **asynchronous**, so the gate stays free while either model thinks
    gateway) defers to a question queue and the worker waits
    (`codegen.elicitation.wait_timeout`).
 3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
-   (`codegen`, default `qwen38-iq3s`) writes `predict`/`act` against `SKILL.md`,
+   (`codegen`, default `qwen38-iq3s`) writes a single `act` against `SKILL.md`,
    reading every operational value from `ctx.config` and declaring `INTEGRATION`
-   (service / transport / config_vars).
+   (service / transport / config_vars) plus its own flat `CONTRACT`
+   (variable → description; every key must be read from `ctx.config`).
 4. **Fidelity gate** (`authoring:fidelity` SemIf accept/reconsider decision +
    static `integration_findings`): is the action real, or simulated? One
    corrective regen with the raw evidence bundle, then accept-with-badge
    (`unverified`) rather than hard-fail.
-5. **Data contract** (`generate_data_contract`): a separate call sharing
-   `TESTGEN.md` + `skill.py` derives `contract.json` — a flat map of snake_case
-   variable name → semantic description, for user input and SemIf only.
-6. **Test** (`generate_skill_tests`): a second shared-context call produces
+5. **Contract** (`parse_contract`): read from the body's own `CONTRACT`
+   constant — a flat map of snake_case variable name → semantic description, for
+   user input and SemIf only; `contract.json` is a persisted mirror.
+6. **Test** (`generate_skill_tests`): a shared-context call produces
    `skill.test.py`, a hermetic mechanics test (inline fixtures, a loopback
    `http.server` for HTTP bodies, no external network).
 7. **Auto-run** (`run_skill_test`): executes the test as a subprocess. On
-   failure a 3-option SemIf decision (`codegen_regen`) picks code/contract/test
-   to regenerate, bounded by `codegen.test_max_attempts`.
+   failure a 2-option SemIf decision (`codegen_regen`) picks code/test to
+   regenerate (the contract rides in the code), bounded by
+   `codegen.test_max_attempts`.
 
 On success the body materializes to `data/skills/<category>/<name>/`, is
 hot-merged, and **the original request is re-queued** at its scored weight and
@@ -260,8 +265,9 @@ global config → category config → skill config → per-fire answers  =  ctx.
 ```
 
 - After the contract lands, a SemIf `choice` per variable auto-populates the
-  skill config from the global + category config (`config:search`).
-- Variables still unresolved pause the run **before predict** and are asked of
+  skill config from the whole cascade (global → category → skill config)
+  (`config:search`).
+- Variables still unresolved pause the run **before act** and are asked of
   the human one at a time.
 - Each answer gets a SemIf `record-as-config vs ask-again-each-fire` choice
   (`config:record`); recorded values persist to the skill `config.json`.
@@ -342,12 +348,12 @@ semif_agent/
   scheduler.py      no up-front gate; choice -> score -> queue -> dispatch;
                     preempt + requeue; needs_input pauses; async single-slot
                     skill authoring worker; fidelity gate; repair loop
-  skill.py          observe -> predict -> act -> observe -> assess; deterministic
-                    summary; pre-predict contract collection
+  skill.py          observe -> act -> observe -> assess; deterministic
+                    summary; pre-act contract collection; resolved-input state
   skills.py         tree + registry, canned `response` tree, navigation,
                     create gates, intent guard, tiered config resolution
-  codegen.py        OpenAI-compatible client; body/elicitation/contract/test
-                    generation; parse/validate; INTEGRATION extraction; test runner
+  codegen.py        OpenAI-compatible client; body/elicitation/test generation;
+                    parse/validate; CONTRACT + INTEGRATION extraction; test runner
   provider.py       shared OpenAI-compatible transport (SSE/budget/idle/watchdog)
   engine.py         SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
   llm.py            small OpenAI-compatible provider; authors new title + description
@@ -599,8 +605,9 @@ navigation. It is three things:
 
 1. a **manifest** (navigable description — `name`, `category`, `description`,
    plus optional `allowed_inputs`, `actions`, `cost_budget`, `decision_log_ref`);
-2. a **code body** (`predict` / `act`);
-3. an **`INTEGRATION` declaration** (service / transport / config_vars).
+2. a **code body** (a single `act`);
+3. an **`INTEGRATION` declaration** (service / transport / config_vars) and a
+   flat **`CONTRACT`** (the operational values the runner must provide).
 
 `SKILL.md` is the authoritative body contract and is fed verbatim to the codegen
 model. It requires: perform the real action; stdlib transports only

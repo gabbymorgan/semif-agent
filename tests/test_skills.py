@@ -35,7 +35,6 @@ from semif_agent.skills import (
     CategoryRegistry,
     CreateCategory,
     CreateSkill,
-    Prediction,
     Skill,
     SkillDraft,
     SkillStore,
@@ -61,8 +60,7 @@ from tests.conftest import ScriptedEngine
 
 
 GOOD_BODY = """\
-from semif_agent.decisions import DecisionRequest, Option
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "probe_service",
@@ -70,10 +68,9 @@ INTEGRATION = {
     "config_vars": [],
 }
 
-def predict(ctx, request):
-    return Prediction(text="ok", decisions=[])
+CONTRACT = {}
 
-def act(ctx, request, prediction):
+def act(ctx, request):
     return ActionResult(action_log="probe ran", new_state=request.text)
 """
 
@@ -158,10 +155,7 @@ def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
     """
     scheduler = _scheduler(tmp_path)
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         return ActionResult(
             action_log="Next event on 'personal': Team sync — 2026-09-27 10:00 CEST",
             new_state="next event reported",
@@ -171,8 +165,7 @@ def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
         name="next_event",
         category="calendar",
         description="Report the next event.",
-        predict=predict,
-        act=act,
+                act=act,
     )
 
     result = scheduler._run_skill(skill, Request("what is my next event?"))
@@ -194,14 +187,11 @@ def test_run_summary_failure_uses_new_state_when_no_action_log(tmp_path):
                            "complete, or should it run again": "complete"}
     )
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         return ActionResult(action_log="", new_state="service unreachable")
 
     skill = Skill(name="probe", category="tracking", description="Probe.",
-                  predict=predict, act=act)
+                  act=act)
     scheduler._run_skill(skill, Request("probe it"))
     assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
     assert assessed[-1]["success"] is False
@@ -804,10 +794,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
 def test_dispatch_intent_match_runs_skill(tmp_path):
     scheduler = _scheduler(tmp_path, choices={"same action": "same"})
 
-    def predict(ctx, request):
-        return Prediction(text="")
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         return ActionResult(action_log="read the next message", new_state="read")
 
     scheduler.tree.pop("response", None)
@@ -816,8 +803,7 @@ def test_dispatch_intent_match_runs_skill(tmp_path):
             name="next_message",
             category="simplex",
             description="Read the next SimpleX message.",
-            predict=predict,
-            act=act,
+                        act=act,
         ),
     ]
     request = Request("read the next simplex message")
@@ -868,13 +854,10 @@ def test_skill_status_reflects_writing_and_noop():
     assert stub.status == "writing"
     stub.writing = False
 
-    def predict(ctx, request):
+    def act(ctx, request):
         return None
 
-    def act(ctx, request, prediction):
-        return None
-
-    ready = Skill(name="probe", category="tracking", description="Probe.", predict=predict, act=act)
+    ready = Skill(name="probe", category="tracking", description="Probe.", act=act)
     assert not ready.is_noop()
     assert ready.status == "ready"
 
@@ -925,10 +908,10 @@ def test_run_skill_guards_stub_and_writing_leaves(tmp_path):
 
 def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
     """The full async pipeline: _start_skill_write flags the leaf in-progress
-    and the single-slot worker runs codegen -> contract -> testgen -> test, then
-    materializes the body, hot-merges it into the tree, and re-queues the
+    and the single-slot worker runs codegen (body + CONTRACT) -> testgen -> test,
+    then materializes the body, hot-merges it into the tree, and re-queues the
     original request for re-dispatch."""
-    httpd, base = _pipeline_codegen_server([GOOD_BODY, "{}", GOOD_TEST])
+    httpd, base = _pipeline_codegen_server([GOOD_BODY, GOOD_TEST])
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
         scheduler.tree["tracking"] = [
@@ -956,7 +939,7 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
         upgraded = scheduler.tree["tracking"][0]
         assert upgraded is not leaf
         assert not upgraded.is_noop()
-        assert callable(upgraded.predict) and callable(upgraded.act)
+        assert callable(upgraded.act)
 
         # The worker drains the queue when idle (run_queue), so an empty queue
         # is a valid end state; the requeue trace proves the push happened.
@@ -977,9 +960,9 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
 
 
 def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
-    """A contract reply that never parses (after the escalation ladder) leaves
-    the leaf a restartable stub — no silent no-op, no wedged worker."""
-    httpd, base = _pipeline_codegen_server([GOOD_BODY, "this is not a contract"])
+    """A body without a valid CONTRACT (after the escalation ladder) leaves the
+    leaf a restartable stub — no silent no-op, no wedged worker."""
+    httpd, base = _pipeline_codegen_server(["def act(ctx, request):\n    return None\n"])
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2))
         scheduler.tree["tracking"] = [
@@ -1008,10 +991,10 @@ def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
         httpd.server_close()
 
 
-def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
-    """A contract variable the runner cannot satisfy pauses BEFORE predict;
-    the answer is recorded (engine unavailable -> ask-again, per-fire), then the
-    run continues. A second pause comes from the skill's own needs_input."""
+def test_skill_pre_act_contract_pause_and_resume(tmp_path):
+    """A contract variable the runner cannot satisfy pauses BEFORE act; the
+    answer is recorded (engine unavailable -> ask-again, per-fire), then the run
+    continues. A second pause comes from the skill's own needs_input."""
     scheduler = _scheduler(tmp_path, choices={"ask again each time": "ask_again"})
     scheduler.tree["tracking"] = []
     store = scheduler.body_store
@@ -1019,10 +1002,7 @@ def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
 
     seen = []
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
             return ActionResult(action_log="done", new_state="done")
         return ActionResult(
@@ -1033,7 +1013,6 @@ def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
         name="track_live",
         category="tracking",
         description="Follow a package.",
-        predict=predict,
         act=act,
         contract={"token": "The tracking token."},
     )
@@ -1042,13 +1021,12 @@ def test_skill_pre_predict_contract_pause_and_resume(tmp_path):
     assert result.kind == "needs_input"
     assert "`token`" in result.summary
     assert scheduler.pending is not None
-    assert scheduler.pending.pre_predict is True
-    assert scheduler.pending.prediction is None
+    assert scheduler.pending.pre_act is True
 
     status, detail = scheduler.answer("AB123")
     assert status == "needs_input"
     assert scheduler.pending is not None
-    assert scheduler.pending.pre_predict is False
+    assert scheduler.pending.pre_act is False
     assert scheduler.pending.request.meta["config_answers"]["token"] == "AB123"
     assert "Confirm?" in scheduler.pending.question
 
@@ -1084,7 +1062,7 @@ def test_deferred_elicitation_asks_and_records(tmp_path):
     posted to the question queue, the worker waits, and the answers ride the
     draft into the body prompt."""
     httpd, base = _pipeline_codegen_server(
-        ['{"questions": ["Draft or send?"]}', GOOD_BODY, "{}", GOOD_TEST]
+        ['{"questions": ["Draft or send?"]}']
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
@@ -1119,7 +1097,7 @@ def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
     default when no factory), regenerating the test until it passes."""
     failing_test = "import sys\nsys.exit(1)"
     httpd, base = _pipeline_codegen_server(
-        [GOOD_BODY, "{}", failing_test, GOOD_TEST]
+        [GOOD_BODY, failing_test, GOOD_TEST]
     )
     try:
         scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
@@ -1349,8 +1327,7 @@ def test_exhausted_reentry_offers_repair(tmp_path):
     scheduler = _scheduler(tmp_path)
     _install_tracking_stub(scheduler)
     skill = scheduler.tree["tracking"][0]
-    skill.predict = lambda ctx, request: Prediction(text="")
-    skill.act = lambda ctx, request, prediction: ActionResult(
+    skill.act = lambda ctx, request: ActionResult(
         action_log="connection refused", new_state="unchanged"
     )
     request = Request("track my package")

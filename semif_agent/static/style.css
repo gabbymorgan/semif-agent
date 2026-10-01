@@ -186,7 +186,7 @@ select {
 .pill.choice { background: #4a3a2b; color: #ffd59e; }
 .pill.score { background: #3a2b4a; color: #d59eff; }
 .pill.navigate { background: #2b4a3a; color: #9effd5; }
-.pill.predict { background: #2b464a; color: #9eeaff; }
+.pill.act { background: #2b464a; color: #9eeaff; }
 .pill.assess { background: #4a2b2b; color: #ff9e9e; }
 
 .human-star { color: var(--human); }

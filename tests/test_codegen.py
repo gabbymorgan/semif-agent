@@ -25,13 +25,12 @@ from semif_agent.codegen import (
     build_skill_body_prompt,
     build_testgen_base_prompt,
     extract_integration,
-    generate_data_contract,
     generate_requirements,
     generate_skill_body,
     generate_skill_tests,
     infer_integration,
     integration_findings,
-    parse_data_contract,
+    parse_contract,
     parse_elicitation,
     parse_elicitation_result,
     parse_integration,
@@ -58,20 +57,23 @@ from semif_agent.skills import (
 )
 
 GOOD_BODY = """\
-from semif_agent.decisions import DecisionRequest, Option
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "probe_service",
     "transport": "compute",
-    "config_vars": [],
+    "config_vars": ["sender_address", "tracking_id"],
 }
 
-def predict(ctx, request):
-    return Prediction(text="ok", decisions=[])
+CONTRACT = {
+    "sender_address": "The email address the message is sent from.",
+    "tracking_id": "The package tracking number.",
+}
 
-def act(ctx, request, prediction):
-    return ActionResult(action_log="probe ran", new_state=request.text)
+def act(ctx, request):
+    sender = ctx.config["sender_address"]
+    tracking = ctx.config.get("tracking_id", "")
+    return ActionResult(action_log=f"probe ran for {sender} {tracking}", new_state=request.text)
 """
 
 GOOD_CONTRACT = {
@@ -88,7 +90,7 @@ sys.exit(0)
 
 def test_read_skill_contract_loads_contract():
     text = read_skill_contract()
-    assert "predict" in text and "act" in text
+    assert "act" in text and "CONTRACT" in text
     assert "data/skills" in text
 
 
@@ -233,7 +235,7 @@ def test_retry_prompt_directs_runner_provided_data():
 )
 def test_parse_skill_body_accepts_forms(raw):
     code = parse_skill_body(raw)
-    assert "def predict" in code and "def act" in code
+    assert "def act" in code and "CONTRACT" in code
 
 
 def test_parse_skill_body_rejects_empty():
@@ -243,17 +245,26 @@ def test_parse_skill_body_rejects_empty():
 
 def test_parse_skill_body_rejects_invalid_python():
     with pytest.raises(ValueError):
-        parse_skill_body("def predict(:\n  pass")
-
-
-def test_parse_skill_body_rejects_missing_functions():
-    with pytest.raises(ValueError):
-        parse_skill_body("def predict(ctx, request):\n    return None")
+        parse_skill_body("def act(:\n  pass")
 
 
 def test_parse_skill_body_rejects_missing_act():
     with pytest.raises(ValueError):
-        parse_skill_body("def predict(ctx, request):\n    return None\nx = 1")
+        parse_skill_body("CONTRACT = {}\nx = 1")
+
+
+def test_parse_skill_body_rejects_missing_contract():
+    with pytest.raises(ValueError):
+        parse_skill_body("def act(ctx, request):\n    return None")
+
+
+def test_parse_skill_body_rejects_dead_contract_key():
+    body = (
+        "CONTRACT = {'sender_address': 'The sender.'}\n"
+        "def act(ctx, request):\n    return None\n"
+    )
+    with pytest.raises(ValueError):
+        parse_skill_body(body)
 
 
 def test_body_store_roundtrip(tmp_path):
@@ -263,7 +274,7 @@ def test_body_store_roundtrip(tmp_path):
     assert store.list_skills() == [("tracking", "probe")]
     target = store.dir("tracking", "probe") / "skill.py"
     assert target.is_file()
-    assert "def predict" in target.read_text()
+    assert "def act" in target.read_text()
 
 
 def test_store_roundtrip_all_deliverables(tmp_path):
@@ -293,11 +304,11 @@ def test_store_ignores_legacy_single_file_layout(tmp_path):
     assert store.list_skills() == []
 
 
-def test_load_skill_module_exposes_predict_act(tmp_path):
+def test_load_skill_module_exposes_act(tmp_path):
     store = SkillStore(str(tmp_path / "skills"))
     store.write_body("tracking", "probe", GOOD_BODY)
     module = load_skill_module("tracking", "probe", store.path)
-    assert callable(module.predict) and callable(module.act)
+    assert callable(module.act)
 
 
 def test_materialize_skill_builds_runnable_skill(tmp_path):
@@ -308,7 +319,7 @@ def test_materialize_skill_builds_runnable_skill(tmp_path):
     skill = materialize_skill(draft, "tracking", store)
     assert skill.name == "probe"
     assert skill.category == "tracking"
-    assert callable(skill.predict) and callable(skill.act)
+    assert callable(skill.act)
     assert skill.contract == GOOD_CONTRACT
     assert skill.config == {"sender_address": "agent@example.com"}
 
@@ -322,7 +333,11 @@ def test_materialize_skill_requires_code(tmp_path):
 
 def test_materialize_skill_rejects_import_failure(tmp_path):
     store = SkillStore(str(tmp_path / "skills"))
-    bad = "def predict(ctx, request):\n    return None\n"
+    bad = (
+        "import definitely_not_a_real_module_xyz\n"
+        "CONTRACT = {}\n"
+        "def act(ctx, request):\n    return None\n"
+    )
     draft = SkillDraft(name="probe", description="Probe.", code=bad)
     with pytest.raises(ValueError):
         materialize_skill(draft, "tracking", store)
@@ -339,7 +354,7 @@ def test_merge_skill_store_upgrades_stub(tmp_path):
     upgraded = merge_skill_store(tree, store, registry)
     assert upgraded == 1
     skill = next(s for s in tree["tracking"] if s.name == "probe")
-    assert callable(skill.predict) and callable(skill.act)
+    assert callable(skill.act)
     assert skill.description == "Probe."
     assert skill.contract == GOOD_CONTRACT
     assert skill.config == {"sender_address": "agent@example.com"}
@@ -411,7 +426,7 @@ def test_generate_skill_body_end_to_end(tmp_path):
         tree = build_tree(build_skills({"skills": {}}))
         draft = SkillDraft(name="probe", description="Probe the service.")
         code = generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
-        assert "def predict" in code and "def act" in code
+        assert "def act" in code and "CONTRACT" in code
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1278,7 +1293,7 @@ def test_generate_skill_body_escalates_sampler_on_retry(tmp_path):
         code = generate_skill_body(
             client, Request("is the service up?"), "tracking", draft, tree
         )
-        assert "def predict" in code and "def act" in code
+        assert "def act" in code and "CONTRACT" in code
         reqs = httpd.RequestHandlerClass.received
         assert len(reqs) == 2, "one retry after the rejected first attempt"
         first, second = reqs
@@ -1499,78 +1514,25 @@ def test_generate_requirements_degrades_on_parse_failure():
 
 # ---- data contract ----
 
-def test_parse_data_contract_flat_object():
-    contract = parse_data_contract(json.dumps(GOOD_CONTRACT))
+def test_parse_contract_reads_the_module_constant():
+    contract = parse_contract(GOOD_BODY)
     assert contract == GOOD_CONTRACT
-    contract = parse_data_contract("Here:\n" + json.dumps(GOOD_CONTRACT))
-    assert contract == GOOD_CONTRACT
-    assert parse_data_contract("{}") == {}
+    assert parse_contract("CONTRACT = {}\ndef act(ctx, request):\n    return None\n") == {}
 
 
 @pytest.mark.parametrize(
-    "raw",
+    "code",
     [
-        '"just a string"',
-        '{"sender": {"type": "string"}}',
-        '{"sender": ""}',
-        '{"Sender Address": "the sender"}',
-        "not json at all",
+        "def act(ctx, request):\n    return None\n",  # missing CONTRACT
+        'CONTRACT = "not a dict"\ndef act(ctx, request):\n    return None\n',
+        "CONTRACT = {'Sender Address': 'the sender'}\ndef act(ctx, request):\n    return None\n",
+        "CONTRACT = {'sender': {'type': 'string'}}\ndef act(ctx, request):\n    return None\n",
+        "CONTRACT = {'sender': ''}\ndef act(ctx, request):\n    return None\n",
     ],
 )
-def test_parse_data_contract_rejects_bad_shape(raw):
+def test_parse_contract_rejects_bad_shape(code):
     with pytest.raises(ValueError):
-        parse_data_contract(raw)
-
-
-def test_generate_data_contract_end_to_end(tmp_path):
-    httpd, base = _sequenced_server([json.dumps(GOOD_CONTRACT)])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10)
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        contract = generate_data_contract(
-            client, Request("is the service up?"), "tracking", draft, GOOD_BODY
-        )
-        assert contract == GOOD_CONTRACT
-        sent = httpd.RequestHandlerClass.received[0]
-        joined = " ".join(m["content"] for m in sent["messages"])
-        assert read_testgen_contract() in sent["messages"][0]["content"]
-        assert "data contract" in joined
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_generate_data_contract_escalates_on_bad_parse():
-    httpd, base = _sequenced_server(["not json", json.dumps(GOOD_CONTRACT)])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10)
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        contract = generate_data_contract(
-            client, Request("is the service up?"), "tracking", draft, GOOD_BODY
-        )
-        assert contract == GOOD_CONTRACT
-        reqs = httpd.RequestHandlerClass.received
-        assert len(reqs) == 2
-        assert reqs[1]["temperature"] == 0.5  # escalated sampler
-        assert reqs[1]["presence_penalty"] == 2.0
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_generate_data_contract_exhausts_attempts(tmp_path):
-    httpd, base = _sequenced_server(["not json"])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2)
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        with pytest.raises(ValueError, match="rejected 2 times"):
-            generate_data_contract(
-                client, Request("is the service up?"), "tracking", draft, GOOD_BODY
-            )
-        assert httpd.RequestHandlerClass.chat_calls == 2
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
+        parse_contract(code)
 
 
 # ---- test artifacts ----
@@ -1650,7 +1612,7 @@ def test_regenerate_skill_body_rewrites_from_raw_evidence(tmp_path):
             client, Request("is the service up?"), "tracking", draft, GOOD_BODY,
             {"test_output": "test failed with an error", "previous_body": GOOD_BODY},
         )
-        assert "def predict" in code and "def act" in code
+        assert "def act" in code and "CONTRACT" in code
         sent = httpd.RequestHandlerClass.received[0]
         joined = " ".join(m["content"] for m in sent["messages"])
         assert "test failed with an error" in joined
@@ -1833,13 +1795,13 @@ def test_parse_integration_valid_declaration():
     assert parse_integration(GOOD_BODY) == {
         "service": "probe_service",
         "transport": "compute",
-        "config_vars": [],
+        "config_vars": ["sender_address", "tracking_id"],
     }
 
 
 def test_parse_integration_rejects_bad_shapes():
     cases = [
-        "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n",
+        "def act(ctx, request):\n    return None\n",
         'INTEGRATION = ["http"]\n',
         'INTEGRATION = {"service": "Bad Service", "transport": "http", "config_vars": []}\n',
         'INTEGRATION = {"service": "ok", "transport": "carrier_pigeon", "config_vars": []}\n',
@@ -1854,13 +1816,12 @@ def test_parse_integration_rejects_bad_shapes():
 def test_infer_integration_detects_transports():
     http_body = (
         "import urllib.request\n"
-        "def predict(ctx, request):\n    return None\n"
-        "def act(ctx, request, prediction):\n"
+        "def act(ctx, request):\n"
         "    return urllib.request.urlopen(ctx.config['service_url'])\n"
     )
     assert infer_integration(http_body)["transport"] == "http"
     assert "service_url" in infer_integration(http_body)["config_vars"]
-    plain = "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n"
+    plain = "def act(ctx, request):\n    return None\n"
     assert infer_integration(plain)["transport"] == "compute"
     assert infer_integration("not python at all !!!")["transport"] == "compute"
 
@@ -1868,7 +1829,7 @@ def test_infer_integration_detects_transports():
 def test_extract_integration_source_declared_or_inferred():
     integration, source = extract_integration(GOOD_BODY)
     assert source == "declared"
-    plain = "def predict(ctx, request):\n    return None\n\ndef act(ctx, request, p):\n    return None\n"
+    plain = "def act(ctx, request):\n    return None\n"
     integration, source = extract_integration(plain)
     assert source == "inferred"
     assert integration["service"] == "unknown"
@@ -1882,8 +1843,7 @@ def test_integration_findings_flag_mismatches():
     }
     code = (
         "INTEGRATION = {'service': 'mail', 'transport': 'smtp', 'config_vars': ['smtp_host']}\n"
-        "def predict(ctx, request):\n    return None\n"
-        "def act(ctx, request, p):\n    return None\n"
+        "def act(ctx, request):\n    return None\n"
     )
     findings = integration_findings(declared, "declared", code)
     assert any("no smtp calls" in finding for finding in findings)

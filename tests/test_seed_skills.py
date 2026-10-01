@@ -13,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from semif_agent.codegen import integration_findings, parse_integration, run_skill_test
+from semif_agent.codegen import (
+    integration_findings,
+    parse_contract,
+    parse_integration,
+    run_skill_test,
+)
 
 SEEDS = Path(__file__).resolve().parent.parent / "seeds"
 SEED_DIRS = sorted(path.parent for path in SEEDS.glob("*/*/skill.py"))
@@ -42,13 +47,15 @@ def test_seed_declares_a_real_integration(seed):
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])
 def test_seed_contract_is_flat_and_covered_by_declaration(seed):
     code = (seed / "skill.py").read_text()
-    contract = json.loads((seed / "contract.json").read_text())
-    assert contract, "the seed must carry a data contract"
+    contract = parse_contract(code)
+    assert contract, "the seed must declare a CONTRACT constant"
     for name, description in contract.items():
         assert name.islower() and " " not in name, name
         assert isinstance(description, str) and description.strip()
     integration = parse_integration(code)
     assert set(integration["config_vars"]) == set(contract)
+    mirror = json.loads((seed / "contract.json").read_text())
+    assert mirror == contract, "contract.json must mirror the CONTRACT constant"
 
 
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])

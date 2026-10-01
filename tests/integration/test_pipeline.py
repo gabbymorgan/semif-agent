@@ -15,9 +15,9 @@ import pytest
 from semif_agent.cli import build_scheduler, load_config
 from semif_agent.codegen import (
     CodegenClient,
-    generate_data_contract,
     generate_skill_body,
     generate_skill_tests,
+    parse_contract,
     parse_integration,
 )
 from semif_agent.decisions import Request
@@ -28,7 +28,6 @@ from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
     CreateSkill,
-    Prediction,
     Skill,
     SkillDraft,
     SkillStore,
@@ -82,10 +81,7 @@ def _install_tracking_fixture(scheduler):
     `llm`/`codegen` providers, and the decision log all remain real.
     """
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         return ActionResult(
             action_log="tracking fixture: checked the package status",
             new_state="package status checked",
@@ -96,7 +92,6 @@ def _install_tracking_fixture(scheduler):
             name="tracking.check",
             category="tracking",
             description="Check the delivery status of a package.",
-            predict=predict,
             act=act,
         )
     ]
@@ -331,9 +326,7 @@ def test_generate_skill_body_codegen(tmp_path):
     assert "127.0.0.1" not in code and "localhost" not in code, (
         "the body must take its endpoint from ctx.config, never a fixture"
     )
-    contract = generate_data_contract(
-        client, request, "tracking", draft, code
-    )
+    contract = parse_contract(code)
     print(f"data contract: {contract}")
     test = generate_skill_tests(
         client,
@@ -357,7 +350,7 @@ def test_generate_skill_body_codegen(tmp_path):
 
     draft.code = code
     skill = materialize_skill(draft, "tracking", store)
-    assert callable(skill.predict) and callable(skill.act)
+    assert callable(skill.act)
     assert skill.contract == contract
     assert skill.integration["transport"] in ("http", "caldav")
 
@@ -389,10 +382,11 @@ def test_fidelity_gate_is_a_real_semif_decision(tmp_path):
         weight=0.5,
     )
     undeclared = '''\
-def predict(ctx, request):
-    return Prediction(text="ok", decisions=[])
+from semif_agent.skills import ActionResult
 
-def act(ctx, request, prediction):
+CONTRACT = {}
+
+def act(ctx, request):
     return ActionResult(action_log="delivered", new_state="delivered")
 '''
     gated = scheduler._fidelity_gate(job, undeclared)
@@ -406,13 +400,13 @@ def act(ctx, request, prediction):
 
     declared = '''
 INTEGRATION = {"service": "carrier", "transport": "http", "config_vars": ["tracking_url"]}
+CONTRACT = {"tracking_url": "Carrier status endpoint."}
 import json
 import urllib.request
 
-def predict(ctx, request):
-    return Prediction(text="ok", decisions=[])
+from semif_agent.skills import ActionResult
 
-def act(ctx, request, prediction):
+def act(ctx, request):
     with urllib.request.urlopen(ctx.config["tracking_url"], timeout=15) as response:
         payload = json.loads(response.read().decode("utf-8"))
     return ActionResult(
@@ -545,10 +539,7 @@ def test_skill_pauses_for_input_and_resumes(tmp_path):
 
     seen = []
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
             seen.append(request.user_input)
             return ActionResult(
@@ -565,7 +556,6 @@ def test_skill_pauses_for_input_and_resumes(tmp_path):
         name="track.manual",
         category="tracking",
         description="Resolve a tracking number with the human.",
-        predict=predict,
         act=act,
     )
 

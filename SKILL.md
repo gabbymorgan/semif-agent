@@ -16,17 +16,17 @@ thing that does it.
 
 A skill is a **leaf** in the agent's skill tree, reached by a chain of SemIf
 decisions (category -> skill). It is one specific, single-purpose action the
-agent can take — never a broad bucket (that is a category's job). It runs the
-standard skill loop: observe -> predict -> act -> observe -> assess.
+agent can take — never a broad bucket (that is a category's job).
 
 A skill is three things:
 
 1. **A manifest** — the registry entry that makes it navigable and describes
    what it does.
-2. **A code body** — a runnable Python module implementing the `predict` and
-   `act` phases against a real service.
-3. **An integration declaration** — the `INTEGRATION` module constant saying
-   which real system the body talks to and how.
+2. **A code body** — a runnable Python module implementing a single `act`
+   phase against a real service.
+3. **A declaration** — the `INTEGRATION` constant (which real system the body
+   talks to and how) and the `CONTRACT` constant (the values the runner must
+   provide).
 
 ## Manifest schema
 
@@ -50,26 +50,49 @@ skill is exercised.
 The generated module is persisted to `data/skills/<category>/<name>/skill.py`
 and imported at runtime. It must satisfy **all** of the following:
 
-### Required functions
+### Required function
 
 ```python
-def predict(ctx, request) -> Prediction:
-    """Forecast + make any SemIf sub-decisions. Return the prediction."""
-
-def act(ctx, request, prediction) -> ActionResult:
-    """Execute the action for real. Return the result + new state."""
+def act(ctx, request) -> ActionResult:
+    """Perform the real action and return the result + new state."""
 ```
 
 - `ctx` is an `ActionContext` with `ctx.engine` (the real SemIf engine) and
-  `ctx.config` (the merged agent config, including this skill's own config).
+  `ctx.config` (the resolved values for this skill, including its own config).
 - `request` is the `Request` being handled.
-- `Prediction(text: str, decisions: list)` and
-  `ActionResult(action_log: str, new_state: str, needs_input: str | None = None)`
-  are imported from
-  `semif_agent.skills`; return those exact types. `decisions` carries any
-  `(DecisionRequest, DecisionResult)` pairs made during predict so they are
-  logged as training rows. `needs_input` carries a question for the human; see
-  the rules below.
+- `ActionResult(action_log: str, new_state: str, needs_input: str | None = None,
+  decisions: list = [])` is imported from `semif_agent.skills`; return that exact
+  type. `decisions` carries any `(DecisionRequest, DecisionResult)` pairs made
+  during `act` so they are logged as training rows. `needs_input` carries a
+  question for the human; see the rules below.
+
+There is no `predict` phase. Resolution and the action happen in `act`.
+
+### Data contract
+
+Every **required** operational value the body needs is declared in a
+module-level `CONTRACT` dict: a flat map of snake_case variable name to a
+plain-language, semantic description of the expected value.
+
+```python
+CONTRACT = {
+    "nextcloud_url": "Base URL of the user's Nextcloud, e.g. https://cloud.example.org.",
+    "nextcloud_username": "Nextcloud login name whose calendar is read.",
+    "nextcloud_app_password": "Nextcloud app password for that login.",
+}
+```
+
+- The runner resolves each contract variable from the agent's tiered config
+  (global -> category -> skill) and asks the human for any it cannot resolve.
+  The resolved values arrive in `ctx.config` under the same names.
+- Every key in `CONTRACT` must be read from `ctx.config` in the body. Do not
+  declare a variable you do not read.
+- **Optional** values with a safe default are NOT contract keys: read them with
+  `ctx.config.get("<name>", <default>)`. Declaring an optional value would make
+  the runner ask the human for it.
+- Do not put type declarations, validation logic, or nested structures in
+  `CONTRACT`; the body implements whatever type safety it needs. It is for the
+  human and SemIf only.
 
 ### Integration declaration
 
@@ -92,12 +115,36 @@ INTEGRATION = {
   (`http|caldav|imap|smtp|pop|subprocess|file|compute`). `compute` is only for
   skills that perform no external action at all (pure analysis/formatting); an
   action skill must not use it.
-- `config_vars` — the `ctx.config` keys the body reads for this integration
-  (the same names the data contract collects). Empty list allowed for `compute`.
+- `config_vars` — the `ctx.config` keys the body reads for this integration.
+  Empty list allowed for `compute`.
 
 The auto-run test is a hermetic mechanics check and never exercises the live
 service, so this declaration is how the agent knows what the skill was built to
 talk to. Declaring a transport the body does not use is a broken skill.
+
+### Candidate selection
+
+When the body has a **set of candidates to choose from** — contacts,
+conversations, calendars, folders, targets — it must employ a relevant SemIf
+query over them:
+
+```python
+decision = DecisionRequest(
+    state=request.text,
+    question="Which calendar is the intended one?",
+    options=[Option(c["name"], c["label"]) for c in calendars],
+)
+result = ctx.engine.call(decision)
+...
+return ActionResult(..., decisions=[(decision, result)])
+```
+
+- Use the real engine (`ctx.engine.call`); never mock, never guess, never pick
+  by hand when more than one candidate fits.
+- Return every `(DecisionRequest, DecisionResult)` pair on
+  `ActionResult.decisions` so the choice is logged with the run outcome.
+- Include any configured default (a value read from `ctx.config`) as one of the
+  options, so the request can override the stored default.
 
 ### Rules (hard requirements)
 
@@ -119,20 +166,18 @@ talk to. Declaring a transport the body does not use is a broken skill.
   exists; fail honestly when it does not.
 - **No mocking.** Sub-decisions use the real engine: build a
   `DecisionRequest(state, question, options=[Option(id, description), ...])`
-  and call `ctx.engine.call(decision)`; return it inside `Prediction.decisions`.
+  and call `ctx.engine.call(decision)`; return it inside
+  `ActionResult.decisions`.
 - **Never swallow the request.** If the skill cannot act, return an
   `ActionResult` with a short `action_log` explaining why and set `new_state`
   back to `request.text`.
 - **Data comes from the runner, never from you.** A skill body is executed
-  across many requests and owns no working data. Every operational value is
-  provided by the runner through `ctx.config` under a clear snake_case name —
-  endpoints, accounts, credentials, CLI paths, identifiers. Request data from
-  the runner; never embed or fabricate working values, never invent mock data,
-  and never ask the human for operational data. Whether a value is remembered
-  across runs (config) or collected fresh each fire (input) is decided by the
-  config step at first fire — treat every variable the same here: read it from
-  `ctx.config`. Choose names a reader can extract into a contract (e.g.
-  `sender_address`, `tracking_id`, `nextcloud_url`).
+  across many requests and owns no working data. Every required operational
+  value is declared in `CONTRACT` and provided by the runner through
+  `ctx.config` under a clear snake_case name — endpoints, accounts,
+  credentials, CLI paths, identifiers; never embed or fabricate working values,
+  never invent mock data, and never ask the human for operational data.
+  Optional values with a safe default are read with `ctx.config.get(...)`.
 - **No test fixtures at runtime.** A body must never contain a hardcoded
   localhost/loopback address, a test port, or fixture data. Which environment
   it talks to is `ctx.config`'s decision, never the code's.
@@ -140,15 +185,15 @@ talk to. Declaring a transport the body does not use is a broken skill.
   prompt.** If the human's intent is ambiguous, do not guess: return an
   `ActionResult(action_log="...", new_state=request.text, needs_input="<question>")`.
   The run pauses and the human answers on `request.user_input`; `act` is then
-  called again with the *same* prediction — check `request.user_input` on the
-  resume pass to finish the run. This refines the product goal and requirements
-  only — never operational data (the runner supplies that).
+  called again — check `request.user_input` on the resume pass to finish the
+  run. This refines the product goal and requirements only — never operational
+  data (the runner supplies that).
 - **Write files under configured data dirs only** (e.g. the directory named by
   a config variable such as `ctx.config["output_dir"]`), never anywhere else on
   disk.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.
 - **Names match the manifest.** The module is imported as its manifest name;
-  the functions are `predict` and `act` exactly.
+  the function is `act` exactly.
 
 ## Bridge services
 
@@ -159,7 +204,7 @@ which services exist, their base-URL config var, auth, config vars, and the
 exact endpoints with their request/response/error shapes — is injected into the
 prompt at authoring time (render it with
 `semif_agent.bridges.describe_bridges()`); read it rather than guessing. This
-section is only the generic pattern; the catalog is the source of the
+section is only the generic pattern; the catalog is the source of truth for the
 bridge-specific details.
 
 A body must never speak a service's native protocol directly — no WebSocket to
@@ -187,8 +232,8 @@ Rules:
   conversation or target is relevant, resolve which one with a
   `ctx.engine.call(...)` sub-decision over the catalog's list endpoint (e.g.
   contacts or buffered senders), mirroring how `calendar.next_event` picks a
-  calendar. Use the catalog's default config var only as the configured
-  fallback when the request does not already make it clear.
+  calendar. Use the catalog's default config var as the configured option when
+  the request does not already make it clear.
 - **Sending requires user intent.** Send only because the request (or the
   requirements) asks for it. Never broadcast, never message a contact the user
   did not name or confirm, and never fabricate a message body as a working
@@ -204,7 +249,7 @@ Rules:
 
 - Single purpose, single file, single module.
 - Avoid duplicating an existing skill in the same category.
-- `predict` resolves ambiguity (arguments, recipients, targets) with SemIf
+- `act` resolves ambiguity (arguments, recipients, targets) with SemIf
   sub-decisions, mirroring how `calendar.next_event` resolves which calendar
   to read.
 - `act` performs the concrete real action and writes a human-readable
@@ -219,23 +264,23 @@ Rules:
 
 A generated skill is accepted only if:
 
-1. It compiles (`compile(..., "exec")` succeeds) and defines both `predict`
-   and `act`.
+1. It compiles (`compile(..., "exec")` succeeds) and defines `act`.
 2. Its `name` matches the manifest regex and its `category` is given.
 3. Its body imports nothing outside the stdlib and the agent package.
-4. It uses `ctx.engine` (never mocks) and returns proper `Prediction` /
-   `ActionResult` types.
+4. It uses `ctx.engine` (never mocks) and returns proper `ActionResult` types.
 5. It is single-purpose and does not duplicate an existing category leaf.
-6. Every operational value it needs is read from `ctx.config` under a clear
-   snake_case name — nothing is embedded, fabricated, or asked of the human.
-7. If its purpose is an external action, `act` performs the real operation via
+6. `CONTRACT` is present, flat, and every key is read from `ctx.config`;
+   optional values are read with `.get`.
+7. Every required operational value it needs is declared in `CONTRACT` — nothing
+   is embedded, fabricated, or asked of the human.
+8. If its purpose is an external action, `act` performs the real operation via
    the configured service/transport (no simulated success, no draft-by-default)
    and reports real failures honestly.
-8. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
+9. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
    and is consistent with the body's `ctx.config` reads and behavior.
-9. If it is a messaging skill, it uses a bridge service over HTTP (never a
-   service's native protocol), resolves recipients with a SemIf sub-decision,
-   and sends only on explicit user intent.
+10. If it is a messaging skill, it uses a bridge service over HTTP (never a
+    service's native protocol), resolves recipients with a SemIf sub-decision,
+    and sends only on explicit user intent.
 
 ## Worked example
 
@@ -247,7 +292,7 @@ import json
 import urllib.error
 import urllib.request
 
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "status_page",
@@ -255,10 +300,12 @@ INTEGRATION = {
     "config_vars": ["service_url", "service_token"],
 }
 
-def predict(ctx, request):
-    return Prediction(text=f"check {ctx.config['service_url']}", decisions=[])
+CONTRACT = {
+    "service_url": "URL of the service status endpoint to check.",
+    "service_token": "Bearer token for the status endpoint, if it requires one.",
+}
 
-def act(ctx, request, prediction):
+def act(ctx, request):
     url = ctx.config["service_url"]
     token = ctx.config.get("service_token", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -283,6 +330,6 @@ def act(ctx, request, prediction):
         )
 ```
 
-Write skill bodies in this shape: declare `INTEGRATION`, resolve ambiguity in
-`predict` via `ctx.engine`, perform the real operation in `act`, keep both
-stdlib-only, read data from `ctx.config`, and return the proper types.
+Write skill bodies in this shape: declare `INTEGRATION` and `CONTRACT`, perform
+the real operation in `act`, keep both stdlib-only, read data from `ctx.config`,
+SemIf any candidate set, and return the proper types.

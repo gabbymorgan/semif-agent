@@ -11,7 +11,7 @@ from semif_agent.decisions import DecisionRequest, DecisionResult, Option, Reque
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import Scheduler
-from semif_agent.skills import ActionResult, Prediction, Skill
+from semif_agent.skills import ActionResult, Skill
 from semif_agent.trace import TraceLog
 
 from tests.conftest import ScriptedEngine
@@ -32,10 +32,7 @@ def build_scheduler(tmp_path, choices=None):
 
 
 def need_input_skill(seen):
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
             seen.append(request.user_input)
             return ActionResult(
@@ -51,7 +48,6 @@ def need_input_skill(seen):
         name="track.manual",
         category="tracking",
         description="Resolve a tracking number with the human.",
-        predict=predict,
         act=act,
     )
 
@@ -69,7 +65,7 @@ def test_skill_pause_and_answer(tmp_path):
     assert scheduler.pending.question == "What's the tracking number?"
     assert scheduler.current is not None
     assert scheduler.current.skill == "track.manual"
-    assert scheduler.log.read() == [], "predict decisions must be deferred until completion"
+    assert scheduler.log.read() == [], "sub-decisions must be deferred until completion"
 
     status, detail = scheduler.answer("AB123")
     assert status == "ran"
@@ -91,7 +87,7 @@ def test_answer_without_pending_is_error(tmp_path):
     assert "waiting for input" in detail
 
 
-def test_predict_decisions_logged_on_completion(tmp_path):
+def test_act_decisions_logged_on_completion(tmp_path):
     decision = DecisionRequest(
         state="s", question="which?", options=[Option("a", "A."), Option("b", "B.")]
     )
@@ -99,17 +95,16 @@ def test_predict_decisions_logged_on_completion(tmp_path):
         request=decision, option_ids=["a", "b"], probabilities=[0.3, 0.7]
     )
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[(decision, result)])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
-            return ActionResult(action_log="ok", new_state="done")
+            return ActionResult(
+                action_log="ok", new_state="done", decisions=[(decision, result)]
+            )
         return ActionResult(
             action_log="ask", new_state=request.text, needs_input="confirm?"
         )
 
-    skill = Skill(name="t.x", category="t", description="", predict=predict, act=act)
+    skill = Skill(name="t.x", category="t", description="", act=act)
     scheduler = build_scheduler(
         tmp_path,
         choices={"achieve the user's goal": "failure", "complete, or should it run again": "complete"},
@@ -120,9 +115,9 @@ def test_predict_decisions_logged_on_completion(tmp_path):
 
     scheduler.answer("yes")
     rows = scheduler.log.read()
-    predict_rows = [r for r in rows if r.get("extra", {}).get("phase") == "predict"]
-    assert len(predict_rows) == 1
-    assert predict_rows[0]["extra"]["run_ok"] is False
+    act_rows = [r for r in rows if r.get("extra", {}).get("phase") == "act"]
+    assert len(act_rows) == 1
+    assert act_rows[0]["extra"]["run_ok"] is False
     phases = [r.get("extra", {}).get("phase") for r in rows]
     assert "assess:outcome" in phases and "assess:requeue" in phases
 
@@ -151,10 +146,7 @@ def test_idle_abandons_pending(tmp_path):
 def test_resume_can_ask_again(tmp_path):
     seen = []
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input == "AB123":
             return ActionResult(action_log="done", new_state="resolved")
         if request.user_input:
@@ -168,7 +160,7 @@ def test_resume_can_ask_again(tmp_path):
             action_log="ask", new_state=request.text, needs_input="Tracking number?"
         )
 
-    skill = Skill(name="t.x", category="t", description="", predict=predict, act=act)
+    skill = Skill(name="t.x", category="t", description="", act=act)
     scheduler = build_scheduler(tmp_path)
 
     scheduler._run_skill(skill, Request("track"))

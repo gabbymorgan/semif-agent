@@ -32,13 +32,8 @@ class ActionResult:
     action_log: str
     new_state: str
     needs_input: str | None = None
-
-
-@dataclass
-class Prediction:
-    """The predict phase: a forecast plus any SemIf decisions it made."""
-
-    text: str
+    # Any (DecisionRequest, DecisionResult) pairs the body made during `act`;
+    # the runner logs them with the run outcome (phase `act`).
     decisions: list[tuple[DecisionRequest, object]] = field(default_factory=list)
 
 
@@ -48,11 +43,7 @@ class ActionContext:
     config: dict
 
 
-def _noop_predict(ctx: ActionContext, request: Request) -> Prediction:
-    return Prediction(text="")
-
-
-def _noop_act(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
+def _noop_act(ctx: ActionContext, request: Request) -> ActionResult:
     return ActionResult("", "")
 
 
@@ -62,12 +53,7 @@ class Skill:
     category: str
     description: str
     cost_budget: float = 1.0
-    predict: Callable[[ActionContext, Request], Prediction] = field(
-        default=_noop_predict
-    )
-    act: Callable[[ActionContext, Request, Prediction], ActionResult] = field(
-        default=_noop_act
-    )
+    act: Callable[[ActionContext, Request], ActionResult] = field(default=_noop_act)
     writing: bool = False
     config: dict = field(default_factory=dict)
     contract: dict = field(default_factory=dict)
@@ -76,7 +62,7 @@ class Skill:
 
     def is_noop(self) -> bool:
         """A stub leaf: authored (title + description) but no runnable body yet."""
-        return self.predict is _noop_predict or self.act is _noop_act
+        return self.act is _noop_act
 
     @property
     def status(self) -> str:
@@ -299,6 +285,21 @@ def _extract_integration(code: str) -> tuple[dict, str]:
     return extract_integration(code)
 
 
+def _extract_contract(code: str) -> dict:
+    """The body's flat `CONTRACT` declaration, or {} when absent/unparseable.
+
+    The module constant is the source of truth; `contract.json` is a derived
+    mirror. Lives in codegen.py; imported lazily so skills.py stays free of
+    codegen at module import time.
+    """
+    from .codegen import parse_contract
+
+    try:
+        return parse_contract(code)
+    except ValueError:
+        return {}
+
+
 def materialize_skill(
     draft: SkillDraft, category: str, store: SkillStore
 ) -> Skill:
@@ -315,19 +316,18 @@ def materialize_skill(
         module = load_skill_module(category, draft.name, store.path)
     except Exception as exc:
         raise ValueError(f"skill {category}.{draft.name} body failed to import: {exc}") from exc
-    if not callable(getattr(module, "predict", None)) or not callable(
-        getattr(module, "act", None)
-    ):
-        raise ValueError(f"skill {category}.{draft.name} body must define predict and act")
+    if not callable(getattr(module, "act", None)):
+        raise ValueError(f"skill {category}.{draft.name} body must define act")
     integration, integration_source = _extract_integration(draft.code)
+    contract = _extract_contract(draft.code) or store.read_contract(category, draft.name)
+    store.write_contract(category, draft.name, contract)
     return Skill(
         name=draft.name,
         category=category,
         description=draft.description,
-        predict=module.predict,
         act=module.act,
         config=store.read_config(category, draft.name),
-        contract=store.read_contract(category, draft.name),
+        contract=contract,
         integration=integration,
         integration_source=integration_source,
     )
@@ -353,19 +353,22 @@ def merge_skill_store(
             module = load_skill_module(category, name, store.path)
         except Exception:
             continue
+        if not callable(getattr(module, "act", None)):
+            continue
         code_path = store.dir(category, name) / "skill.py"
         try:
-            integration, integration_source = _extract_integration(code_path.read_text())
+            code = code_path.read_text()
+            integration, integration_source = _extract_integration(code)
         except OSError:
-            integration, integration_source = {}, "unknown"
+            code, integration, integration_source = "", {}, "unknown"
+        contract = _extract_contract(code) or store.read_contract(category, name)
         skill = Skill(
             name=name,
             category=category,
             description=description or name,
-            predict=module.predict,
             act=module.act,
             config=store.read_config(category, name),
-            contract=store.read_contract(category, name),
+            contract=contract,
             integration=integration,
             integration_source=integration_source,
         )
@@ -402,25 +405,24 @@ def merge_seed_store(
             module = load_skill_module(category, name, seed_store.path)
         except Exception:
             continue
-        predict = getattr(module, "predict", None)
         act = getattr(module, "act", None)
-        if not callable(predict) or not callable(act):
+        if not callable(act):
             continue
         try:
             code = (directory / "skill.py").read_text()
         except OSError:
             continue
         integration, integration_source = _extract_integration(code)
+        contract = _extract_contract(code) or seed_store.read_contract(category, name)
         manifest = seed_store.read_manifest(category, name)
         description = str(manifest.get("description") or name)
         skill = Skill(
             name=name,
             category=category,
             description=description,
-            predict=predict,
             act=act,
             config=(config_store or seed_store).read_config(category, name),
-            contract=seed_store.read_contract(category, name),
+            contract=contract,
             integration=integration,
             integration_source=integration_source,
         )
@@ -458,7 +460,7 @@ def unresolved_variables(
 ) -> list[str]:
     """Contract variables the runner has not satisfied yet (not in the merged
     config and not answered this run). A missing input var is asked of the
-    human before predict runs."""
+    human before act runs."""
     merged = resolve_skill_config(store, skill, global_config, answered)
     return [name for name in (skill.contract or {}) if name not in merged]
 
@@ -470,14 +472,10 @@ def compose_state(request: Request, current: str | None = None) -> str:
     return " ".join(parts)
 
 
-def _canned_predict(ctx: ActionContext, request: Request) -> Prediction:
-    return Prediction(text="")
-
-
 def _canned_response(name: str, message: str):
     """An act that returns a fixed line. No transport, no generation, no config."""
 
-    def act(ctx: ActionContext, request: Request, prediction: Prediction) -> ActionResult:
+    def act(ctx: ActionContext, request: Request) -> ActionResult:
         return ActionResult(action_log=f"{name}: {message}", new_state=message)
 
     return act
@@ -548,7 +546,6 @@ def build_skills(config: dict) -> list[Skill]:
             name=f"response.{name}",
             category="response",
             description=description,
-            predict=_canned_predict,
             act=_canned_response(f"response.{name}", message),
         )
         for name, description, message in _CANNED_RESPONSES

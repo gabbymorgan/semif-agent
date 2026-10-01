@@ -1,11 +1,11 @@
 """Hermetic mechanics test for simplex.next_message.
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
-http.server plays the standalone SimpleX forwarding bridge. This proves the body peeks the
-inbox, resolves the conversation through a SemIf sub-decision (or a configured
-default), pops the real `next` message, and fails honestly when the bridge is
-unreachable. It does NOT prove the live integration — only a real run against
-the bridge and a real contact does.
+http.server plays the standalone SimpleX forwarding bridge. This proves the body
+peeks the inbox, resolves the conversation through a SemIf sub-decision (or a
+configured default), pops the real `next` message, and fails honestly when the
+bridge is unreachable. It does NOT prove the live integration — only a real run
+against the bridge and a real contact does.
 """
 
 import json
@@ -113,12 +113,9 @@ def test_multiple_senders_uses_semif_decision():
         engine = FakeEngine(pick="7")
         ctx = ActionContext(engine=engine, config=config(url))
         request = Request("read my next simplex message")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "contact: 7", prediction.text
-        assert len(prediction.decisions) == 1, "predict must log the conversation choice"
+        action = skill.act(ctx, request)
+        assert len(action.decisions) == 1, "act must log the conversation choice"
         assert len(engine.decisions) == 1
-
-        action = skill.act(ctx, request, prediction)
         assert "Bob" in action.action_log, action.action_log
         assert "shipment arrived" in action.action_log, action.action_log
         assert action.new_state, "act must set a new state"
@@ -143,11 +140,8 @@ def test_default_contact_skips_decision():
         engine = FakeEngine()
         ctx = ActionContext(engine=engine, config=config(url, default="Alice"))
         request = Request("read my next simplex message")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "contact: 4", prediction.text
+        action = skill.act(ctx, request)
         assert engine.decisions == [], "a configured default needs no SemIf decision"
-
-        action = skill.act(ctx, request, prediction)
         assert "Alice" in action.action_log, action.action_log
         assert handler.requests[1] == "/inbox/next?contact=4", handler.requests
         print(action.action_log)
@@ -162,10 +156,8 @@ def test_single_sender_needs_no_decision():
         engine = FakeEngine()
         ctx = ActionContext(engine=engine, config=config(url))
         request = Request("read my next simplex message")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "contact: 4", prediction.text
+        action = skill.act(ctx, request)
         assert engine.decisions == []
-        action = skill.act(ctx, request, prediction)
         assert "hi" in action.action_log, action.action_log
         print(action.action_log)
     finally:
@@ -179,9 +171,7 @@ def test_empty_inbox_is_reported_honestly():
         engine = FakeEngine()
         ctx = ActionContext(engine=engine, config=config(url))
         request = Request("read my next simplex message")
-        prediction = skill.predict(ctx, request)
-        assert prediction.text == "settled: no unread messages", prediction.text
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "no unread" in action.action_log, action.action_log
         assert handler.requests == ["/inbox"], "an empty inbox needs no pop"
         print(action.action_log)
@@ -194,10 +184,8 @@ def test_unreachable_bridge_fails_honestly():
     engine = FakeEngine()
     ctx = ActionContext(engine=engine, config=config("http://127.0.0.1:1"))
     request = Request("read my next simplex message")
-    prediction = skill.predict(ctx, request)
-    assert prediction.text.startswith("bridge error:"), prediction.text
-    action = skill.act(ctx, request, prediction)
-    assert action.action_log.startswith("bridge error:"), action.action_log
+    action = skill.act(ctx, request)
+    assert action.action_log.startswith("simplex.next_message:"), action.action_log
     assert action.new_state == request.text, "a failed read must not fake a result"
     print(action.action_log)
 
@@ -208,8 +196,7 @@ def test_auth_token_is_sent_when_configured():
         engine = FakeEngine()
         ctx = ActionContext(engine=engine, config=config(url, token="sekret"))
         request = Request("read my next simplex message")
-        prediction = skill.predict(ctx, request)
-        action = skill.act(ctx, request, prediction)
+        action = skill.act(ctx, request)
         assert "hi" in action.action_log, action.action_log
         assert set(handler.tokens) == {"sekret"}, handler.tokens
         print(action.action_log)

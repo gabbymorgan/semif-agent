@@ -154,7 +154,7 @@ def test_codegen_keeps_thinking():
     """Codegen wants the chain-of-thought: the knob must not leak into it."""
     from semif_agent.codegen import CodegenClient
 
-    httpd, base = _fake_server("def predict(ctx, request):\n    pass\n")
+    httpd, base = _fake_server("def act(ctx, request):\n    pass\n")
     try:
         CodegenClient(base_url=base, model="test", timeout=10).chat(
             [{"role": "user", "content": "write a body"}]

@@ -3,8 +3,9 @@
 The small `llm` provider authors a skill's title + description; writing the
 runnable body is a separate step: a larger OpenAI-compatible model (e.g.
 qwen38-iq3s on ollama) is prompted with the SKILL.md contract plus the request
-and the existing tree, and must reply with valid Python implementing `predict` /
-`act`. The shared provider transport lives in `provider.py`.
+and the existing tree, and must reply with valid Python implementing `act` plus
+the `INTEGRATION` and `CONTRACT` module constants. The shared provider transport
+lives in `provider.py`.
 """
 
 from __future__ import annotations
@@ -100,11 +101,16 @@ class CodegenClient(OpenAICompatClient):
 
 BODY_DIRECTIVES = (
     "This body is a reusable module executed across many requests. It owns no "
-    "working data: every operational value is provided by the runner through "
-    "`ctx.config` under a clear snake_case name — request data from the runner, "
-    "never embed or fabricate working values, and never ask the human for "
-    "operational data. Ask the human only to refine the product goal and "
+    "working data: every required operational value is provided by the runner "
+    "through `ctx.config` under a clear snake_case name — request data from the "
+    "runner, never embed or fabricate working values, and never ask the human "
+    "for operational data. Ask the human only to refine the product goal and "
     "requirements.\n"
+    "Write a single `act(ctx, request)` function. Declare the required "
+    "operational values as a module-level `CONTRACT` dict exactly as SKILL.md "
+    "specifies: a flat map of variable name -> semantic description. Every key "
+    "in CONTRACT must be read from `ctx.config`; do not declare optional "
+    "values with safe defaults — read those with `ctx.config.get(...)` instead.\n"
     "Perform the real action: if this skill interacts with an external system, "
     "`act` must call the user's configured service with a stdlib transport "
     "(urllib.request/http.client for HTTP, imaplib/smtplib/poplib for mail, "
@@ -120,9 +126,11 @@ BODY_DIRECTIVES = (
     "If this skill interacts with one of the available bridge services listed "
     "below, call that bridge over HTTP with the URL from its config variable — "
     "never speak the service's native protocol directly (no WebSocket to "
-    "simplex-chat, no direct daemon access). Resolve which contact or "
-    "conversation with a `ctx.engine` sub-decision, and send only when the "
-    "request or requirements ask for it.\n"
+    "simplex-chat, no direct daemon access). Whenever you have a set of "
+    "candidates to choose from (contacts, conversations, calendars, targets), "
+    "employ a `ctx.engine` SemIf sub-decision over them and return the "
+    "`(DecisionRequest, DecisionResult)` pairs on `ActionResult.decisions`; "
+    "send only when the request or requirements ask for it.\n"
 )
 
 
@@ -188,7 +196,8 @@ def build_skill_body_prompt(
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
         "Write the Python module body now. Reply with ONLY valid Python code "
-        "defining `predict` and `act`. No prose, no markdown fences, no JSON."
+        "defining `act`, `INTEGRATION`, and `CONTRACT`. No prose, no markdown "
+        "fences, no JSON."
     )
     return [
         {"role": "system", "content": system},
@@ -200,8 +209,9 @@ def parse_skill_body(raw: str) -> str:
     """Extract and validate a Python skill body from the model's reply.
 
     Accepts bare code, ```fenced``` code, or JSON {"code": "..."}. The body
-    must parse and must define module-level `predict` and `act` functions.
-    Returns the cleaned source. Raises ValueError otherwise.
+    must parse, define a module-level `act` function, and declare a valid flat
+    `CONTRACT` whose keys are all read from `ctx.config`. Returns the cleaned
+    source. Raises ValueError otherwise.
     """
     text = raw.strip()
     if "code" in text[:400] and "{" in text and "}" in text:
@@ -229,9 +239,15 @@ def parse_skill_body(raw: str) -> str:
     except SyntaxError as exc:
         raise ValueError(f"skill body is not valid Python: {exc}") from exc
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
-    for required in ("predict", "act"):
-        if required not in names:
-            raise ValueError(f"skill body must define a module-level `{required}` function")
+    if "act" not in names:
+        raise ValueError("skill body must define a module-level `act` function")
+    contract = parse_contract(text)
+    reads = set(_config_reads(text))
+    dead = sorted(set(contract) - reads)
+    if dead:
+        raise ValueError(
+            f"CONTRACT declares {dead} but the body never reads them from ctx.config"
+        )
     return text
 
 
@@ -502,8 +518,8 @@ def _retry_prompt(
         f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
-        "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
-        "no markdown fences, no JSON."
+        "Reply with ONLY valid Python defining `act`, `INTEGRATION`, and "
+        "`CONTRACT`. No prose, no markdown fences, no JSON."
     )
     return [
         {"role": "system", "content": system},
@@ -799,75 +815,61 @@ def build_testgen_base_prompt(
     ]
 
 
-def build_contract_request_prompt(
-    base: list[dict], note: str | None = None
-) -> list[dict]:
-    user = "Generate the data contract now: a single JSON object."
-    if note:
-        user += f"\nNote: {note}"
-    user += "\nReply with ONLY the JSON object. No prose, no markdown fences."
-    return base + [{"role": "user", "content": user}]
-
-
-def parse_data_contract(raw: str) -> dict:
-    """Validate a flat semantic contract: one JSON object whose keys are
-    snake_case variable names and whose values are non-empty descriptions."""
-    text = raw.strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"data contract is not a JSON object: {raw!r}")
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except ValueError as exc:
-        raise ValueError(f"data contract is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("data contract must be a single JSON object")
-    for key, value in parsed.items():
-        if not CONTRACT_VARIABLE_RE.fullmatch(key):
+def _validate_contract_dict(contract: dict) -> dict:
+    """Validate a flat semantic contract: snake_case keys -> non-empty
+    description strings."""
+    if not isinstance(contract, dict):
+        raise ValueError("data contract must be a single flat object")
+    for key, value in contract.items():
+        if not isinstance(key, str) or not CONTRACT_VARIABLE_RE.fullmatch(key):
             raise ValueError(f"contract variable {key!r} must be lowercase snake_case")
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"contract value for {key!r} must be a semantic description string")
-    return parsed
+    return contract
 
 
-def generate_data_contract(
-    client: CodegenClient,
-    request: Request,
-    category: str,
-    draft: SkillDraft,
-    skill_code: str,
-    contract_md: str | None = None,
-    reason: str | None = None,
-) -> dict:
-    """Derive the flat data contract from the finished skill body.
+def parse_contract(code: str) -> dict:
+    """Validate the body's module-level `CONTRACT` declaration.
 
-    Reads every `ctx.config[...]` operational access in the body and expresses
-    each as a variable name -> semantic description. Escalates like the body
-    writer on parse failure; `reason` (a failing-test error) is fed on regen.
+    The contract is a flat `{variable: description}` dict literal that the body
+    declares itself; it is the source of truth for what the runner must supply.
+    Returns the parsed dict. Raises ValueError when the constant is missing or
+    malformed.
     """
-    contract_text = contract_md if contract_md is not None else read_testgen_contract()
-    attempts = max(client.max_attempts, 1)
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        if attempt == 1:
-            note = reason
-        else:
-            note = str(last_error)
-        messages = build_contract_request_prompt(
-            build_testgen_base_prompt(
-                request, category, draft.name, skill_code, contract_text
-            ),
-            note=note,
-        )
-        try:
-            raw = client.chat(
-                messages,
-                **(ESCALATED_SAMPLER if attempt > 1 else {}),
-            )
-            return parse_data_contract(raw)
-        except ValueError as exc:
-            last_error = exc
-    raise ValueError(f"data contract rejected {attempts} times: {last_error}")
+    try:
+        module = ast.parse(code, filename="<generated>")
+    except SyntaxError as exc:
+        raise ValueError(f"skill body is not valid Python: {exc}") from exc
+    for node in module.body:
+        value = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "CONTRACT"
+            for target in node.targets
+        ):
+            value = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "CONTRACT"
+        ):
+            value = node.value
+        if value is None:
+            continue
+        if not isinstance(value, ast.Dict):
+            raise ValueError("CONTRACT must be a flat dict literal")
+        contract: dict = {}
+        for key_node, value_node in zip(value.keys, value.values):
+            key = _const_str(key_node) if key_node is not None else None
+            if not key:
+                raise ValueError("CONTRACT keys must be string literals")
+            description = _const_str(value_node)
+            if not description or not description.strip():
+                raise ValueError(
+                    f"CONTRACT[{key!r}] must be a non-empty description string"
+                )
+            contract[key] = description
+        return _validate_contract_dict(contract)
+    raise ValueError("skill body must define a module-level CONTRACT dict")
 
 
 def build_testgen_request_prompt(
@@ -1034,8 +1036,8 @@ def _regen_body_prompt(
         f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
-        "Reply with ONLY valid Python defining `predict` and `act`. No prose, "
-        "no markdown fences, no JSON."
+        "Reply with ONLY valid Python defining `act`, `INTEGRATION`, and "
+        "`CONTRACT`. No prose, no markdown fences, no JSON."
     )
     return [
         {"role": "system", "content": system},

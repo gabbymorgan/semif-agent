@@ -1,6 +1,6 @@
 """The scheduler: choice, score, queue, dispatch.
 
-Every SemIf decision (choice, score, navigation, prediction) is logged.
+Every SemIf decision (choice, score, navigation, sub-decision) is logged.
 A high-priority input can preempt the current process, which requeues with its
 state preserved; a deferred input is scored and queued by urgency. There is no
 up-front handle/ignore gate: every input is dispatched, and inputs that are not
@@ -21,11 +21,11 @@ from .codegen import (
     CodegenClient,
     CodegenError,
     extract_integration,
-    generate_data_contract,
     generate_elicitation,
     generate_skill_body,
     generate_skill_tests,
     integration_findings,
+    parse_contract,
     regenerate_skill_body,
     run_skill_test,
     skill_contract_ref,
@@ -44,7 +44,6 @@ from .skills import (
     CategoryRegistry,
     CreateCategory,
     CreateSkill,
-    Prediction,
     Skill,
     SkillDraft,
     SkillStore,
@@ -83,18 +82,15 @@ class Process:
 class PendingRun:
     """A skill run paused awaiting human input.
 
-    `prediction` is kept so resume re-invokes only `act` (predict is not
-    re-run, avoiding duplicate SemIf sub-decisions); `question` is what the
-    run asked the human. A `pre_predict` pause (contract variables collected
-    by the runner before predict) has no prediction yet — resume runs the full
-    predict+act path.
+    `question` is what the run asked the human. A `pre_act` pause (contract
+    variables collected by the runner before act) re-runs the full resolution
+    + act path on resume; an act-driven pause re-invokes `act`.
     """
 
     request: Request
     skill: Skill
-    prediction: Prediction | None
     question: str
-    pre_predict: bool = False
+    pre_act: bool = False
 
 
 @dataclass
@@ -548,7 +544,7 @@ class Scheduler:
         """Feed the human's answer to a run paused for input.
 
         Routed directly to the pending run — no gate, score, or navigation —
-        and the run resumes by re-invoking only `act` with the same prediction.
+        and the run resumes by re-invoking `act`.
         """
         with self._lock:
             if self.pending is None:
@@ -558,8 +554,7 @@ class Scheduler:
             pending.request.user_input = text
             self.trace.append("answered", pending.request.id, text=text)
             outcome = self.runner.resume(
-                pending.skill, pending.request, pending.prediction,
-                pre_predict=pending.pre_predict,
+                pending.skill, pending.request, pre_act=pending.pre_act
             )
             result = self._finish_run(pending.skill, pending.request, outcome)
             if result.kind == "needs_input":
@@ -579,9 +574,8 @@ class Scheduler:
             self.pending = PendingRun(
                 request=request,
                 skill=skill,
-                prediction=outcome.prediction,
                 question=outcome.needs_input,
-                pre_predict=outcome.pre_predict,
+                pre_act=outcome.pre_act,
             )
             self.current = Process(request=request, skill=skill.name, weight=0.5)
             self.trace.append(
@@ -1109,8 +1103,8 @@ class Scheduler:
     def _write_skill_body(self, job: SkillWrite) -> None:
         """Run the full authoring pipeline for one queued write (no scheduler
         lock held here): deferred elicitation -> codegen body (or repair
-        rewrite) -> fidelity gate -> data contract -> test -> auto-run test
-        (with a SemIf regen ladder on failure).
+        rewrite) -> fidelity gate -> parse the body's CONTRACT -> test ->
+        auto-run test (with a SemIf regen ladder on failure).
 
         The tree is snapshotted under the lock so the prompt build reads a
         stable view even if the main thread merges another skill meanwhile.
@@ -1151,9 +1145,7 @@ class Scheduler:
                     ),
                 )
             code = self._fidelity_gate(job, code)
-            contract = generate_data_contract(
-                self.codegen, job.request, job.category, job.draft, code
-            )
+            contract = parse_contract(code)
         except EngineUnavailable as exc:
             self._mark_fatal(exc)
             self._fail_skill_write(job, exc)
@@ -1392,10 +1384,12 @@ class Scheduler:
     def _test_and_fix(self, job: SkillWrite, code: str, contract: dict) -> None:
         """Generate the test artifact and auto-run it; regen the failing piece.
 
-        On failure a SemIf decision picks which of code/contract/test to
-        regenerate; whichever it is, the error and the existing files are fed
-        back into the corrective call. Fixture data lives inside the test, so a
-        fixture fix is a test regen. Bounded by `test_max_attempts`.
+        On failure a SemIf decision picks whether to regenerate the body or the
+        test; whichever it is, the error and the existing files are fed back
+        into the corrective call. The contract rides in the body, so a code
+        regen re-parses it (and rewrites the `contract.json` mirror). Fixture
+        data lives inside the test, so a fixture fix is a test regen. Bounded by
+        `test_max_attempts`.
         """
         attempts = max(self.test_max_attempts, 1)
         reason: str | None = None
@@ -1417,10 +1411,7 @@ class Scheduler:
                     reason_kind="test",
                 )
                 self.body_store.write_body(job.category, job.draft.name, code)
-            if target == "regen_contract":
-                contract = generate_data_contract(
-                    self.codegen, job.request, job.category, job.draft, code, reason=reason
-                )
+                contract = parse_contract(code)
                 self.body_store.write_contract(job.category, job.draft.name, contract)
             test = generate_skill_tests(
                 self.codegen, job.request, job.category, job.draft, code, contract,
@@ -1462,13 +1453,14 @@ class Scheduler:
 
     def _config_search(self, job: SkillWrite, contract: dict) -> None:
         """Auto-populate the skill config: a SemIf choice per contract variable
-        maps it against candidate values from the global config and the
-        category config. Unmatched variables are left to the first-fire ask.
-        The engine is always real: an EngineUnavailable propagates to the
+        maps it against candidate values from the whole config cascade (global
+        -> category -> skill). Unmatched variables are left to the first-fire
+        ask. The engine is always real: an EngineUnavailable propagates to the
         worker, which marks the app fatal."""
         merged: dict = {}
         merged.update(self.config)
         merged.update(self.body_store.read_category_config(job.category))
+        merged.update(self.body_store.read_config(job.category, job.draft.name))
         try:
             for key in contract:
                 candidates = _config_candidates(key, merged)

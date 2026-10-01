@@ -17,12 +17,17 @@ import json
 import urllib.error
 import urllib.request
 
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
     "config_vars": ["simplex_bridge_url", "simplex_bridge_token"],
+}
+
+CONTRACT = {
+    "simplex_bridge_url": "Base URL of the standalone SimpleX forwarding bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
+    "simplex_bridge_token": "Shared secret for the bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
 }
 
 TIMEOUT_SECONDS = 30
@@ -58,20 +63,18 @@ def _get(ctx, path):
         raise BridgeError(f"GET {path}: {exc}") from exc
 
 
-def predict(ctx, request):
+def act(ctx, request):
     try:
         payload = _get(ctx, "/health")
     except BridgeError as exc:
-        return Prediction(text=f"bridge error: {exc}")
+        return ActionResult(
+            action_log=f"simplex.connect_link: {exc}", new_state=request.text
+        )
     if not payload.get("ok"):
-        return Prediction(text="bridge error: simplex forwarding bridge is not healthy")
-    return Prediction(text="ready: simplex forwarding bridge reachable")
-
-
-def act(ctx, request, prediction):
-    text = prediction.text if prediction else ""
-    if text.startswith("bridge error:"):
-        return ActionResult(action_log=text, new_state=request.text)
+        return ActionResult(
+            action_log="simplex.connect_link: simplex forwarding bridge is not healthy",
+            new_state=request.text,
+        )
     try:
         payload = _get(ctx, "/address")
     except BridgeError as exc:

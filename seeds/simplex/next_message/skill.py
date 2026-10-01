@@ -1,10 +1,10 @@
-"""Read the next unread SimpleX message bridge.
+"""Read the next unread SimpleX message through the forwarding bridge.
 
 Real integration: the standalone SimpleX forwarding bridge
 (`simplex_bridge_url`) buffers every inbound DM and forwards outbound sends.
-`predict` peeks that inbox, finds which conversations have unread messages, and
+`act` peeks that inbox, finds which conversations have unread messages, and
 resolves which one to read with a SemIf sub-decision when more than one does
-(honoring a configured default contact); `act` pops and reports the oldest
+(honoring a configured default contact); it then pops and reports the oldest
 unread message for that conversation.
 
 The bridge owns the read cursor, so this skill keeps no state of its own. It
@@ -20,16 +20,17 @@ import urllib.parse
 import urllib.request
 
 from semif_agent.decisions import DecisionRequest, Option
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "simplex",
     "transport": "http",
-    "config_vars": [
-        "simplex_bridge_url",
-        "simplex_default_contact",
-        "simplex_bridge_token",
-    ],
+    "config_vars": ["simplex_bridge_url", "simplex_bridge_token"],
+}
+
+CONTRACT = {
+    "simplex_bridge_url": "Base URL of the standalone SimpleX forwarding bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
+    "simplex_bridge_token": "Shared secret for the bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
 }
 
 
@@ -91,49 +92,30 @@ def _match_default(senders, default):
     return None
 
 
-def predict(ctx, request):
+def act(ctx, request):
     try:
         payload = _get(ctx, "/inbox")
     except BridgeError as exc:
-        return Prediction(text=f"bridge error: {exc}")
+        return ActionResult(action_log=f"simplex.next_message: {exc}", new_state=request.text)
     senders = _senders(payload.get("messages") or [])
     if not senders:
-        return Prediction(text="settled: no unread messages")
-    chosen = _match_default(senders, ctx.config.get("simplex_default_contact", ""))
-    if chosen is not None:
-        return Prediction(text=f"contact: {chosen}")
-    if len(senders) == 1:
-        return Prediction(text=f"contact: {senders[0]['id']}")
-    decision = DecisionRequest(
-        state=request.text,
-        question="Which conversation should I read the next SimpleX message from?",
-        options=[Option(sender["id"], sender["display_name"]) for sender in senders],
-    )
-    result = ctx.engine.call(decision)
-    return Prediction(
-        text=f"contact: {result.selected}",
-        decisions=[(decision, result)],
-    )
-
-
-def act(ctx, request, prediction):
-    text = prediction.text if prediction else ""
-    if text.startswith("bridge error:"):
-        return ActionResult(action_log=text, new_state=request.text)
-    if text == "settled: no unread messages":
         return ActionResult(
             action_log="simplex.next_message: no unread SimpleX messages.",
             new_state="no unread SimpleX messages",
         )
-    contact = text.removeprefix("contact: ").strip()
-    if not contact:
-        return ActionResult(
-            action_log=(
-                "simplex.next_message aborted: no conversation resolved "
-                f"({text or 'no prediction'})."
-            ),
-            new_state=request.text,
+    decisions = []
+    contact = _match_default(senders, ctx.config.get("simplex_default_contact", ""))
+    if contact is None and len(senders) > 1:
+        decision = DecisionRequest(
+            state=request.text,
+            question="Which conversation should I read the next SimpleX message from?",
+            options=[Option(sender["id"], sender["display_name"]) for sender in senders],
         )
+        result = ctx.engine.call(decision)
+        decisions.append((decision, result))
+        contact = result.selected
+    if contact is None:
+        contact = senders[0]["id"]
     try:
         payload = _get(
             ctx, f"/inbox/next?contact={urllib.parse.quote(contact)}"
@@ -142,14 +124,16 @@ def act(ctx, request, prediction):
         return ActionResult(
             action_log=f"simplex.next_message failed reading {contact!r}: {exc}",
             new_state=request.text,
+            decisions=decisions,
         )
     message = payload.get("message")
     if not message:
         return ActionResult(
             action_log=f"simplex.next_message: no unread message from {contact!r}.",
             new_state="no unread SimpleX messages",
+            decisions=decisions,
         )
     sender = message.get("display_name") or contact
     body = str(message.get("text") or "")
     report = f"SimpleX message from {sender}: {body}"
-    return ActionResult(action_log=report, new_state=report)
+    return ActionResult(action_log=report, new_state=report, decisions=decisions)

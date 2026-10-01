@@ -17,7 +17,7 @@ from semif_agent.engine import EngineConfig, SemIfEngine
 from semif_agent.llm import LLMClient
 from semif_agent.log import DecisionLog
 from semif_agent.scheduler import PendingQuestion, RepairOffer, Scheduler
-from semif_agent.skills import ActionResult, Prediction, Skill
+from semif_agent.skills import ActionResult, Skill
 from semif_agent.trace import TraceLog
 
 from tests.conftest import ScriptedEngine
@@ -92,14 +92,11 @@ def test_tree_endpoint(tmp_path):
 def test_tree_endpoint_carries_skill_status(tmp_path):
     scheduler = build_scheduler(tmp_path)
 
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         return ActionResult(action_log="ok", new_state=request.text)
 
     scheduler.tree["tracking"] = [
-        Skill(name="ready", category="tracking", description="r", predict=predict, act=act),
+        Skill(name="ready", category="tracking", description="r", act=act),
         Skill(name="stub", category="tracking", description="s"),
     ]
     stub = next(s for s in scheduler.tree["tracking"] if s.name == "stub")
@@ -242,10 +239,7 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
 
 
 def need_input_skill(seen):
-    def predict(ctx, request):
-        return Prediction(text="", decisions=[])
-
-    def act(ctx, request, prediction):
+    def act(ctx, request):
         if request.user_input:
             seen.append(request.user_input)
             return ActionResult(action_log="ok", new_state=f"done {request.user_input}")
@@ -259,8 +253,7 @@ def need_input_skill(seen):
         name="track.manual",
         category="tracking",
         description="Resolve a tracking number with the human.",
-        predict=predict,
-        act=act,
+                act=act,
     )
 
 

@@ -2,11 +2,10 @@
 
 Real integration: CalDAV against the user's Nextcloud (SabreDAV). Connection
 details come from `ctx.config` (`nextcloud_url`, `nextcloud_username`,
-`nextcloud_app_password`). `predict` discovers the user's calendars over
-PROPFIND and resolves which one the request means with a SemIf sub-decision
-when there is more than one; `act` issues a `calendar-query` REPORT with
-server-side recurrence expansion and reports the earliest instance that has
-not ended yet.
+`nextcloud_app_password`). `act` discovers the user's calendars over PROPFIND
+and resolves which one the request means with a SemIf sub-decision when there
+is more than one, then issues a `calendar-query` REPORT with server-side
+recurrence expansion and reports the earliest instance that has not ended yet.
 
 Recurring events are expanded by the server (`<c:expand>`), so no RRULE
 engine lives here; a server that ignores expansion is reported honestly
@@ -25,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from semif_agent.decisions import DecisionRequest, Option
-from semif_agent.skills import ActionResult, Prediction
+from semif_agent.skills import ActionResult
 
 INTEGRATION = {
     "service": "nextcloud_calendar",
@@ -35,6 +34,12 @@ INTEGRATION = {
         "nextcloud_username",
         "nextcloud_app_password",
     ],
+}
+
+CONTRACT = {
+    "nextcloud_url": "Base URL of the Nextcloud instance, e.g. https://cloud.example.com (no path, no trailing slash needed).",
+    "nextcloud_username": "The Nextcloud username whose calendars are read.",
+    "nextcloud_app_password": "A Nextcloud app password (Settings > Security > Devices & sessions) used for CalDAV Basic auth; the account password only works when two-factor auth is off.",
 }
 
 DAV = "DAV:"
@@ -298,41 +303,38 @@ def _format_when(event):
 # ---- skill phases ----
 
 
-def predict(ctx, request):
+def act(ctx, request):
     try:
         calendars = _discover_calendars(ctx)
     except CalDavError as exc:
-        return Prediction(text=f"calendar discovery failed: {exc}")
+        return ActionResult(
+            action_log=f"calendar.next_event: calendar discovery failed: {exc}",
+            new_state=request.text,
+        )
     if not calendars:
-        return Prediction(text="calendar discovery failed: no calendars found")
+        return ActionResult(
+            action_log="calendar.next_event: calendar discovery failed: no calendars found",
+            new_state=request.text,
+        )
+    decisions = []
     if len(calendars) == 1:
-        return Prediction(text=f"calendar: {calendars[0]['name']}")
-    decision = DecisionRequest(
-        state=request.text,
-        question="Which calendar is the intended one?",
-        options=[
-            Option(calendar["name"], calendar["label"]) for calendar in calendars
-        ],
-    )
-    result = ctx.engine.call(decision)
-    return Prediction(
-        text=f"calendar: {result.selected}",
-        decisions=[(decision, result)],
-    )
-
-
-def act(ctx, request, prediction):
-    text = prediction.text if prediction else ""
-    if text.startswith("calendar discovery failed:"):
-        return ActionResult(action_log=text, new_state=request.text)
-    calendar = text.removeprefix("calendar: ").strip()
+        calendar = calendars[0]["name"]
+    else:
+        decision = DecisionRequest(
+            state=request.text,
+            question="Which calendar is the intended one?",
+            options=[
+                Option(c["name"], c["label"]) for c in calendars
+            ],
+        )
+        result = ctx.engine.call(decision)
+        decisions.append((decision, result))
+        calendar = result.selected
     if not calendar:
         return ActionResult(
-            action_log=(
-                "calendar.next_event aborted: no calendar resolved "
-                f"({text or 'no prediction'})."
-            ),
+            action_log="calendar.next_event aborted: no calendar resolved.",
             new_state=request.text,
+            decisions=decisions,
         )
     local_tz = datetime.now().astimezone().tzinfo or timezone.utc
     now = datetime.now(local_tz)
@@ -351,6 +353,7 @@ def act(ctx, request, prediction):
         return ActionResult(
             action_log=f"calendar.next_event failed on {calendar!r}: {exc}",
             new_state=request.text,
+            decisions=decisions,
         )
     next_event = _pick_next(events, now)
     if next_event is None:
@@ -358,10 +361,10 @@ def act(ctx, request, prediction):
             f"No events on calendar {calendar!r} through "
             f"{window_end.strftime('%Y-%m-%d')}."
         )
-        return ActionResult(action_log=message, new_state=message)
+        return ActionResult(action_log=message, new_state=message, decisions=decisions)
     summary = next_event.get("summary") or "(no title)"
     when = _format_when(next_event)
     message = f"Next event on {calendar!r}: {summary} — {when}"
     if next_event.get("location"):
         message += f" at {next_event['location']}"
-    return ActionResult(action_log=message, new_state=message)
+    return ActionResult(action_log=message, new_state=message, decisions=decisions)
