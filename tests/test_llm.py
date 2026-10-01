@@ -123,6 +123,48 @@ def test_generate_skill_via_provider():
         httpd.server_close()
 
 
+def test_llm_disables_thinking_by_default():
+    """The title/description author sends reasoning_effort:none so a reasoning
+    model answers the short JSON directly (its CoT otherwise eats the 128-token
+    reply budget and leaves `content` empty)."""
+    httpd, base = _fake_server('{"title": "x", "description": "y"}')
+    try:
+        LLMClient(base_url=base, model="test", timeout=10).chat(
+            [{"role": "user", "content": "name this"}]
+        )
+        assert httpd.RequestHandlerClass.received[0]["reasoning_effort"] == "none"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_llm_thinking_can_be_re_enabled():
+    httpd, base = _fake_server('{"title": "x", "description": "y"}')
+    try:
+        LLMClient(base_url=base, model="test", timeout=10, disable_thinking=False).chat(
+            [{"role": "user", "content": "name this"}]
+        )
+        assert "reasoning_effort" not in httpd.RequestHandlerClass.received[0]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_codegen_keeps_thinking():
+    """Codegen wants the chain-of-thought: the knob must not leak into it."""
+    from semif_agent.codegen import CodegenClient
+
+    httpd, base = _fake_server("def predict(ctx, request):\n    pass\n")
+    try:
+        CodegenClient(base_url=base, model="test", timeout=10).chat(
+            [{"role": "user", "content": "write a body"}]
+        )
+        assert "reasoning_effort" not in httpd.RequestHandlerClass.received[0]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_unreachable_endpoint_raises_llm_error():
     client = LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
     with pytest.raises(LLMError):

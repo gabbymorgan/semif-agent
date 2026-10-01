@@ -88,6 +88,13 @@ class OpenAICompatClient:
     `frequency_penalty` are per-`chat` overridable; the `generate_skill_body`
     escalation ladder bumps presence toward the card's max (2.0) and lowers
     temperature on retries. `max_attempts` bounds that ladder (default 3).
+
+    `disable_thinking` sends `reasoning_effort: "none"` so a reasoning model
+    answers directly instead of spending the (short) reply budget on hidden
+    chain-of-thought. It is off by default because codegen *wants* the
+    reasoning; the `llm` title/description author turns it on. Ollama honors it
+    on the `/v1` compat endpoint (its native `think:false` is not plumbed
+    through `/v1`).
     """
 
     error_class = ProviderError
@@ -117,6 +124,7 @@ class OpenAICompatClient:
         presence_penalty: float = 1.5,
         frequency_penalty: float = 0.2,
         max_attempts: int = 3,
+        disable_thinking: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -139,6 +147,7 @@ class OpenAICompatClient:
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.max_attempts = max_attempts
+        self.disable_thinking = disable_thinking
         self._window: int | None = None
 
     def chat(
@@ -169,6 +178,8 @@ class OpenAICompatClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.disable_thinking:
+            payload["reasoning_effort"] = "none"
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         body = json.dumps(payload).encode("utf-8")

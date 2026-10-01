@@ -447,6 +447,21 @@ CLI, unit tests (24) + box integration tests (2).
   that model is pulled; `config.json` `llm.base_url` points here.
 - `bootstrap.sh` installs **no ollama**: it expects the target box to already
   run one for `llm` (and pulls `llm.model` into it), while codegen is remote.
+- **The local `llm` model is a reasoning model — thinking must be off.** The
+  default `qwen3.5:4b` has ollama's `thinking` capability: it emits hidden
+  chain-of-thought and puts the answer in `content`. Through the `/v1` compat
+  endpoint the CoT consumes the entire reply budget, so
+  `generate_category`/`generate_skill`'s `max_tokens=128` returns
+  `finish_reason: length` with `content: ""` → `JSONDecodeError` and a traced
+  `draft_failed` (no category/skill is ever authored — the whole create branch
+  is silently dead). `LLMClient` now sends `reasoning_effort: "none"`
+  (`llm.disable_thinking`, **default on**) so the model answers the ~30-token
+  JSON directly (~2.5s). Ollama's native `think:false` is **not** plumbed
+  through `/v1` (silently ignored), and `/no_think` in the prompt is ignored
+  too; only `reasoning_effort` works there. Codegen *wants* the reasoning, so
+  the knob is `llm`-only — `CodegenClient` never sets it. Unbounded (no
+  `max_tokens`) does not help: the model loops on this prompt (2048 tokens of
+  reasoning, still empty `content`, 3+ min).
 
 ### jarvis (staging)
 

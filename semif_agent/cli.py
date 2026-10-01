@@ -83,6 +83,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         top_p=float(llm_cfg.get("top_p", 0.9)),
         presence_penalty=float(llm_cfg.get("presence_penalty", 0.0)),
         frequency_penalty=float(llm_cfg.get("frequency_penalty", 0.0)),
+        disable_thinking=bool(llm_cfg.get("disable_thinking", True)),
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))

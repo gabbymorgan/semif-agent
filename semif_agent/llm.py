@@ -26,6 +26,13 @@ class LLMClient(OpenAICompatClient):
     Short JSON replies, so the defaults are conservative: low temperature, no
     presence penalty, a modest timeout, and single-shot generation. Every value
     is overridable from the `llm` block in `config.json`.
+
+    `disable_thinking` defaults **on**: the small local model is often a
+    reasoning model (e.g. `qwen3.5:4b`) whose hidden chain-of-thought consumes
+    the short reply budget and leaves `content` empty — the same cap problem
+    codegen documents, but here the reply is a ~30-token JSON object, so the
+    thinking is pure overhead. Set `llm.disable_thinking: false` for a
+    non-reasoning endpoint that rejects the parameter.
     """
 
     error_class = LLMError
@@ -54,6 +61,7 @@ class LLMClient(OpenAICompatClient):
         top_p: float = 0.9,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
+        disable_thinking: bool = True,
     ):
         super().__init__(
             base_url=base_url,
@@ -76,6 +84,7 @@ class LLMClient(OpenAICompatClient):
             top_p=top_p,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
+            disable_thinking=disable_thinking,
         )
 
     @staticmethod

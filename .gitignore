@@ -15,3 +15,5 @@ config.json
 # Machine-specific experiments/recipes (GPU offload probe, benchmark harness).
 # Deliberately not part of the shipped agent.
 local/
+*.egg-info/
+*.bak.*
