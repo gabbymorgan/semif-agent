@@ -14,11 +14,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from .dream import dream as run_dream
 from .codegen import CodegenClient
+from .console import (
+    OPENCODE_BASE_URL,
+    ConsoleCodegenClient,
+    ConsoleLLMClient,
+)
 from .decisions import DecisionRequest, Option
 from .engine import EngineConfig, EngineUnavailable, SemIfEngine
 from .llm import LLMClient
@@ -43,6 +49,41 @@ _PATH_DEFAULTS = {
 def _anchor_path(value: str) -> str:
     path = Path(value)
     return str(path if path.is_absolute() else REPO_ROOT / path)
+
+
+def _resolve_api_key(cfg: dict) -> str:
+    """Service-account key for an authenticated provider.
+
+    A literal `api_key` wins; otherwise `api_key_env` names an environment
+    variable (preferred, so the secret never lands in config.json).
+    """
+    key = cfg.get("api_key") or ""
+    if key:
+        return str(key)
+    env = cfg.get("api_key_env")
+    if env:
+        return os.environ.get(str(env), "")
+    return ""
+
+
+def _provider_endpoint(cfg: dict, default_base: str) -> dict:
+    """Endpoint kwargs shared by the llm/codegen clients.
+
+    `provider` selects the class (`opencode` → the Console client) and the base
+    URL default: an explicit `base_url` always wins, else the Console URL for
+    `opencode` and `default_base` (ollama) otherwise. Auth comes from
+    `api_key`/`api_key_env`; `extra_headers` passes through for custom schemes.
+    """
+    provider = str(cfg.get("provider", "ollama") or "ollama").lower()
+    base_url = cfg.get("base_url") or (
+        OPENCODE_BASE_URL if provider == "opencode" else default_base
+    )
+    return {
+        "base_url": base_url,
+        "api_key": _resolve_api_key(cfg),
+        "extra_headers": cfg.get("extra_headers") or None,
+        "user_agent": cfg.get("user_agent"),
+    }
 
 
 def load_config(path: str = "config.json") -> dict:
@@ -71,8 +112,11 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         )
     )
     llm_cfg = config.get("llm", {}) or {}
-    llm = LLMClient(
-        base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
+    llm_provider = str(llm_cfg.get("provider", "ollama") or "ollama").lower()
+    llm_cls = ConsoleLLMClient if llm_provider == "opencode" else LLMClient
+    llm_endpoint = _provider_endpoint(llm_cfg, "http://localhost:11434/v1")
+    llm = llm_cls(
+        base_url=llm_endpoint["base_url"],
         model=llm_cfg.get("model", "qwen2.5:3b"),
         timeout=float(llm_cfg.get("timeout", 600.0)),
         stream=bool(llm_cfg.get("stream", False)),
@@ -84,15 +128,24 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         presence_penalty=float(llm_cfg.get("presence_penalty", 0.0)),
         frequency_penalty=float(llm_cfg.get("frequency_penalty", 0.0)),
         disable_thinking=bool(llm_cfg.get("disable_thinking", True)),
+        api_key=llm_endpoint["api_key"],
+        extra_headers=llm_endpoint["extra_headers"],
+        user_agent=llm_endpoint["user_agent"],
     )
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     codegen_cfg = config.get("codegen", {})
     deg_cfg = codegen_cfg.get("degeneration", {}) or {}
-    codegen = CodegenClient(
-        base_url=codegen_cfg.get(
-            "base_url", config.get("llm", {}).get("base_url", "http://localhost:11434/v1")
-        ),
+    codegen_provider = str(codegen_cfg.get("provider", "ollama") or "ollama").lower()
+    codegen_cls = (
+        ConsoleCodegenClient if codegen_provider == "opencode" else CodegenClient
+    )
+    codegen_endpoint = _provider_endpoint(
+        codegen_cfg,
+        config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
+    )
+    codegen = codegen_cls(
+        base_url=codegen_endpoint["base_url"],
         model=codegen_cfg.get("model", "qwen38-iq3s"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=bool(codegen_cfg.get("stream", False)),
@@ -113,6 +166,9 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         presence_penalty=float(codegen_cfg.get("presence_penalty", 1.5)),
         frequency_penalty=float(codegen_cfg.get("frequency_penalty", 0.2)),
         max_attempts=int(codegen_cfg.get("max_attempts", 3)),
+        api_key=codegen_endpoint["api_key"],
+        extra_headers=codegen_endpoint["extra_headers"],
+        user_agent=codegen_endpoint["user_agent"],
     )
 
     def make_degeneration_check(run_id: str):

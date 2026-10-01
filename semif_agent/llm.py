@@ -62,6 +62,9 @@ class LLMClient(OpenAICompatClient):
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         disable_thinking: bool = True,
+        api_key: str = "",
+        extra_headers: dict[str, str] | None = None,
+        user_agent: str | None = None,
     ):
         super().__init__(
             base_url=base_url,
@@ -85,6 +88,9 @@ class LLMClient(OpenAICompatClient):
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
             disable_thinking=disable_thinking,
+            api_key=api_key,
+            extra_headers=extra_headers,
+            user_agent=user_agent,
         )
 
     @staticmethod

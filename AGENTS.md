@@ -133,8 +133,19 @@ llm.py          small OpenAI-compatible provider (LLMClient) that authors a
                 is shared from provider.py; `_parse_json` is also borrowed by the
                 authoring parsers
 provider.py    shared OpenAI-compatible chat transport (OpenAICompatClient:
-                SSE stream, token budget, idle watchdog, degeneration hook)
+                SSE stream, token budget, idle watchdog, degeneration hook,
+                optional `api_key` bearer auth + `extra_headers`/`user_agent`,
+                and `query_context` to skip the ollama /api/show probe)
                 subclassed by llm.LLMClient and codegen.CodegenClient
+console.py      OpenCode Console provider: OpenCodeConsoleClient + the
+                ConsoleLLMClient / ConsoleCodegenClient endpoint subclasses.
+                Hosted, authenticated OpenAI-compatible Chat Completions API
+                (https://opencode.ai/inference/openai/v1); bearer key, skips the
+                ollama probe, always sends a User-Agent (the gateway 403s
+                urllib's default Python-urllib/<ver>), and forces
+                disable_thinking off (the gateway 400s reasoning_effort).
+                Selected via the llm/codegen `provider` key
+                ("opencode" vs "ollama").
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
@@ -538,6 +549,30 @@ CLI, unit tests (24) + box integration tests (2).
   IQ3_S GGUF — huge/slow). Title + description for new skills come from the
   separate small `llm` provider (its own endpoint/model, shared transport in
   `provider.py`); only the runnable code body uses codegen.
+- **Alternate hosted provider: OpenCode Console** (`console.py`). Either
+  endpoint can run against the hosted, authenticated OpenAI-compatible Console
+  inference API instead of local ollama: set `llm.provider` / `codegen.provider`
+  to `"opencode"` (default `"ollama"`), set `model` to a **Chat Completions**
+  family id (`kimi-k2.7-code`, `glm-5.3`, `deepseek-v4.1-flash`, `qwen3.8-max`,
+  the free models, …), and give `api_key` (literal) or `api_key_env` (env var
+  name — preferred). `build_scheduler` maps `"opencode"` → `ConsoleLLMClient` /
+  `ConsoleCodegenClient`, which keep the existing error contracts
+  (`LLMError` / `CodegenError` / `DegenerationError`) and the same sampler
+  defaults. The `OpenAICompatClient` transport already speaks the Console's SSE
+  shape (`delta.content` + `delta.reasoning_content` + `include_usage` +
+  `[DONE]`); the Console subclass adds bearer auth, defaults the base URL to
+  `https://opencode.ai/inference/openai/v1`, and sets `query_context=False` so no
+  ollama `/api/show` probe is sent. **It always sends a `User-Agent`** — the
+  Console gateway returns HTTP 403 for urllib's default `Python-urllib/<ver>`
+  (urllib does not send one; it sends its default, which is blocked) — override
+  with `user_agent` if desired. The Console `llm` client also forces
+  `disable_thinking` off: `LLMClient` sends `reasoning_effort: "none"` (an
+  ollama-compat knob) and the Console gateway rejects that parameter with HTTP
+  400. Only the Chat Completions family is drop-in;
+  Claude / OpenAI-Responses / Gemini models use different wire formats and need
+  their own adapters. The Console's **Jev** (`/zen/v1/systemone`) is a
+  probability/decision evaluator — do NOT wire it into routing/assessment; SemIf
+  alone decides.
 - **Do NOT cap `max_tokens`** on the codegen call. qwen38-iq3s reasons first
   and a cap truncates the hidden reasoning, leaving `content` empty
   (`finish_reason: length`) and the body write fails with "skill body is

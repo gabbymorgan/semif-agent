@@ -95,11 +95,21 @@ class OpenAICompatClient:
     reasoning; the `llm` title/description author turns it on. Ollama honors it
     on the `/v1` compat endpoint (its native `think:false` is not plumbed
     through `/v1`).
+
+    `api_key` (when set) is sent as `Authorization: Bearer <key>` on every
+    request — the OpenCode Console inference API and most hosted
+    OpenAI-compatible gateways require it. `extra_headers` are merged on top
+    (custom auth schemes, routing hints) and `user_agent` overrides the default
+    client string. `query_context` gates the ollama `/api/show` probe: a
+    hosted/non-ollama endpoint (see `console.OpenCodeConsoleClient`) sets it
+    False so no stray `/api/show` request is sent and the window comes from
+    `context_window`/the default.
     """
 
     error_class = ProviderError
     degeneration_error_class = ProviderError
     label = "provider"
+    query_context = True
 
     def __init__(
         self,
@@ -125,6 +135,9 @@ class OpenAICompatClient:
         frequency_penalty: float = 0.2,
         max_attempts: int = 3,
         disable_thinking: bool = False,
+        api_key: str = "",
+        extra_headers: dict[str, str] | None = None,
+        user_agent: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -148,7 +161,29 @@ class OpenAICompatClient:
         self.frequency_penalty = frequency_penalty
         self.max_attempts = max_attempts
         self.disable_thinking = disable_thinking
+        self.api_key = api_key
+        self.extra_headers = dict(extra_headers or {})
+        self.user_agent = user_agent
         self._window: int | None = None
+
+    def _headers(self) -> dict[str, str]:
+        """Request headers: JSON content type plus optional auth/extra/UA.
+
+        A non-empty `api_key` becomes `Authorization: Bearer <key>` (required by
+        the OpenCode Console inference API and most hosted gateways);
+        `extra_headers` merge on top (last writer wins) and `user_agent`
+        overrides the library default. The ollama context probe uses the same
+        headers so an authenticated gateway never sees an unauthenticated
+        request.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.user_agent:
+            headers["User-Agent"] = self.user_agent
+        if self.extra_headers:
+            headers.update(self.extra_headers)
+        return headers
 
     def chat(
         self,
@@ -184,7 +219,7 @@ class OpenAICompatClient:
             payload["max_tokens"] = max_tokens
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"}
+            url, data=body, headers=self._headers()
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -213,7 +248,7 @@ class OpenAICompatClient:
         request = urllib.request.Request(
             url,
             data=json.dumps({"model": self.model}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
         try:
             with urllib.request.urlopen(
@@ -246,10 +281,15 @@ class OpenAICompatClient:
         return None
 
     def _context_window(self) -> int:
-        """Detected context window, queried once and cached."""
+        """Detected context window, queried once and cached.
+
+        `query_context=False` (hosted/non-ollama endpoints) skips the
+        `/api/show` probe entirely: the window is taken from `context_window`
+        config or `DEFAULT_CONTEXT_WINDOW`, so no stray request is sent.
+        """
         if self._window is not None:
             return self._window
-        window = self._query_context_window()
+        window = self._query_context_window() if self.query_context else None
         if window is None:
             window = (
                 int(self.context_window)
