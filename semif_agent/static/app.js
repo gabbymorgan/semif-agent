@@ -13,6 +13,7 @@ const state = {
   scrub: 0,
   flowSteps: [],
   answerFeedback: null,
+  pendingSubmit: null,
 };
 
 async function getJSON(url, opts) {
@@ -35,6 +36,13 @@ async function refreshAll() {
   if (state.selectedRunId && !state.runs.some((r) => r.run_id === state.selectedRunId)) {
     state.selectedRunId = null;
     state.selectedDecisionId = null;
+  }
+  const pending = state.pendingSubmit;
+  if (pending && pending.requestId && state.runs.some((r) => r.run_id === pending.requestId)) {
+    state.selectedRunId = pending.requestId;
+    state.selectedDecisionId = null;
+    state.scrub = 0;
+    state.pendingSubmit = null;
   }
   render();
 }
@@ -214,6 +222,10 @@ function renderFlow() {
   el.innerHTML = "";
 
   if (!run) {
+    if (state.pendingSubmit) {
+      renderPendingFlow(el);
+      return;
+    }
     const empty = document.createElement("div");
     empty.className = "muted";
     empty.textContent = "select a run from the timeline";
@@ -233,6 +245,45 @@ function renderFlow() {
     if (i > state.scrub) node.classList.add("dim");
     el.appendChild(node);
   }
+
+  if (run.decisions.length === 0 && runInFlight(run)) {
+    if (steps.length) el.appendChild(edge(steps[steps.length - 1].data));
+    el.appendChild(pendingIndicatorNode("decisions in process…"));
+  }
+}
+
+const RESTING_EVENTS = ["ran", "rejected", "dropped", "error", "assessed", "needs_input", "pending_abandoned"];
+
+function runInFlight(run) {
+  return !run.events.some((evt) => RESTING_EVENTS.includes(evt.kind));
+}
+
+function renderPendingFlow(el) {
+  const node = document.createElement("div");
+  node.className = "node event-node pending-request";
+  const kind = document.createElement("div");
+  kind.className = "evt-kind";
+  kind.textContent = "submitted";
+  node.appendChild(kind);
+  const body = document.createElement("div");
+  body.className = "node-question";
+  body.textContent = state.pendingSubmit.text;
+  node.appendChild(body);
+  el.appendChild(node);
+  el.appendChild(edge({ kind: "event" }));
+  el.appendChild(pendingIndicatorNode("decisions in process…"));
+}
+
+function pendingIndicatorNode(text) {
+  const node = document.createElement("div");
+  node.className = "node pending-indicator";
+  const dot = document.createElement("span");
+  dot.className = "spinner";
+  node.appendChild(dot);
+  const label = document.createElement("span");
+  label.textContent = text;
+  node.appendChild(label);
+  return node;
 }
 
 function edge(prev) {
@@ -776,6 +827,12 @@ $("#submit-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("#query-input").value.trim();
   if (!text) return;
+  $("#query-input").value = "";
+  state.pendingSubmit = { text, requestId: null };
+  state.selectedRunId = null;
+  state.selectedDecisionId = null;
+  state.scrub = 0;
+  render();
   try {
     const res = await getJSON("/api/submit", {
       method: "POST",
@@ -783,10 +840,15 @@ $("#submit-form").addEventListener("submit", async (e) => {
       body: JSON.stringify({ text }),
     });
     flash(`[${res.status}] ${res.detail}`);
+    if (res.request_id) {
+      state.pendingSubmit.requestId = res.request_id;
+    } else {
+      state.pendingSubmit = null;
+    }
   } catch (err) {
     flash(`submit failed: ${err.message}`);
+    state.pendingSubmit = null;
   }
-  $("#query-input").value = "";
   await refreshAll();
 });
 

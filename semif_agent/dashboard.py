@@ -236,13 +236,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with self.lock:
                 try:
                     body = self._read_json()
-                    status, detail = self.scheduler.submit(
+                    status, detail, request_id = self.scheduler.submit_request(
                         str(body.get("text", "")), source=str(body.get("source", "dashboard"))
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))
                     return
-            self._send(200, {"status": status, "detail": detail})
+            self._send(200, {"status": status, "detail": detail, "request_id": request_id})
             return
         if path == "/api/relabel":
             with self.lock:

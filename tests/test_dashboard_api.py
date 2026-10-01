@@ -156,6 +156,24 @@ def test_submit_without_engine_returns_fatal_json(tmp_path):
         server.close()
 
 
+def test_submit_returns_request_id_matching_trace(tmp_path):
+    """Submit hands the front end the request id so it can open the new run's
+    flow container and follow it as decisions land."""
+    scheduler = build_scheduler(tmp_path)
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/submit", {"text": "hello"})
+        assert status == 200
+        request_id = payload["request_id"]
+        assert request_id
+
+        status, trace = server.get("/api/trace")
+        assert status == 200
+        assert any(run["run_id"] == request_id for run in trace["runs"])
+    finally:
+        server.close()
+
+
 def test_relabel_roundtrip(tmp_path):
     scheduler = build_scheduler(tmp_path)
     seed_decision(scheduler.log)

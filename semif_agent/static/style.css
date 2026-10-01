@@ -317,6 +317,31 @@ select {
   50% { opacity: 0.35; }
 }
 
+/* ---------- pending submit ---------- */
+
+.node.pending-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  color: var(--warn);
+  font-size: 12px;
+  border-style: dashed;
+  cursor: default;
+}
+
+.node.pending-indicator:hover { border-color: var(--line); }
+
+.pending-indicator .spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: writing-pulse 1.2s ease-in-out infinite;
+}
+
+.node.event-node.pending-request { border-left: 3px solid var(--accent); }
+
 /* ---------- inspector / tree / status ---------- */
 
 .right { border-right: none; }
