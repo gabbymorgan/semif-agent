@@ -133,6 +133,27 @@ def test_contract_directs_runner_provided_data():
     assert "internal/mock data model" not in text
 
 
+def test_contract_directs_request_arguments_and_output():
+    """CODEGEN.md must steer the body writer to derive per-request arguments
+    from the query and to return the real result — the difference between a
+    body that merely runs and one that turns a query into the desired output."""
+    text = read_skill_contract()
+    assert "Turning the request into arguments" in text
+    assert "Producing the result (output)" in text
+    assert "request.text" in text
+    assert "per-request" in text
+    assert "new_state" in text
+    assert "No work at import time" in text
+
+
+def test_body_directives_require_query_arguments_and_output():
+    """The prompt directives (used by the first, retry, and regen prompts) must
+    echo the query->arguments and real-output requirements, not just CODEGEN.md."""
+    assert "request.text" in BODY_DIRECTIVES
+    assert "per-request" in BODY_DIRECTIVES
+    assert "new_state" in BODY_DIRECTIVES
+
+
 def test_testgen_contract_owns_mocking():
     """Mocking/testing has its own contract: TESTGEN.md. It must define the
     flat semantic contract shape and forbid structure/type declarations."""

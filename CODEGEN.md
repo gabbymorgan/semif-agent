@@ -87,6 +87,51 @@ CONTRACT = {
   `CONTRACT`; the body implements whatever type safety it needs. It is for the
   human and SemIf only.
 
+### Turning the request into arguments
+
+`request.text` is the user's query — the thing the human actually asked for. A
+skill that turns queries into outputs must **read `request.text`** and derive
+from it the action's **per-request arguments**: the recipient, the subject or
+message body, the date or time range, the search terms, the target, the filter,
+the filename. Do not ignore the query and do a fixed thing.
+
+There are exactly two lanes of values, and they must not blur:
+
+- **Per-request arguments** come from `request.text`. They change on every
+  request. Never declare them in `CONTRACT`, never ask the human for them, and
+  never embed them as constants.
+- **Operational values** — endpoints, accounts, credentials, CLI paths, and
+  stable defaults — come from `CONTRACT` -> `ctx.config`. See "Data contract".
+
+When the query names a target that maps onto a set the service exposes
+(contacts, calendars, folders, files), resolve it with a SemIf sub-decision over
+the real candidate set, not by hand — see "Candidate selection". When a required
+argument is missing or genuinely ambiguous and no candidate set can resolve it,
+return `needs_input` (below); do not invent a value.
+
+```python
+# The recipient is a per-request argument: read it from the query, then resolve
+# it against the real contact list with a SemIf sub-decision.
+matches = [c for c in contacts if c["display_name"].lower() in request.text.lower()]
+if len(matches) == 1:
+    recipient = matches[0]["id"]
+elif matches:
+    decision = DecisionRequest(
+        state=request.text,
+        question="Which contact should the message go to?",
+        options=[Option(c["id"], c["display_name"]) for c in matches],
+    )
+    result = ctx.engine.call(decision)
+    decisions.append((decision, result))
+    recipient = result.selected
+else:
+    return ActionResult(
+        action_log="no contact matched the request",
+        new_state=request.text,
+        needs_input="Which contact should I message?",
+    )
+```
+
 ### Integration declaration
 
 Every body defines a module-level `INTEGRATION` dict: the real system this
@@ -139,6 +184,33 @@ return ActionResult(..., decisions=[(decision, result)])
 - Include any configured default (a value read from `ctx.config`) as one of the
   options, so the request can override the stored default.
 
+### Producing the result (output)
+
+A skill exists to turn the query into an **output the human wants**. Both
+strings on `ActionResult` carry that output and must reflect what really
+happened:
+
+- `action_log` is the human-readable record of the run. The `assess:outcome`
+  SemIf decision judges the run from it (together with the goal and the resolved
+  inputs), and the deterministic run summary is built from it. Write what the
+  service actually returned: the message that was read, the id/reference of the
+  thing that was created, the status code and error text of a failure.
+- `new_state` is the run's resulting observation — the state the agent carries
+  forward. For a read/query skill it is the retrieved data itself (the message
+  body, the event, the value); for an action skill it is a short report of what
+  was done (recipient, id, timestamp).
+
+Rules:
+
+- **Return the real result.** A read/query skill returns the data it fetched; an
+  action skill reports the service's real response. A generic "done" that omits
+  the result is a broken output.
+- **Never an empty or placeholder output.** If there is genuinely nothing (empty
+  inbox, no matching event), say so explicitly — that is a real result.
+- **Never claim success you did not observe.** If the action failed, put the
+  real failure in `action_log` and set `new_state` back to `request.text` (see
+  the hard requirements).
+
 ### Rules (hard requirements)
 
 - **Perform the real action.** If the skill's purpose involves an external
@@ -184,6 +256,14 @@ return ActionResult(..., decisions=[(decision, result)])
 - **Write files under configured data dirs only** (e.g. the directory named by
   a config variable such as `ctx.config["output_dir"]`), never anywhere else on
   disk.
+- **No work at import time.** The module is imported when the skill loads and
+  again by its test; keep module scope to constants and function definitions. Do
+  not call the network, read files, or touch `ctx` at import.
+- **`act` is single-phase and re-runs from the top.** After a `needs_input`
+  pause the human's answer arrives on `request.user_input` and `act` is invoked
+  again from the beginning — re-derive the query and config, consume
+  `request.user_input`, and do not re-ask a question you already have an answer
+  for.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.
 - **Names match the manifest.** The module is imported as its manifest name;
   the function is `act` exactly.
@@ -262,67 +342,89 @@ A generated skill is accepted only if:
 3. Its body imports nothing outside the stdlib and the agent package.
 4. It uses `ctx.engine` (never mocks) and returns proper `ActionResult` types.
 5. It is single-purpose and does not duplicate an existing category leaf.
-6. `CONTRACT` is present, flat, and every key is read from `ctx.config`;
-   optional values are read with `.get`.
-7. Every required operational value it needs is declared in `CONTRACT` — nothing
+6. It derives its per-request arguments from `request.text` — resolving a target
+   against a real candidate set with a SemIf sub-decision when one exists —
+   rather than ignoring the query or hardcoding values.
+7. `CONTRACT` is present, flat, and every key is read from `ctx.config`;
+   optional values are read with `.get`. No per-request argument is a contract
+   key.
+8. Every required operational value it needs is declared in `CONTRACT` — nothing
    is embedded, fabricated, or asked of the human.
-8. If its purpose is an external action, `act` performs the real operation via
-   the configured service/transport (no simulated success, no draft-by-default)
-   and reports real failures honestly.
-9. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
-   and is consistent with the body's `ctx.config` reads and behavior.
-10. If it is a messaging skill, it uses a bridge service over HTTP (never a
+9. It returns the real result in `new_state` (and a truthful `action_log`) — the
+   fetched data or the service's real response, never an empty or placeholder
+   output.
+10. If its purpose is an external action, `act` performs the real operation via
+    the configured service/transport (no simulated success, no draft-by-default)
+    and reports real failures honestly.
+11. `INTEGRATION` is present, flat, string-valued, uses the transport vocabulary,
+    and is consistent with the body's `ctx.config` reads and behavior.
+12. It does no network, file, or engine work at import time.
+13. If it is a messaging skill, it uses a bridge service over HTTP (never a
     service's native protocol), resolves recipients with a SemIf sub-decision,
     and sends only on explicit user intent.
 
 ## Worked example
 
-A skill that checks a service's health over HTTP — for real, with the endpoint
-and token supplied by the runner:
+A skill that tracks a parcel over HTTP — for real. It reads the tracking number
+out of the query (a per-request argument), uses the endpoint and token supplied
+by the runner, performs the real lookup, and returns the service's real result:
 
 ```python
 import json
+import re
 import urllib.error
 import urllib.request
 
 from semif_agent.skills import ActionResult
 
 INTEGRATION = {
-    "service": "status_page",
+    "service": "parcel_tracking",
     "transport": "http",
-    "config_vars": ["service_url", "service_token"],
+    "config_vars": ["tracking_api_url", "tracking_api_token"],
 }
 
 CONTRACT = {
-    "service_url": "URL of the service status endpoint to check.",
-    "service_token": "Bearer token for the status endpoint, if it requires one.",
+    "tracking_api_url": "Base URL of the parcel-tracking API, e.g. https://api.example.org.",
+    "tracking_api_token": "Bearer token for the tracking API, if it requires one.",
 }
 
+
 def act(ctx, request):
-    url = ctx.config["service_url"]
-    token = ctx.config.get("service_token", "")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            status = response.status
-            payload = json.loads(response.read().decode("utf-8"))
+    # A per-request argument: the tracking number comes from the query, not config.
+    match = re.search(r"\b[A-Z]{2}\d{9}[A-Z]{2}\b", request.text or "")
+    if match is None:
         return ActionResult(
-            action_log=f"status_page: {url} is {payload.get('status', 'unknown')} (HTTP {status}).",
-            new_state=f"{url} status: {payload.get('status', 'unknown')}",
+            action_log="parcel_tracking: no tracking number found in the request",
+            new_state=request.text,
+            needs_input="What is the tracking number?",
         )
+    tracking_id = match.group(0)
+    base = ctx.config["tracking_api_url"].rstrip("/")
+    token = ctx.config.get("tracking_api_token", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"{base}/track/{tracking_id}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return ActionResult(
-            action_log=f"status_page: {url} returned HTTP {exc.code}: {exc.reason}.",
-            new_state=f"status check failed: HTTP {exc.code}",
+            action_log=f"parcel_tracking: {tracking_id} lookup returned HTTP {exc.code}: {exc.reason}",
+            new_state=request.text,
         )
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         return ActionResult(
-            action_log=f"status_page: could not reach {url}: {exc}.",
+            action_log=f"parcel_tracking: could not reach {url}: {exc}",
             new_state=request.text,
         )
+    status = payload.get("status", "unknown")
+    report = f"Parcel {tracking_id}: {status}"
+    if payload.get("location"):
+        report += f" ({payload['location']})"
+    return ActionResult(action_log=report, new_state=report)
 ```
 
-Write skill bodies in this shape: declare `INTEGRATION` and `CONTRACT`, perform
-the real operation in `act`, keep both stdlib-only, read data from `ctx.config`,
-SemIf any candidate set, and return the proper types.
+Write skill bodies in this shape: read the request and derive the action's
+arguments, declare `INTEGRATION` and `CONTRACT`, perform the real operation in
+`act`, keep both stdlib-only, read operational data from `ctx.config`, SemIf any
+candidate set, and return the real result in `action_log` / `new_state`.
