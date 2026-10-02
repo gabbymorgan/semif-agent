@@ -1267,10 +1267,33 @@ def _sequenced_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
 
-def test_chat_payload_carries_sampler_defaults():
+def test_chat_omits_sampler_params_by_default():
+    """Sampler parameters are opt-in: an unset value is never sent, so the
+    server's model/Modelfile default applies."""
     httpd, base = _fake_server(GOOD_BODY)
     try:
         client = CodegenClient(base_url=base, model="test", timeout=10)
+        client.chat([{"role": "user", "content": "hi"}])
+        body = httpd.RequestHandlerClass.received[0]
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            assert key not in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_chat_sends_configured_sampler_params():
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            temperature=0.7,
+            top_p=0.85,
+            presence_penalty=1.5,
+            frequency_penalty=0.2,
+        )
         client.chat([{"role": "user", "content": "hi"}])
         body = httpd.RequestHandlerClass.received[0]
         assert body["temperature"] == 0.7
@@ -1282,9 +1305,22 @@ def test_chat_payload_carries_sampler_defaults():
         httpd.server_close()
 
 
-def test_generate_skill_body_escalates_sampler_on_retry(tmp_path):
-    """An invalid first parse must retry with the escalated sampler and a fresh
-    corrective prompt (context resets to SMART, no growing conversation)."""
+def test_chat_per_call_override_wins_over_client_default():
+    httpd, base = _fake_server(GOOD_BODY)
+    try:
+        client = CodegenClient(base_url=base, model="test", timeout=10, temperature=0.7)
+        client.chat([{"role": "user", "content": "hi"}], temperature=0.1)
+        body = httpd.RequestHandlerClass.received[0]
+        assert body["temperature"] == 0.1
+        assert "presence_penalty" not in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_generate_skill_body_retries_with_fresh_prompt(tmp_path):
+    """An invalid first parse must retry with a fresh corrective prompt (context
+    resets to SMART, no growing conversation) and no sampler override."""
     httpd, base = _sequenced_server(["this is not python at all", GOOD_BODY])
     try:
         client = CodegenClient(base_url=base, model="test", timeout=10)
@@ -1297,12 +1333,14 @@ def test_generate_skill_body_escalates_sampler_on_retry(tmp_path):
         reqs = httpd.RequestHandlerClass.received
         assert len(reqs) == 2, "one retry after the rejected first attempt"
         first, second = reqs
-        assert first["temperature"] == 0.7
-        assert first["presence_penalty"] == 1.5
-        assert second["temperature"] == 0.5
-        assert second["top_p"] == 0.85
-        assert second["presence_penalty"] == 2.0
-        assert second["frequency_penalty"] == 0.3
+        for body in (first, second):
+            for key in (
+                "temperature",
+                "top_p",
+                "presence_penalty",
+                "frequency_penalty",
+            ):
+                assert key not in body
         retry_user = second["messages"][1]["content"]
         assert "You are looping" in retry_user
         assert "probe" in retry_user

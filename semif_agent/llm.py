@@ -5,8 +5,8 @@ on the `llm` endpoint, deliberately separate from the larger `codegen` model
 that writes runnable bodies. It uses the same provider machinery as
 `CodegenClient` (`provider.OpenAICompatClient`): stdlib-only HTTP, a real SSE
 stream, a token budget, and an idle watchdog — just with its own endpoint,
-model, sampler defaults, and error type. `_parse_json` is also borrowed by the
-authoring parsers.
+model, sampler parameters, and error type. `_parse_json` is also borrowed by
+the authoring parsers.
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ class LLMError(ProviderError):
 class LLMClient(OpenAICompatClient):
     """Small-model author of skill/category titles + descriptions.
 
-    Short JSON replies, so the defaults are conservative: low temperature, no
-    presence penalty, a modest timeout, and single-shot generation. Every value
-    is overridable from the `llm` block in `config.json`.
+    Short JSON replies, so the timeout is modest and generation is single-shot.
+    No sampler parameters are sent unless the `llm` block in `config.json` sets
+    them: an unset `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`
+    is omitted so the server's model default applies. Every value is overridable
+    from config.
 
     `disable_thinking` defaults **on**: the small local model is often a
     reasoning model (e.g. `qwen3.5:4b`) whose hidden chain-of-thought consumes
@@ -57,10 +59,10 @@ class LLMClient(OpenAICompatClient):
         degeneration_interval: int = 8000,
         degeneration_window: int = 2000,
         degeneration_min_chars: int = 4000,
-        temperature: float = 0.2,
-        top_p: float = 0.9,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
         disable_thinking: bool = True,
         api_key: str = "",
         extra_headers: dict[str, str] | None = None,

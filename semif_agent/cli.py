@@ -66,6 +66,16 @@ def _resolve_api_key(cfg: dict) -> str:
     return ""
 
 
+def _opt_float(value) -> float | None:
+    """Config number for an opt-in provider parameter.
+
+    A missing/`null` key yields `None`, which the provider omits from the
+    request so the server's model default applies. A present value is coerced
+    to `float`.
+    """
+    return None if value is None else float(value)
+
+
 def _provider_endpoint(cfg: dict, default_base: str) -> dict:
     """Endpoint kwargs shared by the llm/codegen clients.
 
@@ -123,10 +133,10 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         idle_warn=float(llm_cfg.get("idle_warn", 30.0)),
         idle_timeout=float(llm_cfg.get("idle_timeout", 120.0)),
         context_window=float(llm_cfg.get("context_window", 0.0)),
-        temperature=float(llm_cfg.get("temperature", 0.2)),
-        top_p=float(llm_cfg.get("top_p", 0.9)),
-        presence_penalty=float(llm_cfg.get("presence_penalty", 0.0)),
-        frequency_penalty=float(llm_cfg.get("frequency_penalty", 0.0)),
+        temperature=_opt_float(llm_cfg.get("temperature")),
+        top_p=_opt_float(llm_cfg.get("top_p")),
+        presence_penalty=_opt_float(llm_cfg.get("presence_penalty")),
+        frequency_penalty=_opt_float(llm_cfg.get("frequency_penalty")),
         disable_thinking=bool(llm_cfg.get("disable_thinking", True)),
         api_key=llm_endpoint["api_key"],
         extra_headers=llm_endpoint["extra_headers"],
@@ -161,10 +171,10 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         degeneration_interval=int(deg_cfg.get("interval", 8000)),
         degeneration_window=int(deg_cfg.get("window", 2000)),
         degeneration_min_chars=int(deg_cfg.get("min_chars", 4000)),
-        temperature=float(codegen_cfg.get("temperature", 0.7)),
-        top_p=float(codegen_cfg.get("top_p", 0.85)),
-        presence_penalty=float(codegen_cfg.get("presence_penalty", 1.5)),
-        frequency_penalty=float(codegen_cfg.get("frequency_penalty", 0.2)),
+        temperature=_opt_float(codegen_cfg.get("temperature")),
+        top_p=_opt_float(codegen_cfg.get("top_p")),
+        presence_penalty=_opt_float(codegen_cfg.get("presence_penalty")),
+        frequency_penalty=_opt_float(codegen_cfg.get("frequency_penalty")),
         max_attempts=int(codegen_cfg.get("max_attempts", 3)),
         api_key=codegen_endpoint["api_key"],
         extra_headers=codegen_endpoint["extra_headers"],

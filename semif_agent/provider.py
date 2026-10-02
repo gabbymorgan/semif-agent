@@ -4,9 +4,9 @@ Both the small title/description author (`LLMClient` in `llm.py`) and the big
 skill-body writer (`CodegenClient` in `codegen.py`) use the same transport
 machinery: stdlib-only HTTP, a real SSE stream, a layered token budget, an idle
 watchdog, and an optional SemIf degeneration hook. This module holds that
-provider logic once; subclasses set `base_url`/`model`, their sampler defaults,
-and the error classes they raise so existing callers keep catching their own
-types.
+provider logic once; subclasses set `base_url`/`model`, their sampler
+parameters, and the error classes they raise so existing callers keep catching
+their own types.
 
 Stdlib-only and imports nothing from the agent's own modules, so `codegen.py`
 (which imports `skills.py`, which imports `llm.py`) can depend on it without a
@@ -49,7 +49,7 @@ class TokenBudget(NamedTuple):
 class OpenAICompatClient:
     """OpenAI-compatible chat provider shared by the authoring clients.
 
-    Subclasses set `base_url`/`model` (and their sampler defaults) and the
+    Subclasses set `base_url`/`model` (and their sampler parameters) and the
     error classes they raise: `error_class` for transport/parse/budget failures
     and `degeneration_error_class` for a watchdog abort, so existing callers
     keep catching their own types. `label` prefixes console diagnostics.
@@ -80,14 +80,13 @@ class OpenAICompatClient:
     It lets a SemIf continue/stop decision cut off a generation that is
     looping instead of converging, before it fills the context window.
 
-    Sampler defaults are the Qwen3.8 card's instruct-mode preset
-    (unsloth/Qwen3.8-27B-GGUF) used as an anti-repetition sampler, not to
-    toggle reasoning: a high `presence_penalty` is the loop cure, while the
-    prototype thinking-mode preset (`presence_penalty=0.0`) is what this
-    codegen model loops under. `temperature`/`top_p`/`presence_penalty`/
-    `frequency_penalty` are per-`chat` overridable; the `generate_skill_body`
-    escalation ladder bumps presence toward the card's max (2.0) and lowers
-    temperature on retries. `max_attempts` bounds that ladder (default 3).
+    Sampler parameters are **opt-in**: `temperature`/`top_p`/
+    `presence_penalty`/`frequency_penalty` default to `None` and a `None`
+    parameter is omitted from the request payload entirely, so the server's
+    model/Modelfile default applies. A caller that knows the right value for its
+    model sets it (constructor or per-`chat` override); this provider never
+    guesses a value on the user's behalf. `max_tokens` and `reasoning_effort`
+    work the same way: sent only when explicitly set.
 
     `disable_thinking` sends `reasoning_effort: "none"` so a reasoning model
     answers directly instead of spending the (short) reply budget on hidden
@@ -129,10 +128,10 @@ class OpenAICompatClient:
         degeneration_interval: int = 8000,
         degeneration_window: int = 2000,
         degeneration_min_chars: int = 4000,
-        temperature: float = 0.7,
-        top_p: float = 0.85,
-        presence_penalty: float = 1.5,
-        frequency_penalty: float = 0.2,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
         max_attempts: int = 3,
         disable_thinking: bool = False,
         api_key: str = "",
@@ -202,6 +201,13 @@ class OpenAICompatClient:
         payload: dict = {
             "model": self.model,
             "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        # Sampler parameters are opt-in: a per-call override wins, otherwise the
+        # constructor value; a None value is omitted entirely so the server's
+        # model/Modelfile default applies.
+        sampler = {
             "temperature": self.temperature if temperature is None else temperature,
             "top_p": self.top_p if top_p is None else top_p,
             "presence_penalty": (
@@ -210,9 +216,8 @@ class OpenAICompatClient:
             "frequency_penalty": (
                 self.frequency_penalty if frequency_penalty is None else frequency_penalty
             ),
-            "stream": True,
-            "stream_options": {"include_usage": True},
         }
+        payload.update({k: v for k, v in sampler.items() if v is not None})
         if self.disable_thinking:
             payload["reasoning_effort"] = "none"
         if max_tokens is not None:

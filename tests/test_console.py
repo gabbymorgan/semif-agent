@@ -33,6 +33,7 @@ class _FakeConsole(BaseHTTPRequestHandler):
     reply: str = "{}"
     models: list = ["kimi-k2.7-code", "glm-5.3"]
     calls: list = []
+    bodies: list = []
 
     def _record(self) -> None:
         type(self).calls.append(
@@ -52,7 +53,11 @@ class _FakeConsole(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
+        try:
+            type(self).bodies.append(json.loads(raw.decode("utf-8")))
+        except ValueError:
+            pass
         self._record()
         body = (
             _sse_frame({"choices": [{"delta": {"content": self.reply}}]})
@@ -69,7 +74,7 @@ class _FakeConsole(BaseHTTPRequestHandler):
 
 
 def _server(reply: str = "{}", models: list | None = None):
-    attrs = {"reply": reply, "calls": []}
+    attrs = {"reply": reply, "calls": [], "bodies": []}
     if models is not None:
         attrs["models"] = models
     handler = type("Handler", (_FakeConsole,), attrs)
@@ -101,7 +106,8 @@ def test_console_codegen_pins_defaults_and_error_contract():
     assert client.error_class is CodegenError
     assert client.degeneration_error_class is DegenerationError
     assert client.query_context is False
-    assert client.presence_penalty == 1.5  # CodegenClient sampler default preserved
+    # Sampler params are opt-in: unset means None, never sent to the Console.
+    assert client.presence_penalty is None
 
 
 def test_console_error_is_provider_error():
@@ -118,6 +124,38 @@ def test_chat_sends_bearer_and_skips_ollama_probe():
         # query_context=False → the only request is the chat completion.
         assert [c[1] for c in calls] == ["/chat/completions"]
         assert calls[0][2]["authorization"] == "Bearer secret"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_console_chat_omits_sampler_params_by_default():
+    httpd, base = _server(reply="{}")
+    try:
+        ConsoleLLMClient(base_url=base, api_key="k", model="m", timeout=10).chat(
+            [{"role": "user", "content": "hi"}]
+        )
+        body = httpd.RequestHandlerClass.bodies[0]
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            assert key not in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_console_chat_sends_configured_sampler_params():
+    httpd, base = _server(reply="{}")
+    try:
+        ConsoleCodegenClient(
+            base_url=base,
+            api_key="k",
+            model="m",
+            timeout=10,
+            presence_penalty=1.5,
+        ).chat([{"role": "user", "content": "hi"}])
+        body = httpd.RequestHandlerClass.bodies[0]
+        assert body["presence_penalty"] == 1.5
+        assert "temperature" not in body
     finally:
         httpd.shutdown()
         httpd.server_close()

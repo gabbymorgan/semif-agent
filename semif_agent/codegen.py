@@ -479,14 +479,6 @@ def integration_findings(integration: dict, source: str, code: str) -> list[str]
     return findings
 
 
-ESCALATED_SAMPLER = {
-    "temperature": 0.5,
-    "top_p": 0.85,
-    "presence_penalty": 2.0,
-    "frequency_penalty": 0.3,
-}
-
-
 def _retry_prompt(
     request: Request,
     category: str,
@@ -495,7 +487,7 @@ def _retry_prompt(
     error: Exception,
     requirements: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Fresh short prompt for an escalated retry.
+    """Fresh short prompt for a corrective retry.
 
     Not a growing conversation: the context resets to SMART (new request, tiny
     prompt) and the model is told in one line to stop looping and emit the
@@ -538,16 +530,15 @@ def generate_skill_body(
     degeneration_check: Callable[[str], str | None] | None = None,
     requirements: dict[str, str] | None = None,
 ) -> str:
-    """Author a skill body with the big model; escalate up to `max_attempts`.
+    """Author a skill body with the big model; retry up to `max_attempts`.
 
-    Attempt 1 uses the client's sampler defaults. Attempts >= 2 use the
-    escalated sampler (higher presence_penalty to suppress repeated thinking,
-    lower temperature for a decisive final answer) plus a fresh short prompt
-    that resets the context to SMART and tells the model to emit the final
-    Python now. Only an invalid parse (ValueError) escalates; a
-    DegenerationError or other CodegenError propagates immediately so the
-    scheduler can stub out gracefully. `requirements` (elicitation answers) are
-    fed to the first-attempt prompt only.
+    Every attempt uses the client's configured sampler parameters (or omits
+    them when unset). A rejected parse (ValueError) retries with a fresh short
+    prompt that resets the context to SMART and tells the model to emit the
+    final Python now. Only an invalid parse retries; a DegenerationError or
+    other CodegenError propagates immediately so the scheduler can stub out
+    gracefully. `requirements` (elicitation answers) are fed to the
+    first-attempt prompt only.
     """
     contract_text = contract if contract is not None else read_skill_contract()
     if client.stream:
@@ -573,7 +564,6 @@ def generate_skill_body(
                 messages,
                 max_tokens=max_tokens,
                 degeneration_check=degeneration_check,
-                **(ESCALATED_SAMPLER if attempt > 1 else {}),
             )
             return parse_skill_body(raw)
         except ValueError as exc:
@@ -734,7 +724,7 @@ def generate_elicitation(
     """Propose implementation questions + an integration hint with the big model.
 
     Returns an empty result when the model produced none or the reply failed to
-    parse after the escalation ladder — elicitation must never block authoring.
+    parse after the retry ladder — elicitation must never block authoring.
     """
     attempts = max(client.max_attempts, 1)
     last_error: Exception | None = None
@@ -748,10 +738,7 @@ def generate_elicitation(
                 request, category, draft, tree, last_error, max_questions=max_questions
             )
         try:
-            raw = client.chat(
-                messages,
-                **(ESCALATED_SAMPLER if attempt > 1 else {}),
-            )
+            raw = client.chat(messages)
             result = parse_elicitation_result(raw)
             return ElicitationResult(
                 result.questions[: max(0, max_questions)], result.integration
@@ -977,10 +964,7 @@ def generate_skill_tests(
             target=target,
         )
         try:
-            raw = client.chat(
-                messages,
-                **(ESCALATED_SAMPLER if attempt > 1 else {}),
-            )
+            raw = client.chat(messages)
             return parse_skill_test(raw)
         except ValueError as exc:
             last_error = exc
@@ -1058,7 +1042,7 @@ def regenerate_skill_body(
     """Rewrite a skill body whose test, review, or real run failed.
 
     Fresh prompt (context resets) carrying the raw evidence bundle and the
-    previous body; escalation ladder identical to generate_skill_body.
+    previous body; retry ladder identical to generate_skill_body.
     `reason_kind` labels the corrective context (`test`, `fidelity`, or
     `run_failure`). The bundle is handed through as-is — the caller includes
     requirements and the raw failure fields, never a paraphrase. A
@@ -1076,10 +1060,7 @@ def regenerate_skill_body(
             attempt_evidence, reason_kind=reason_kind,
         )
         try:
-            raw = client.chat(
-                messages,
-                **(ESCALATED_SAMPLER if attempt > 1 else {}),
-            )
+            raw = client.chat(messages)
             return parse_skill_body(raw)
         except ValueError as exc:
             last_error = exc

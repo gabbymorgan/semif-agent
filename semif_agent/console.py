@@ -47,7 +47,8 @@ class OpenCodeConsoleClient(OpenAICompatClient):
     Pins the Console defaults: bearer auth, the Console base URL, a Console
     label, and ``query_context = False`` (no ollama ``/api/show`` probe). The
     endpoint subclasses below reuse it via cooperative multiple inheritance so
-    they also keep ``LLMClient``/``CodegenClient`` sampler defaults.
+    they also keep ``LLMClient``/``CodegenClient`` sampler parameters (opt-in:
+    none are sent unless configured).
 
     A default ``User-Agent`` is always sent: the Console gateway rejects
     urllib's default ``Python-urllib/<ver>`` with HTTP 403. Pass ``user_agent``
@@ -91,9 +92,9 @@ class OpenCodeConsoleClient(OpenAICompatClient):
 class ConsoleLLMClient(OpenCodeConsoleClient, LLMClient):
     """Console-backed `llm` author (skill/category title + description).
 
-    Same conservative sampler defaults as ``LLMClient``; the Console transport
-    adds the bearer key and skips the ollama probe. Raises ``LLMError``
-    (unchanged contract).
+    Same opt-in sampler behavior as ``LLMClient`` (none sent unless configured);
+    the Console transport adds the bearer key and skips the ollama probe. Raises
+    ``LLMError`` (unchanged contract).
 
     ``disable_thinking`` is forced **off**: `LLMClient` sends
     ``reasoning_effort: "none"`` (an ollama-compat knob) and the Console

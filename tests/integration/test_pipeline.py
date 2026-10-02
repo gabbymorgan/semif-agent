@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from semif_agent.cli import build_scheduler, load_config
+from semif_agent.cli import _opt_float, build_scheduler, load_config
 from semif_agent.codegen import (
     CodegenClient,
     generate_skill_body,
@@ -306,6 +306,10 @@ def test_generate_skill_body_codegen(tmp_path):
         model=codegen_cfg.get("model", "qwen38-iq3s"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=True,
+        temperature=_opt_float(codegen_cfg.get("temperature")),
+        top_p=_opt_float(codegen_cfg.get("top_p")),
+        presence_penalty=_opt_float(codegen_cfg.get("presence_penalty")),
+        frequency_penalty=_opt_float(codegen_cfg.get("frequency_penalty")),
     )
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(

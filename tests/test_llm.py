@@ -123,6 +123,44 @@ def test_generate_skill_via_provider():
         httpd.server_close()
 
 
+def test_llm_omits_sampler_params_by_default():
+    """No sampler params are sent unless the `llm` config sets them, so the
+    server's model default applies."""
+    httpd, base = _fake_server('{"title": "x", "description": "y"}')
+    try:
+        LLMClient(base_url=base, model="test", timeout=10).chat(
+            [{"role": "user", "content": "name this"}]
+        )
+        body = httpd.RequestHandlerClass.received[0]
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            assert key not in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_llm_sends_configured_sampler_params():
+    httpd, base = _fake_server('{"title": "x", "description": "y"}')
+    try:
+        LLMClient(
+            base_url=base,
+            model="test",
+            timeout=10,
+            temperature=0.2,
+            top_p=0.9,
+            presence_penalty=0.0,
+            frequency_penalty=0.0,
+        ).chat([{"role": "user", "content": "name this"}])
+        body = httpd.RequestHandlerClass.received[0]
+        assert body["temperature"] == 0.2
+        assert body["top_p"] == 0.9
+        assert body["presence_penalty"] == 0.0
+        assert body["frequency_penalty"] == 0.0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_llm_disables_thinking_by_default():
     """The title/description author sends reasoning_effort:none so a reasoning
     model answers the short JSON directly (its CoT otherwise eats the 128-token

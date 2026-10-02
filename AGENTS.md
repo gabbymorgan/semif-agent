@@ -601,8 +601,9 @@ CLI, unit tests (24) + box integration tests (2).
   the free models, …), and give `api_key` (literal) or `api_key_env` (env var
   name — preferred). `build_scheduler` maps `"opencode"` → `ConsoleLLMClient` /
   `ConsoleCodegenClient`, which keep the existing error contracts
-  (`LLMError` / `CodegenError` / `DegenerationError`) and the same sampler
-  defaults. The `OpenAICompatClient` transport already speaks the Console's SSE
+  (`LLMError` / `CodegenError` / `DegenerationError`) and the same opt-in
+  sampler behavior (none sent unless configured). The `OpenAICompatClient`
+  transport already speaks the Console's SSE
   shape (`delta.content` + `delta.reasoning_content` + `include_usage` +
   `[DONE]`); the Console subclass adds bearer auth, defaults the base URL to
   `https://opencode.ai/inference/openai/v1`, and sets `query_context=False` so no
@@ -799,21 +800,21 @@ CLI, unit tests (24) + box integration tests (2).
   total wall-clock `timeout` is enforced while the stream is live (a
   continuously-streaming runaway is cut off), not only during idle gaps. The
   budget is a safety net, not the loop cure: qwen38-iq3s's reasoning routinely
-  exceeds even the relaxed cap before it settles on a body, which is why the
-  sampler (below) is the real fix.
-- **Sampler params + escalation.** `codegen.temperature` (default 0.7),
-  `top_p` (0.85), `presence_penalty` (1.5), `frequency_penalty` (0.2) are the
-  Qwen3.8 model card's instruct-mode preset used as an anti-repetition sampler,
-  not to toggle reasoning — a high `presence_penalty`, not greedy temperature,
-  is the loop cure, and the model's thinking-mode preset
-  (`presence_penalty=0.0`) is exactly what it loops under. Those four are
-  the only sampler knobs reachable via ollama's OpenAI-compat API;
-  `repeat_penalty`/`min_p`/`top_k` are Modelfile-only, so the per-request
-  `presence_penalty` (which overrides the Modelfile) is what actually stops the
-  loop and no Modelfile edit is needed. A rejected body retries with the
-  escalated sampler (presence 2.0 / temp 0.5) and a fresh short prompt that
-  resets the context to SMART; `max_attempts` (default 3) bounds the ladder,
-  then a graceful stub. Degeneration does **not** retry: the watchdog raises
+  exceeds even the relaxed cap before it settles on a body.
+- **Sampler params (opt-in).** `temperature`/`top_p`/`presence_penalty`/
+  `frequency_penalty` are **not sent by default**: a `None`/absent value is
+  omitted from the request so the server's model/Modelfile default applies. The
+  provider never guesses a value for the user — set one in the `llm`/`codegen`
+  config block (or per `chat` call) only when you know the right value for the
+  model. `config.example.json` ships explicit values as a starting point, so a
+  provisioned box still sends them. When configured, a high `presence_penalty`
+  (not greedy temperature) is the anti-repetition loop cure for qwen38-iq3s, and
+  those four are the only sampler knobs reachable via ollama's OpenAI-compat
+  API (`repeat_penalty`/`min_p`/`top_k` are Modelfile-only). There is **no
+  escalated preset**: a rejected body retries with a fresh short prompt that
+  resets the context to SMART and reuses the same (configured or omitted)
+  sampler params; `max_attempts` (default 3) bounds the ladder, then a graceful
+  stub. Degeneration does **not** retry: the watchdog raises
   `DegenerationError(CodegenError)`, which propagates straight to the graceful
   stub (retry-on-degeneration is left as an open decision).
 - **Degeneration watchdog.** `codegen.degeneration.{enabled, threshold=0.9,
