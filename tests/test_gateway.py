@@ -4,8 +4,8 @@ The gateway is the agent's command surface only. These tests exercise its own
 routing, authorization, and batching; parsing/accept/address live in
 `tests/test_simplex_ws.py`. The decision engine is never loaded and the LLM
 endpoint is unreachable, so scheduler calls degrade to errors — which is fine.
-The real `websockets` transport against a live `simplex-chat` daemon is a jarvis
-integration concern, not a dev-box unit test.
+The real `websockets` transport against a live `simplex-chat` daemon is a
+live-daemon integration concern, not a unit test.
 """
 
 import asyncio

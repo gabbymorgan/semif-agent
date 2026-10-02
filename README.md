@@ -28,8 +28,8 @@ A successful release of this could be defined by a single question: "Can I use t
 - [Features](#features)
 - [Repository layout](#repository-layout)
 - [Installation](#installation)
-  - [Option A: one-command staging box (`bootstrap.sh`)](#option-a-one-command-staging-box-bootstrapsh)
-  - [Option B: dev machine (stdlib only)](#option-b-dev-machine-stdlib-only)
+  - [Option A: one-command provisioning (`bootstrap.sh`)](#option-a-one-command-provisioning-bootstrapsh)
+  - [Option B: core only (stdlib)](#option-b-core-only-stdlib)
   - [Prerequisites: ollama models](#prerequisites-ollama-models)
   - [Configuration](#configuration)
 - [Running the agent](#running-the-agent)
@@ -176,7 +176,7 @@ worker. It is **asynchronous**, so the gate stays free while either model thinks
    gateway) defers to a question queue and the worker waits
    (`codegen.elicitation.wait_timeout`).
 3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
-   (`codegen`, default `qwen38-iq3s`) writes a single `act` against `SKILL.md`,
+   (`codegen`, your configured code-capable model) writes a single `act` against `SKILL.md`,
    reading every operational value from `ctx.config` and declaring `INTEGRATION`
    (service / transport / config_vars) plus its own flat `CONTRACT`
    (variable → description; every key must be read from `ctx.config`).
@@ -380,11 +380,12 @@ semif_agent/
 seeds/              committed starter skills (calendar, simplex)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
-tests/              stdlib unit tests + tests/integration (staging only)
+tests/              stdlib unit tests + tests/integration (real engine + LLM)
 SKILL.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
 AGENTS.md           the operational guide (read this before touching code)
 config.example.json per-machine config template
+local/              gitignored: this deployment's notes (hosts, addresses, models)
 ```
 
 ---
@@ -401,25 +402,27 @@ in the checkout.
 Two OpenAI-compatible endpoints (usually ollama), which may be on different
 machines:
 
-- **`codegen`** — the large model that writes skill bodies (e.g.
-  `qwen38-iq3s`, a 27B IQ3_S GGUF). This is slow and ideally on a beefier host.
-- **`llm`** — a small, fast model (e.g. `qwen3.5:4b`) that authors the title +
-  description of a newly created category/skill. Deliberately its own
-  endpoint/model, so it can stay local even when `codegen` is remote; it uses
-  the same provider transport (`provider.py`) and an unreachable endpoint is
-  graceful (the request is not re-dispatched), never fatal.
+- **`codegen`** — a large, code-capable model that writes skill bodies. This is
+  slow and ideally on a beefier host.
+- **`llm`** — a small, fast model that authors the title + description of a
+  newly created category/skill. Deliberately its own endpoint/model, so it can
+  stay local even when `codegen` is remote; it uses the same provider transport
+  (`provider.py`) and an unreachable endpoint is graceful (the request is not
+  re-dispatched), never fatal.
 
 The **decision engine is separate** and runs via llama.cpp CPU (or Vulkan if your
 build enables it), not ollama.
 
-### Option A: one-command staging box (`bootstrap.sh`)
+### Option A: one-command provisioning (`bootstrap.sh`)
 
 On a fresh Ubuntu machine, from a checkout of this repo:
 
 ```sh
 scripts/bootstrap.sh \
   --llm-url http://127.0.0.1:11434 \
-  --codegen-url http://192.168.8.181:11434
+  --codegen-url http://<codegen-host>:11434 \
+  --llm-model <small-model> \
+  --codegen-model <code-capable-model>
 ```
 
 The script is idempotent (every stage no-ops on existing state) and:
@@ -445,7 +448,7 @@ Useful flags: `--threads N`, `--public-dashboard`, `--copy-data SRC`,
 It installs **no ollama**; it expects one for `llm` and pulls `llm.model`,
 warning (never auto-pulling) if the remote codegen host is missing its model.
 
-### Option B: dev machine (stdlib only)
+### Option B: core only (stdlib)
 
 The core is dependency-free, so unit tests run anywhere:
 
@@ -483,12 +486,16 @@ Key blocks:
 | `simplex_chat` | pinned simplex-chat binary + gateway/forward ports |
 | `dashboard` | bind host/port |
 
+`llm.model` and `codegen.model` are **required** (no default): set each to a
+model its endpoint serves. A missing model fails fast at startup with a clear
+config error rather than sending a request to a model that isn't there.
+
 Runtime artifacts (`data/decisions.jsonl`, `data/runs.jsonl`,
 `data/categories.json`, `data/skills/`, `data/drafts/`) are gitignored too.
 
-> **Codegen timeout:** do not cap codegen `max_tokens`. The reasoning model
-> writes for 25–45 min; `codegen.timeout` defaults to 1200 s and the staging
-> config raises it to 3600 s.
+> **Codegen timeout:** do not cap codegen `max_tokens`. A reasoning codegen
+> model can write for 25–45 min; `codegen.timeout` defaults to 1200 s and a
+> per-machine config may raise it to 3600 s.
 
 ---
 
@@ -508,10 +515,10 @@ python -m semif_agent.cli gateway [--platform simplex] [--dashboard]
 python -m semif_agent.cli bridge [--name simplex]
 ```
 
-On a bootstrap box, use the venv and set `HF_HOME` to the checkout's cache:
+On a provisioned host, use the venv and set `HF_HOME` to the checkout's cache:
 
 ```sh
-REPO=~/repos/semif-agent
+REPO=<your-checkout>
 HF_HOME="$REPO/.runtime/hf" "$REPO/.runtime/venv/bin/python" -m semif_agent.cli run
 ```
 
@@ -652,14 +659,14 @@ committed seed never holds secrets.
 # anywhere, fast, stdlib only
 python3 -m pytest tests/ -q --ignore=tests/integration
 
-# staging box only: real SemIf + real ollama
-~/repos/semif-agent/.runtime/venv/bin/python -m pytest tests/integration -q -s
+# where real SemIf + a real ollama are available (run from the checkout root)
+./.runtime/venv/bin/python -m pytest tests/integration -q -s
 ```
 
 Unit tests use the `ScriptedEngine` double (`tests/conftest.py`) to drive
 scheduling mechanics without a GGUF; data-structure tests cover queue ordering,
 dream cost and contract serialization. Integration tests exercise the real
-engine + LLM end to end and take ~100 s on the staging box.
+engine + LLM end to end.
 
 **Fixtures are not the runtime.** Skill tests use real local endpoints (a
 loopback server, never a mock); a real run is the only proof an integration

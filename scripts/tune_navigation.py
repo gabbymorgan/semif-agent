@@ -13,12 +13,12 @@ Navigation is two-stage at both levels, and the guards are the create doors:
 This replays a hand-labeled eval set through the **real** decision engine and
 the **real** skill tree, measuring each guard's probability per request so the
 floors can be placed between the true matches and the true mismatches. Run it on
-a box with the pinned engine (jarvis):
+a host with the pinned engine:
 
     .runtime/venv/bin/python scripts/tune_navigation.py
     .runtime/venv/bin/python scripts/tune_navigation.py --level leaf --tau 0.6
 
-The tree is whatever the box currently has loaded (committed seeds + the runtime
+The tree is whatever the host currently has loaded (committed seeds + the runtime
 `data/skills/`), so an expectation naming a skill that is not present is
 reported as N/A rather than counted wrong. Labels are hand-written ground truth;
 self-labeled decision rows are not evidence. Nothing is written to the runtime

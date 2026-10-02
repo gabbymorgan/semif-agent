@@ -4,7 +4,7 @@ path when the engine is unavailable.
 
 No mocking: the async write test uses a real CodegenClient against a throwaway
 stdlib HTTP server (real endpoint, per the repo rule); engine-dependent success
-paths are exercised only by the box integration tests against the real decision
+paths are exercised only by the integration tests against the real decision
 model.
 """
 

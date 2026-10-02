@@ -4,7 +4,7 @@
 engine used ONLY by pure-stdlib unit tests of scheduling mechanics (pausing,
 resuming, routing, authoring). The real engine is the decision-maker in
 production and in the integration tests; this double exists so a mechanics test
-can drive the loop without loading a GGUF on the dev machine, exactly as a
+can drive the loop without loading a GGUF locally, exactly as a
 loopback HTTP server stands in for a live service elsewhere.
 
 It is not a mock of SemIf scoring: it answers each `DecisionRequest` with a

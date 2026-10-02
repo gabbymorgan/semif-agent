@@ -1,8 +1,8 @@
 """Skill code-body generation through an OpenAI-compatible API.
 
 The small `llm` provider authors a skill's title + description; writing the
-runnable body is a separate step: a larger OpenAI-compatible model (e.g.
-qwen38-iq3s on ollama) is prompted with the SKILL.md contract plus the request
+runnable body is a separate step: a larger OpenAI-compatible model (a
+code-capable model on your configured codegen endpoint) is prompted with the SKILL.md contract plus the request
 and the existing tree, and must reply with valid Python implementing `act` plus
 the `INTEGRATION` and `CONTRACT` module constants. The shared provider transport
 lives in `provider.py`.

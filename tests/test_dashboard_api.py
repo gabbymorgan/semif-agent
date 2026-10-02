@@ -2,7 +2,7 @@
 
 The scheduler is constructed with the lazy SemIfEngine (never loaded), so this
 runs anywhere without SemIf. Submit degrades to a JSON error, which is the
-expected behaviour on the thin dev box; relabel works against a seeded log.
+expected behaviour without an engine; relabel works against a seeded log.
 """
 
 import json
@@ -223,7 +223,7 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
         category="tracking",
         skill="track_live",
         description="Follow a package in real time.",
-        model="qwen38-iq3s",
+        model="test-codegen",
         contract_ref="a1b2c3d",
         contract_dirty=True,
     )
@@ -246,7 +246,7 @@ def test_skill_writing_and_created_events_in_payload(tmp_path):
         writing = next(e for e in run["events"] if e["kind"] == "skill_writing")
         assert writing["skill"] == "track_live"
         assert "real time" in writing["description"]
-        assert writing["model"] == "qwen38-iq3s"
+        assert writing["model"] == "test-codegen"
         assert writing["contract_ref"] == "a1b2c3d"
         assert writing["contract_dirty"] is True
         created = next(e for e in run["events"] if e["kind"] == "skill_created")

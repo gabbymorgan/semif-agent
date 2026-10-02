@@ -30,7 +30,7 @@ class LLMClient(OpenAICompatClient):
     from config.
 
     `disable_thinking` defaults **on**: the small local model is often a
-    reasoning model (e.g. `qwen3.5:4b`) whose hidden chain-of-thought consumes
+    reasoning model whose hidden chain-of-thought consumes
     the short reply budget and leaves `content` empty — the same cap problem
     codegen documents, but here the reply is a ~30-token JSON object, so the
     thinking is pure overhead. Set `llm.disable_thinking: false` for a

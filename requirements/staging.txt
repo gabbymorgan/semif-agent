@@ -5,7 +5,7 @@
 # never imports torch (it's lazy inside direct.score), and numpy 2.2.6 has no
 # cp314 wheel (source build fails). So semif-phase1 is installed with
 # `--no-deps` and exactly this set is brought in instead. The pins match the
-# proven guppy venv; huggingface-hub is pinned to 1.31.0 (semif-phase1's
+# proven staging venv; huggingface-hub is pinned to 1.31.0 (semif-phase1's
 # declared version) so the pip resolver stays quiet about it.
 numpy==2.3.5
 transformers==5.17.0

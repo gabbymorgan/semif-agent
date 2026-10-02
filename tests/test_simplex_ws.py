@@ -3,7 +3,7 @@
 `semif_agent.simplex_ws` is shared by the command gateway and the forwarding
 bridge, so its parsing/accept/address behavior is tested here, independent of
 either front end. The real `websockets` transport against a live daemon is a
-jarvis integration concern.
+live-daemon integration concern.
 """
 
 import asyncio

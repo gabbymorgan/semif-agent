@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Provision a new Ubuntu machine into a running semif-agent staging box.
+# Provision a new Ubuntu machine into a running semif-agent host.
 #
 # Idempotent: safe to rerun; every stage no-ops on already-provisioned state,
-# so it can also bootstrap a machine of unknown state. The small self-assessment
-# model runs on this machine's local ollama (bootstrap pulls it); only codegen
-# points at a remote ollama host (default: guppy). This script installs NO ollama.
+# so it can also bootstrap a machine of unknown state. The small
+# title/description model runs on this machine's local ollama (bootstrap pulls
+# it); codegen may point at a remote ollama host. This script installs NO ollama.
 #
 # Must be run from a semif-agent checkout (it reads pins from this checkout's
 # config.example.json); the checkout is used as-is and never re-cloned — only
 # the SemIf engine and the simplex-chat binary are fetched. Clone the agent
-# repo first (its SSH key must be registered on Gitea).
+# repo first (its SSH key must be registered on your git host).
 #
 # Every installation artifact lives INSIDE this checkout under .runtime/
 # (gitignored), so an end user can find and debug the whole stack in one tree:
@@ -26,16 +26,18 @@
 # truth; bump those and rerun to upgrade.
 #
 # Usage:
-#   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--threads N]
-#                        [--copy-data SRC] [--public-dashboard]
-#                        [--simplex-allowed-users CSV] [--simplex-home-channel X]
-#                        [--simplex-display-name NAME] [-h]
+#   scripts/bootstrap.sh --llm-url URL --codegen-url URL --llm-model MODEL
+#                        --codegen-model MODEL [--threads N] [--copy-data SRC]
+#                        [--public-dashboard] [--simplex-allowed-users CSV]
+#                        [--simplex-home-channel X] [--simplex-display-name NAME] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
 
 LLM_URL="http://127.0.0.1:11434"
-CODEGEN_URL="http://192.168.8.181:11434"
+CODEGEN_URL=""
+LLM_MODEL=""
+CODEGEN_MODEL=""
 THREADS=""
 COPY_DATA=""
 PUBLIC_DASHBOARD=0
@@ -47,9 +49,11 @@ usage() {
   sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo
   echo "  --llm-url URL                ollama API for the small title/description model (default: $LLM_URL; this machine)"
-  echo "  --codegen-url URL            ollama API for codegen skill bodies (default: $CODEGEN_URL)"
+  echo "  --codegen-url URL            ollama API for codegen skill bodies (required; may be remote)"
+  echo "  --llm-model MODEL            model the llm endpoint serves (required; pulled if the local ollama lacks it)"
+  echo "  --codegen-model MODEL        code-capable model the codegen endpoint serves (required)"
   echo "  --threads N                  engine threads for config.json (default: config.example value)"
-  echo "  --copy-data SRC              rsync SRC (e.g. abby@box:~/repos/semif-agent/data) to data/ — opt-in"
+  echo "  --copy-data SRC              rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
   echo "  --public-dashboard           bind dashboard to 0.0.0.0 instead of 127.0.0.1"
   echo "  --simplex-allowed-users CSV  comma-separated contactIds/display names the gateway accepts"
   echo "  --simplex-home-channel ID    gateway fallback channel for unsolicited messages"
@@ -62,6 +66,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --llm-url) LLM_URL="$2"; shift 2 ;;
     --codegen-url) CODEGEN_URL="$2"; shift 2 ;;
+    --llm-model) LLM_MODEL="$2"; shift 2 ;;
+    --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
     --threads) THREADS="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --public-dashboard) PUBLIC_DASHBOARD=1; shift ;;
@@ -96,7 +102,8 @@ fi
 # --- read pins from config.example.json ------------------------------------
 read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
   SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY \
-  SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY LLM_MODEL < <(
+  SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY EXAMPLE_LLM_MODEL \
+  EXAMPLE_CODEGEN_MODEL < <(
   python3 - "$EXAMPLE" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
@@ -118,6 +125,7 @@ print(
             str(s.get("forward_port", "")),
             str(s.get("forward_display_name", "")),
             str(cfg.get("llm", {}).get("model", "")),
+            str(cfg.get("codegen", {}).get("model", "")),
         ]
     )
 )
@@ -130,6 +138,23 @@ if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256"
 fi
 if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" || -z "$SIMPLEX_PORT" ]]; then
   echo "simplex_chat pins missing in $EXAMPLE (bin_url/sha256/port)" >&2
+  exit 1
+fi
+
+# Model names are deployment-specific and user-supplied: prefer the CLI flag,
+# else fall back to config.example.json. There is deliberately no default.
+LLM_MODEL="${LLM_MODEL:-$EXAMPLE_LLM_MODEL}"
+CODEGEN_MODEL="${CODEGEN_MODEL:-$EXAMPLE_CODEGEN_MODEL}"
+if [[ -z "$CODEGEN_URL" ]]; then
+  echo "--codegen-url is required (the ollama API for codegen skill bodies)" >&2
+  exit 1
+fi
+if [[ -z "$LLM_MODEL" ]]; then
+  echo "--llm-model is required (or set llm.model in config.example.json)" >&2
+  exit 1
+fi
+if [[ -z "$CODEGEN_MODEL" ]]; then
+  echo "--codegen-model is required (or set codegen.model in config.example.json)" >&2
   exit 1
 fi
 
@@ -256,10 +281,11 @@ fi
 echo "== writing config.json (llm -> $LLM_URL, codegen -> $CODEGEN_URL, runtime -> $RUNTIME)"
 python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$LLM_URL" "$CODEGEN_URL" \
   "$([ "$PUBLIC_DASHBOARD" = 1 ] && echo 0.0.0.0 || echo 127.0.0.1)" \
-  "$REPO_ROOT" "$SIMPLEX_ALLOWED_USERS" "$SIMPLEX_HOME_CHANNEL" "$SIMPLEX_DISPLAY" <<'PY'
+  "$REPO_ROOT" "$SIMPLEX_ALLOWED_USERS" "$SIMPLEX_HOME_CHANNEL" "$SIMPLEX_DISPLAY" \
+  "$LLM_MODEL" "$CODEGEN_MODEL" <<'PY'
 import json, os, sys
 (example, out, threads, llm_url, codegen_url, dash_host, repo,
- allowed_csv, home_channel, display) = sys.argv[1:]
+ allowed_csv, home_channel, display, llm_model, codegen_model) = sys.argv[1:]
 cfg = json.load(open(example))
 eng = cfg["engine"]
 runtime = os.path.join(repo, ".runtime")
@@ -272,7 +298,9 @@ def v1(url):
     url = url.rstrip("/")
     return url if url.endswith("/v1") else url + "/v1"
 cfg["llm"]["base_url"] = v1(llm_url)
+cfg["llm"]["model"] = llm_model
 cfg["codegen"]["base_url"] = v1(codegen_url)
+cfg["codegen"]["model"] = codegen_model
 cfg["codegen"]["timeout"] = 3600
 cfg.setdefault("simplex_chat", {})["display_name"] = display
 cfg.setdefault("dashboard", {})["port"] = 8765
@@ -435,13 +463,13 @@ else
   fi
 fi
 
-# Codegen is the remote larger model (e.g. guppy). Warn only — never auto-pull.
+# Codegen is the larger model, possibly on a remote host. Warn only — never auto-pull.
 echo "== codegen ollama ($CODEGEN_API)"
 CODEGEN_TAGS="$(curl -sf --max-time 5 "$CODEGEN_API/api/tags" || true)"
-if grep -qE "qwen38-iq3s" <<<"$CODEGEN_TAGS"; then
-  echo "codegen serves qwen38-iq3s: OK"
+if grep -qF "$CODEGEN_MODEL" <<<"$CODEGEN_TAGS"; then
+  echo "codegen serves $CODEGEN_MODEL: OK"
 else
-  echo "WARN: codegen host $CODEGEN_API serves no qwen38-iq3s (offline? new-skill authoring will fail)" >&2
+  echo "WARN: codegen host $CODEGEN_API serves no $CODEGEN_MODEL (offline? new-skill authoring will fail)" >&2
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

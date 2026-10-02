@@ -1,4 +1,4 @@
-"""End-to-end pipeline test. Run ONLY on the box with real SemIf + real LLM.
+"""End-to-end pipeline test. Run ONLY where real SemIf + a real LLM are available.
 
     python -m pytest tests/integration -q
 
@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from semif_agent.cli import _opt_float, build_scheduler, load_config
+from semif_agent.cli import _opt_float, _required_model, build_scheduler, load_config
 from semif_agent.codegen import (
     CodegenClient,
     generate_skill_body,
@@ -61,7 +61,7 @@ def require_real(config: dict):
 def _isolate_runtime(config: dict, tmp_path) -> None:
     """Point every runtime artifact at tmp_path.
 
-    Without this, persisted authoring output in the box's `data/categories.json`
+    Without this, persisted authoring output in the runtime `data/categories.json`
     and `data/skills/` leaks into the tree and navigation routes to a stale stub
     instead of the injected fixture — an environment-dependent failure.
     """
@@ -294,8 +294,8 @@ def test_generate_skill_body_codegen(tmp_path):
 
     The body must perform the action via a stdlib transport and declare
     INTEGRATION; the test is a hermetic mechanics check (loopback for HTTP), not
-    proof of the live integration. Slow: uses the big codegen model
-    (qwen38-iq3s by default). Run this one in the background and poll —
+    proof of the live integration. Slow: uses the configured codegen model.
+    Run this one in the background and poll —
     long-lived ssh sessions get SIGHUP'd.
     """
     config = load_config()
@@ -303,7 +303,7 @@ def test_generate_skill_body_codegen(tmp_path):
     codegen_cfg = config.get("codegen", {})
     client = CodegenClient(
         base_url=codegen_cfg.get("base_url", "http://localhost:11434/v1"),
-        model=codegen_cfg.get("model", "qwen38-iq3s"),
+        model=_required_model(codegen_cfg, "codegen"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=True,
         temperature=_opt_float(codegen_cfg.get("temperature")),

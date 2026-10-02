@@ -8,9 +8,9 @@ request, answer a run paused for input, answer a deferred authoring question,
 resolve a repair offer, restart a skill write, and relabel a decision (human
 override).
 
-The scheduler's engine and LLM are built lazily, so the dashboard runs on the
-thin dev box in replay mode (reads logs; submit degrades to a JSON error) and
-in live mode on the box with SemIf + a local LLM.
+The scheduler's engine and LLM are built lazily, so the dashboard runs in
+replay mode on a machine without the engine (reads logs; submit degrades to a
+JSON error) and in live mode on a host with SemIf + a local LLM.
 
     python -m semif_agent.cli dashboard [--port 8765]
 """

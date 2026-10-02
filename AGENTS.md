@@ -204,90 +204,35 @@ simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
 
 ## Run / verify
 
-Dev machine is a thin client (no GPU, ~1.4G disk): only pure stdlib unit tests
-run here (`python3 -m pytest tests/ -q --ignore=tests/integration`).
-Integration tests run on the staging machine `jarvis` (see "### jarvis (staging)").
+Pure stdlib unit tests run anywhere:
+`python3 -m pytest tests/ -q --ignore=tests/integration`. Integration tests need
+a real SemIf engine + a real LLM endpoint; run them on a provisioned host (see
+"### Provisioning (`scripts/bootstrap.sh`)").
+
+## Local deployment notes
+
+This repo is generic: it names no particular host, address, path, or model.
+**Every deployment-specific value lives in the gitignored `local/` folder** —
+see `local/ENVIRONMENT.md` for this deployment's hostnames, addresses, SSH keys,
+paths, and model choices. If that file is absent, this is a fresh clone and the
+values are yours to choose.
 
 ## Git / sync
 
-- Canonical repo lives on Gitea: `git.manyworlds.fit`, **SSH on port 222**
-  (`ssh://git@git.manyworlds.fit:222/gabby/semif-agent.git`). Key
-  `~/.ssh/id_ed25519` is registered there. The staging machine `jarvis` runs
-  from a manual clone at `~/repos/semif-agent` (`scripts/bootstrap.sh` provisions
-  everything else and never re-clones the agent repo); the old box working copy
-  is also at `~/repos/semif-agent` (its editable install still points at the moved
-  `~/semif-agent`, so `import semif_agent` is broken there — moot, guppy runs
-  ollama only now); the dev machine at `~/Repos/semif-agent`. Push/pull from
-  Gitea — never rsync/tar the code.
-- **`config.json` is gitignored and per-machine** (dev and the box use different
-  engine/LLM paths). Copy `config.example.json` to `config.json` and edit.
-  `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are runtime
-  artifacts and gitignored too.
-- The Gitea instance was rebuilt fresh (Sep 2026) after its git pack transfer
-  broke (`sh: bad option '--oneshot'` — a stray system `uploadpack.packObjectsHook`
-  killed pack generation; the old AGENTS.md note blaming `authorized_keys` was
-  a misdiagnosis). Both the dev key (`shitass@nunya`) and the box key
-  (`guppy@semif-agent`) are re-registered; clone/fetch/push all work now. If a
-  fresh machine can't pull, the durable fix is on the Gitea host:
-  `git config --system --unset-all uploadpack.packObjectsHook`.
+- Push/pull from your git remote — never rsync/tar the code.
+- **`config.json` is gitignored and per-machine** (hosts use different
+  engine/LLM paths and models). Copy `config.example.json` to `config.json` and
+  edit. `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are
+  runtime artifacts and gitignored too.
 - Decision rows logged before the `run_id` threading landed show up under
   run_id `"?"` in the dashboard — that's expected, not a bug.
-
-Machine split (Sep 2026): **guppy** hosts the remote **codegen** model (the
-12G `qwen38-iq3s`) only; **jarvis** is the staging/test target (semif-agent +
-SemIf engine + deps) and runs its **own local ollama** serving the small
-title/description model (`qwen3.5:4b`). Only codegen traffic travels to guppy.
-Provision jarvis with `scripts/bootstrap.sh` (see "### jarvis (staging)").
-
-**Connecting to jarvis (`ssh jarvis@192.168.8.130`)**: this is a plain `ssh`
-call. The key `~/.ssh/id_ed25519` is passphrase-protected and Linux Mint pops an
-askpass dialog for it; the flatpak overlay
-(`SSH_AUTH_SOCK=/run/flatpak/ssh-auth`) blocks the user's password locker, so
-they cannot paste from it and must type the passphrase by hand. **Warn the user
-right before running the command** ("about to ssh to jarvis — be ready to type
-your passphrase") so they can enter it, then just run `ssh`. Do **not** burn
-tokens on ssh-agent/askpass/fixed-socket workarounds — once the user types the
-passphrase at the prompt, plain `ssh` works for the session. The `agent refused
-operation` error from the flatpak socket is exactly this prompt, not a broken
-key.
-
-Guppy key facts:
-
-- ssh key `~/.ssh/id_ed25519` is passphrase-protected. Load it into an agent at
-  a fixed socket before connecting (the default flatpak `SSH_AUTH_SOCK` refuses):
-  ```sh
-  SOCK=/tmp/opencode/ssh-agent.sock; rm -f "$SOCK"; eval $(ssh-agent -a "$SOCK")
-  printf '#!/bin/sh\necho "<PASSPHRASE>"\n' > /tmp/opencode/askpass.sh; chmod 700 /tmp/opencode/askpass.sh
-  SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh-add ~/.ssh/id_ed25519
-  ```
-  The agent dies if this machine restarts; redo it each session.
-- The agent on guppy is **deprecated** (guppy is ollama-only now). The box
-  venv's editable install (`__editable__.semif_agent_0_1_0_finder.py`) still
-  maps to `/home/abby/semif-agent`, which was moved to `~/repos/semif-agent`,
-  so `import semif_agent` fails there — expected, not a bug. Run the agent on
-  **jarvis** instead (below).
-- Dashboard: runs as a systemd **user** service on the box
-  (`semif-dashboard.service`, linger enabled, binds `0.0.0.0:8765`), so it's up
-  after reboots with no manual launch — browser UI at http://192.168.8.181:8765/.
-  Manage it with `systemctl --user status/restart semif-dashboard.service`.
-  Note the submit/relabel POST endpoints are therefore open to the whole LAN.
-  It works in live mode on the box (submit runs the real engine + LLM) and in
-  replay mode anywhere (`--replay`; reads decisions.jsonl + runs.jsonl; submit
-  degrades to a JSON error without the engine). Relabeling in the UI writes a
-  human override (3x weight in dream) via `POST /api/relabel`. On the dev
-  machine, replay mode: `cd ~/Repos/semif-agent && python3 -m semif_agent.cli
-  dashboard --replay` (binds 127.0.0.1:8765).
-- Integration tests (real engine + real LLM) only run on the box:
-  `~/semif-venv/bin/python -m pytest tests/integration -q -s`
-  They take ~100s (model load ~34s). Run them in the background and poll —
-  long-lived ssh sessions get SIGHUP'd and kill the run.
 
 ## Roadmap
 
 ### v1 (done)
 Core loop, urgency queue, skill tree, skill loop with real SemIf assessment
 (decision, not generation), decision logging, `dream` cost pass, REPL + JSONL
-CLI, unit tests (24) + box integration tests (2).
+CLI, unit tests (24) + integration tests (2).
 
 ### v2
 - Real fine-tuning from `decisions.jsonl` at a regular interval ("dreaming"):
@@ -302,7 +247,7 @@ CLI, unit tests (24) + box integration tests (2).
   persisted to `data/categories.json` (under that category's `skills` list) and
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body via the async authoring pipeline: a larger
-  OpenAI-compatible model (`codegen`, default `qwen38-iq3s`) writes an `act`-only
+  OpenAI-compatible model (`codegen`, your configured code-capable model) writes an `act`-only
   body plus its own flat `CONTRACT` against `SKILL.md`, then a test
   (against `TESTGEN.md`) is generated and auto-run before the leaf
   is declared ready — all persisted to a folder in `data/skills/` and
@@ -446,35 +391,33 @@ CLI, unit tests (24) + box integration tests (2).
 ## Constraints & gotchas (learned the hard way)
 
 ### Environment
-- **Dev box**: Python 3.13, GTX 780M (Kepler, useless), ~1.4G disk free. Never
-  pip-install heavy deps here.
-- **guppy box**: Python 3.14, AMD RX 6950 XT (gfx1030), 32 cores, 30G RAM,
-  passwordless sudo. Now serves **codegen only** (`qwen38-iq3s`). SemIf runs via
-  llama.cpp **CPU** backend (its llamacpp backend forces `n_gpu_layers=0`), so
-  the GPU is NOT used by the decision engine — it IS used by ollama.
-- **jarvis box**: runs the agent and its **own local ollama** serving the small
-  title/description model (`qwen3.5:4b`). `config.json` `llm.base_url` points at
-  `http://127.0.0.1:11434/v1`; only `codegen.base_url` points at guppy.
+- The core is pure stdlib and runs anywhere Python does. Never pip-install heavy
+  deps on a thin client; a full install belongs on a provisioned host.
+- The SemIf engine runs via llama.cpp **CPU** backend (its llamacpp backend
+  forces `n_gpu_layers=0`), so the decision engine does not use a GPU; ollama
+  does.
 - The SemIf tokenizer is fetched from HF (`Qwen/Qwen3.5-4B` at the pinned
   revision), cached under each checkout's `.runtime/hf` (`HF_HOME`).
+- Per-host specs and model choices for this deployment: `local/ENVIRONMENT.md`.
 
-### SemIf install (box)
-- **Legacy layout** (predates the `.runtime/` containment rule; kept for the
-  deprecated guppy agent venv). New machines use `scripts/bootstrap.sh`, which
-  installs the venv/engine/GGUF/cache under the checkout's `.runtime/` — see
-  "### jarvis (staging)" and "Code principles".
+### SemIf install
+- New machines use `scripts/bootstrap.sh`, which installs the venv/engine/GGUF/
+  cache under the checkout's `.runtime/` — see "### Provisioning
+  (`scripts/bootstrap.sh`)" and "Code principles". (A legacy layout that
+  installed the engine outside the checkout predates the `.runtime/`
+  containment rule; prefer bootstrap.)
 - SemIf hard-pins `torch==2.10.0`, `numpy==2.2.6`, etc. The llamacpp path does
   **not** need torch (torch is imported lazily inside `direct.score`). Install
   with `--no-deps` and bring only what's needed — the committed manifest
   `requirements/staging.txt` is the single source of truth:
-  `pip install -e ~/semif --no-deps`, then
+  `pip install -e <semif-clone> --no-deps`, then
   `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install -r requirements/staging.txt`
   (numpy 2.3.5, transformers 5.17.0, tokenizers 0.23.2, huggingface-hub 1.31.0,
   llama-cpp-python 0.3.35, pytest).
 - **Expected pip warnings:** pip reports "dependency conflicts" against
   semif-phase1's declared requirements (torch/accelerate/protobuf/sentencepiece
-  not installed, numpy 2.2.6 vs 2.3.5). These are informational — the box runs
-  exactly this set — not a bug; do not "fix" them by installing torch.
+  not installed, numpy 2.2.6 vs 2.3.5). These are informational — the staging
+  host runs exactly this set — not a bug; do not "fix" them by installing torch.
 - `numpy==2.2.6` has **no cp314 wheel** → pip tries a source build that fails
   without `pkg-config` + `python3-dev`. Use numpy 2.3.5 (has cp314 wheels).
 - `llama-cpp-python==0.3.35` builds from source. With all 32 cores it OOM-kills
@@ -482,57 +425,44 @@ CLI, unit tests (24) + box integration tests (2).
   `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install llama-cpp-python==0.3.35`.
   Do NOT bump the llama-cpp-python version — SemIf calls specific llama.cpp C
   APIs that change between versions.
-- The pinned GGUF: `Qwen3.5-4B-Q4_K_M.gguf` from bartowski (2.8G) at
-  `~/models/`. Load ~34s; score ~0.9s/decision on CPU at 8 threads.
+- The pinned GGUF: `Qwen3.5-4B-Q4_K_M.gguf` from bartowski (2.8G), downloaded
+  into `.runtime/models/` by bootstrap. Load ~34s; score ~0.9s/decision on CPU
+  at 8 threads.
 
 ### ollama
-- **guppy = codegen host.** Installed at `/home/abby/ollama/bin/ollama` (not on
-  PATH), systemd service `ollama.service`, ROCm backend with
-  `HSA_OVERRIDE_GFX_VERSION=10.3.0` and KV cache q4_0 + flash attention. Serves
-  `qwen38-iq3s` (12G 27B, the codegen model). Binds `OLLAMA_HOST=0.0.0.0`, so
-  jarvis reaches it as a plain remote API at `http://192.168.8.181:11434` (no
-  auth — LAN-visible, same exposure as the old dashboard POST endpoints).
-- `semif-hermes` / `semif-hermes-v3` are for ANOTHER project (hermes agent) —
-  ignore them; they spew "token repeat limit" errors.
-- If generation hangs with no log output, restart the service
-  (`sudo systemctl restart ollama`) — the ROCm runner can wedge.
-- **jarvis = local small model.** Runs its own ollama (`/usr/local/bin/ollama`,
-  systemd `ollama.service`, `127.0.0.1:11434`) serving `qwen3.5:4b` for
-  new-skill title/description authoring (~3s). `bootstrap.sh` ensures
-  that model is pulled; `config.json` `llm.base_url` points here.
-- `bootstrap.sh` installs **no ollama**: it expects the target box to already
-  run one for `llm` (and pulls `llm.model` into it), while codegen is remote.
-- **The local `llm` model is a reasoning model — thinking must be off.** The
-  default `qwen3.5:4b` has ollama's `thinking` capability: it emits hidden
-  chain-of-thought and puts the answer in `content`. Through the `/v1` compat
-  endpoint the CoT consumes the entire reply budget, so
+- `bootstrap.sh` installs **no ollama**: it expects the target host to already
+  run one for `llm` (and pulls `llm.model` into it), while `codegen` may be
+  remote. Point `--llm-url`/`--codegen-url` at the right daemons.
+- If generation hangs with no log output, restart the ollama service — the GPU
+  runner can wedge.
+- **A local reasoning model needs thinking off for `llm`.** A reasoning model
+  emits hidden chain-of-thought and puts the answer in `content`. Through the
+  `/v1` compat endpoint the CoT consumes the entire reply budget, so
   `generate_category`/`generate_skill`'s `max_tokens=128` returns
   `finish_reason: length` with `content: ""` → `JSONDecodeError` and a traced
   `draft_failed` (no category/skill is ever authored — the whole create branch
-  is silently dead). `LLMClient` now sends `reasoning_effort: "none"`
+  is silently dead). `LLMClient` sends `reasoning_effort: "none"`
   (`llm.disable_thinking`, **default on**) so the model answers the ~30-token
-  JSON directly (~2.5s). Ollama's native `think:false` is **not** plumbed
+  JSON directly. Ollama's native `think:false` is **not** plumbed
   through `/v1` (silently ignored), and `/no_think` in the prompt is ignored
   too; only `reasoning_effort` works there. Codegen *wants* the reasoning, so
   the knob is `llm`-only — `CodegenClient` never sets it. Unbounded (no
-  `max_tokens`) does not help: the model loops on this prompt (2048 tokens of
-  reasoning, still empty `content`, 3+ min).
+  `max_tokens`) does not help: a reasoning model can loop on this prompt
+  (thousands of reasoning tokens, still empty `content`).
 
-### jarvis (staging)
+### Provisioning (`scripts/bootstrap.sh`)
 
-- Provision a fresh Ubuntu machine into a running staging box: clone
-  `semif-agent` to a checkout (jarvis keeps it at `~/repos/semif-agent`; the
-  script derives all paths from wherever it is run, so any path works — just
-  register its SSH key on Gitea first), then
-  `scripts/bootstrap.sh --llm-url http://127.0.0.1:11434 --codegen-url http://192.168.8.181:11434`.
+- Provision a fresh Ubuntu machine into a running host: clone `semif-agent` to
+  a checkout (register its SSH key on your git host first), then
+  `scripts/bootstrap.sh --llm-url <local-ollama> --codegen-url <codegen-ollama>
+  --llm-model <small-model> --codegen-model <code-capable-model>`.
   The script must be run from a checkout — it reads pins from that checkout's
   `config.example.json` and never re-clones the agent repo (only the SemIf
   engine and the simplex-chat binary). Idempotent and rerunnable; every stage
   no-ops on existing state, so it also boots an unknown-state machine. It
-  installs **no ollama**: `llm` is this box's local ollama (bootstrap pulls
-  `llm.model`), only `codegen` points at the peer guppy. It pulls the pinned
-  small model into the local ollama and WARNs (never auto-pulls) if the remote
-  codegen host is missing.
+  installs **no ollama**: `llm` is the local ollama (bootstrap pulls
+  `llm.model`), `codegen` may point at a peer host. It WARNs (never auto-pulls)
+  if the remote codegen host is missing its model.
 - **All installation artifacts live inside the checkout under a gitignored
   `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
   `simplex/`, `systemd/`), so an end user can find and debug the whole stack in
@@ -545,21 +475,21 @@ CLI, unit tests (24) + box integration tests (2).
   `gguf_url`/`gguf_sha256`, HF tokenizer `source`/`revision`) and the
   `simplex_chat` block (`version`, `bin_url`, `sha256`, `port`,
   `display_name`). The python dep pins live in `requirements/staging.txt`
-  (committed, one versioned artifact — jarvis, guppy, and any future box all
-  provision from it). **Maintenance**: bump the pins in `config.example.json` /
+  (committed, one versioned artifact — every host provisions from it).
+  **Maintenance**: bump the pins in `config.example.json` /
   `requirements/staging.txt`, rerun the script, re-run the integration tests.
   The script never guesses.
 - pip prints **expected** "dependency conflict" warnings at install time
   (semif-phase1 declares torch/accelerate/protobuf/sentencepiece/numpy 2.2.6
   that we intentionally do not install — the llama.cpp CPU path doesn't need
-  them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Same as the box;
-  do not "fix" them by installing torch.
-- Generates `config.json` with `llm.base_url` = `--llm-url` (this box, local) and
-  `codegen.base_url` = `--codegen-url` (the remote codegen host; `codegen.timeout:
-  3600` since it travels the LAN), a repo-relative `.runtime/models` GGUF path,
+  them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Do not "fix" them
+  by installing torch.
+- Generates `config.json` with `llm.base_url` = `--llm-url`, `codegen.base_url`
+  = `--codegen-url` (`codegen.timeout: 3600` for a LAN), the model names from
+  `--llm-model`/`--codegen-model`, a repo-relative `.runtime/models` GGUF path,
   and a backup of any prior file. `--threads N` overrides engine threads;
-  `--copy-data SRC` rsyncs guppy's `data/` for continuity; `--public-dashboard`
-  binds the dashboard to `0.0.0.0`.
+  `--copy-data SRC` rsyncs a prior host's `data/` for continuity;
+  `--public-dashboard` binds the dashboard to `0.0.0.0`.
   It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
   `ws_url` from `simplex_chat.port`) and the standalone forwarding bridge
   (`bridges.simplex.enabled = true`, `ws_url` from `simplex_chat.forward_port`,
@@ -575,22 +505,14 @@ CLI, unit tests (24) + box integration tests (2).
   denies everyone (the safe default until the human adds their contact id).
   Bootstrap then runs `scripts/simplex-address.py` to create/print the command
   bot's contact address (and the forwarding bot's, via `--ws-url`).
-- Run / verify on jarvis:
-  ```sh
-  REPO=~/repos/semif-agent && cd "$REPO" && export HF_HOME="$REPO/.runtime/hf"
-  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli run              # REPL
-  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dream            # cost report
-  "$REPO/.runtime/venv/bin/python" -m pytest tests/integration -q -s   # ~100s, background+poll
-  "$REPO/.runtime/venv/bin/python" -m semif_agent.cli dashboard --port 8765
-  systemctl --user status semif-simplex semif-gateway semif-simplex-forward semif-bridge   # gateway + bridge stack
-  ```
 - First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
   (~10 min on 6 cores); reruns are fast no-ops.
+- Per-host run/verify commands and addresses: `local/ENVIRONMENT.md`.
 
-### codegen (skill bodies, box)
+### codegen (skill bodies)
 - Skill **bodies** are written by a separate OpenAI-compatible model, configured
-  under `codegen` in config.json (default model `qwen38-iq3s`, the 12G 27B
-  IQ3_S GGUF — huge/slow). Title + description for new skills come from the
+  under `codegen` in config.json (your configured code-capable model —
+  larger/slower than `llm`). Title + description for new skills come from the
   separate small `llm` provider (its own endpoint/model, shared transport in
   `provider.py`); only the runnable code body uses codegen.
 - **Alternate hosted provider: OpenCode Console** (`console.py`). Either
@@ -618,15 +540,14 @@ CLI, unit tests (24) + box integration tests (2).
   their own adapters. The Console's **Jev** (`/zen/v1/systemone`) is a
   probability/decision evaluator — do NOT wire it into routing/assessment; SemIf
   alone decides.
-- **Do NOT cap `max_tokens`** on the codegen call. qwen38-iq3s reasons first
-  and a cap truncates the hidden reasoning, leaving `content` empty
-  (`finish_reason: length`) and the body write fails with "skill body is
-  empty". Unbounded, it runs to completion in ~25–45 min with the card
-  sampler (~28–70k tokens of reasoning then the code, ~25–40 tok/s); the
-  client reads only `content`, so reasoning is filtered automatically. The
-  client default timeout is 1200s and qwen38-iq3s routinely exceeds it —
-  the box `config.json` sets `codegen.timeout: 3600`. Raise `codegen.timeout`
-  in config if a harder prompt needs more.
+- **Do NOT cap `max_tokens`** on the codegen call. A reasoning codegen model
+  reasons first and a cap truncates the hidden reasoning, leaving `content`
+  empty (`finish_reason: length`) and the body write fails with "skill body is
+  empty". Unbounded, it runs to completion (tens of thousands of reasoning
+  tokens then the code); the client reads only `content`, so reasoning is
+  filtered automatically. The client default timeout is 1200s and a slow codegen
+  model can exceed it — the per-machine `config.json` sets `codegen.timeout:
+  3600`. Raise `codegen.timeout` in config if a harder prompt needs more.
 - Bodies are persisted as one **folder per skill**: `data/skills/<category>/<name>/`
   holding `skill.py`, `skill.test.py`, `contract.json`, and `config.json` (all
   gitignored), loaded back at startup via `importlib`, so
@@ -663,8 +584,8 @@ CLI, unit tests (24) + box integration tests (2).
   catalog revision on the trace is future work.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `act` runs in-process; `skill.test.py` runs as a
-  subprocess in the skill folder). The box is the intended target; treat the
-  endpoint as trusted.
+  subprocess in the skill folder). The provisioned host is the intended target;
+  treat the endpoint as trusted.
 - Flow in `scheduler._dispatch_skill`: the request is queued to the **single-slot
   `llm` draft worker** (small model authors title+description) → stub registered
   + hot-merged into the tree → the body write is queued to a **separate
@@ -716,8 +637,8 @@ CLI, unit tests (24) + box integration tests (2).
   the skill row / `skill_write_failed` flow node. Codegen failure — including a
   request timeout — is raised as `CodegenError` by the client, never a raw
   `TimeoutError`. The default codegen timeout is 1200s
-  (`cli.build_scheduler`); the box `config.json` sets `codegen.timeout: 3600`
-  because qwen38-iq3s's card sampler writes routinely run 25–45 min. Raise
+  (`cli.build_scheduler`); a slow codegen model's writes can run 25–45 min, so
+  the per-machine `config.json` sets `codegen.timeout: 3600`. Raise
   `codegen.timeout` in config for harder prompts.
 - **Config tiering + first-fire collection.** After the contract lands, a SemIf
   `choice` per variable auto-populates the skill `config.json` from the whole
@@ -777,7 +698,7 @@ CLI, unit tests (24) + box integration tests (2).
   `reasoning` (ollama) or `reasoning_content` (other OpenAI-compatible
   backends) — do not drop one for the other. Echoing is console-only; the
   returned content is identical either way. Integration tests already force
-  streaming; see it with `-s` on the box.
+  streaming; see it with `-s`.
 - `codegen.idle_warn` (default 60s) / `codegen.idle_timeout` (default 180s)
   surface a silent stream: a wedged generation prints a warning at `idle_warn`
   seconds with no tokens, then raises `CodegenError` (→ graceful stub) at
@@ -799,7 +720,7 @@ CLI, unit tests (24) + box integration tests (2).
   handles both shapes and falls back to `model_info.<arch>.context_length`. The
   total wall-clock `timeout` is enforced while the stream is live (a
   continuously-streaming runaway is cut off), not only during idle gaps. The
-  budget is a safety net, not the loop cure: qwen38-iq3s's reasoning routinely
+  budget is a safety net, not the loop cure: a reasoning codegen model routinely
   exceeds even the relaxed cap before it settles on a body.
 - **Sampler params (opt-in).** `temperature`/`top_p`/`presence_penalty`/
   `frequency_penalty` are **not sent by default**: a `None`/absent value is
@@ -807,8 +728,8 @@ CLI, unit tests (24) + box integration tests (2).
   provider never guesses a value for the user — set one in the `llm`/`codegen`
   config block (or per `chat` call) only when you know the right value for the
   model. `config.example.json` ships explicit values as a starting point, so a
-  provisioned box still sends them. When configured, a high `presence_penalty`
-  (not greedy temperature) is the anti-repetition loop cure for qwen38-iq3s, and
+  provisioned host still sends them. When configured, a high `presence_penalty`
+  (not greedy temperature) is the anti-repetition loop cure for a looping codegen model, and
   those four are the only sampler knobs reachable via ollama's OpenAI-compat
   API (`repeat_penalty`/`min_p`/`top_k` are Modelfile-only). There is **no
   escalated preset**: a rejected body retries with a fresh short prompt that
@@ -825,7 +746,7 @@ CLI, unit tests (24) + box integration tests (2).
   Recorded as **trace-only** events (kind `codegen`, with probs and
   `stop_prob`) — never in the decision log. Disabled when no engine is
   available (`enabled` defaults true; the runtime engine check is what gates
-  it off the box).
+  it off when no engine is loaded).
 
 ### gateway (messenger intake)
 
@@ -834,7 +755,7 @@ CLI, unit tests (24) + box integration tests (2).
   configured `gateway.simplex` adapter in the foreground. `--dashboard`
   co-serves the browser UI from a daemon thread. Config lives under
   `gateway.simplex` in `config.json`; `enabled` defaults false. On a
-  bootstrap-provisioned box `scripts/bootstrap.sh` renders and enables the
+  bootstrap-provisioned host `scripts/bootstrap.sh` renders and enables the
   `semif-simplex.service` bot daemon (pinned `simplex-chat` in **bot mode**,
   profile under `.runtime/simplex/`, port from `simplex_chat.port`) and the
   `semif-gateway.service` agent process, so the gateway runs across
@@ -909,7 +830,7 @@ CLI, unit tests (24) + box integration tests (2).
   `/_show_address` / `/_address` (`SimplexDaemon.request_address`, thread-safe
   via `run_coroutine_threadsafe`). It carries no policy: no allowlist, no
   scheduler, no HTTP.
-- **Tests.** `tests/test_gateway.py` (stdlib, dev box): adapter allowlist/auth,
+- **Tests.** `tests/test_gateway.py` (stdlib): adapter allowlist/auth,
   structured send command, batching (real `asyncio`), and `GatewayService`
   routing against a real `Scheduler` (lazy engine, unreachable LLM).
   `tests/test_simplex_ws.py` covers the neutral protocol layer (parse shapes,
@@ -920,9 +841,9 @@ CLI, unit tests (24) + box integration tests (2).
   `tests/test_seed_skills.py` hermetically tests every
   `seeds/<category>/<name>/` package, including `simplex.next_message` and
   `simplex.connect_link`. The live `websockets` transport against a real daemon
-  is a jarvis integration concern.
+  is a live-daemon integration concern.
 - **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
-  only); the dev box core stays stdlib-only.
+  only); the core stays stdlib-only.
 
 ### bridges (third-party API services)
 
@@ -944,7 +865,7 @@ CLI, unit tests (24) + box integration tests (2).
   bridges until interrupted. Each bridge owns its service daemon: `SimplexBridge`
   connects to a **second** simplex-chat daemon/profile (`bridges.simplex.ws_url`,
   default port 5228, pinning `simplex_chat.forward_port`), separate from the
-  command gateway's. On a bootstrap-provisioned box, `scripts/bootstrap.sh`
+  command gateway's. On a bootstrap-provisioned host, `scripts/bootstrap.sh`
   renders and enables `semif-simplex-forward.service` (the second daemon) and
   `semif-bridge.service` (`cli bridge`) alongside the gateway units.
 - **HTTP surface** (`bridges/base.py` + `bridges/simplex.py`): JSON in/out,
@@ -1022,7 +943,7 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   touch data-structure math only (queue ordering, dream cost, contract
   serialization) or drive scheduling mechanics through the `ScriptedEngine`
   double in `tests/conftest.py`; decisions themselves are verified by
-  integration tests on the box.
+  integration tests on a provisioned host.
 - Engine import is **lazy** (`engine.py`) so the rest of the package stays pure
   stdlib and testable without SemIf installed. Keep it that way.
 - `DecisionLog.append` labels a row with the *selected* option by default
@@ -1050,8 +971,12 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   the `_parse_json` helper and the LLMClient provider. `tests/conftest.py``s `ScriptedEngine`
   drives scheduling mechanics (assessment is now a SemIf decision) without a
   GGUF.
-- `tests/integration/` — jarvis only (staging); requires real SemIf + real
-  ollama (guppy serves the models over the LAN).
+- `tests/test_no_env_leaks.py` guards the generic-repo rule: it fails if a
+  deployment hostname, address, username, absolute home path, or local model
+  name reappears in a tracked file. Deployment specifics belong in the
+  gitignored `local/` folder (see "Local deployment notes").
+- `tests/integration/` — run only where real SemIf + a real LLM endpoint are
+  available (the endpoint may be remote).
 - After touching scheduler/skills/codegen/engine, re-run both; the integration
   tests are the only end-to-end verification.
 - **Fixtures are not the runtime.** Generated skill tests (and unit tests of the

@@ -1,6 +1,6 @@
 """CLI entrypoint: interactive REPL, scripted JSONL mode, and subcommands.
 
-Run on the box with SemIf + a GGUF + a local OpenAI-compatible server:
+Run on a host with SemIf + a GGUF + a local OpenAI-compatible server:
 
     python -m semif_agent.cli run            # REPL
     python -m semif_agent.cli run --script inputs.jsonl
@@ -76,6 +76,23 @@ def _opt_float(value) -> float | None:
     return None if value is None else float(value)
 
 
+def _required_model(cfg: dict, provider: str) -> str:
+    """The configured model name, or a clear fatal error.
+
+    There is no default: which model an endpoint serves is deployment-specific,
+    so the per-machine config must name it rather than the code guessing a model
+    the endpoint may not have. Failing fast turns a missing model into an
+    actionable config error instead of a request to a model that isn't there.
+    """
+    model = str(cfg.get("model") or "").strip()
+    if not model:
+        raise SystemExit(
+            f"config.json: {provider}.model is required "
+            f"(set it to a model your {provider} endpoint serves)"
+        )
+    return model
+
+
 def _provider_endpoint(cfg: dict, default_base: str) -> dict:
     """Endpoint kwargs shared by the llm/codegen clients.
 
@@ -127,7 +144,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
     llm_endpoint = _provider_endpoint(llm_cfg, "http://localhost:11434/v1")
     llm = llm_cls(
         base_url=llm_endpoint["base_url"],
-        model=llm_cfg.get("model", "qwen2.5:3b"),
+        model=_required_model(llm_cfg, "llm"),
         timeout=float(llm_cfg.get("timeout", 600.0)),
         stream=bool(llm_cfg.get("stream", False)),
         idle_warn=float(llm_cfg.get("idle_warn", 30.0)),
@@ -156,7 +173,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
     )
     codegen = codegen_cls(
         base_url=codegen_endpoint["base_url"],
-        model=codegen_cfg.get("model", "qwen38-iq3s"),
+        model=_required_model(codegen_cfg, "codegen"),
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=bool(codegen_cfg.get("stream", False)),
         idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
