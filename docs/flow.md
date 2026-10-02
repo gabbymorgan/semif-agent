@@ -10,6 +10,8 @@ output) and the **authoring pipeline** (what happens when navigation decides a
 category or skill does not exist yet). Authoring is asynchronous: the main gate
 is freed immediately and the original request is re-queued once the body lands.
 
+Rendered SVG: [flow-main.svg](flow-main.svg) · [flow-authoring.svg](flow-authoring.svg)
+
 ---
 
 ## Main pipeline
