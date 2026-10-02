@@ -12,7 +12,13 @@ import time
 
 import pytest
 
-from semif_agent.cli import _opt_float, _required_model, build_scheduler, load_config
+from semif_agent.cli import (
+    _opt_float,
+    _required_model,
+    build_engine_config,
+    build_scheduler,
+    load_config,
+)
 from semif_agent.codegen import (
     CodegenClient,
     generate_skill_body,
@@ -40,18 +46,9 @@ from semif_agent.skills import (
 
 
 def require_real(config: dict):
-    from semif_agent.engine import SemIfEngine, EngineConfig
+    from semif_agent.engine import SemIfEngine
 
-    engine = SemIfEngine(
-        EngineConfig(
-            backend=config.get("engine", {}).get("backend", "llamacpp"),
-            source=config.get("engine", {}).get("source", ""),
-            revision=config.get("engine", {}).get("revision", ""),
-            gguf=config.get("engine", {}).get("gguf", ""),
-            context_tokens=int(config.get("engine", {}).get("context_tokens", 4096)),
-            threads=config.get("engine", {}).get("threads"),
-        )
-    )
+    engine = SemIfEngine(build_engine_config(config))
     try:
         engine._ensure_loaded()
     except EngineUnavailable as exc:

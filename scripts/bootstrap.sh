@@ -6,10 +6,17 @@
 # title/description model runs on this machine's local ollama (bootstrap pulls
 # it); codegen may point at a remote ollama host. This script installs NO ollama.
 #
-# Must be run from a semif-agent checkout (it reads pins from this checkout's
-# config.example.json); the checkout is used as-is and never re-cloned — only
-# the SemIf engine and the simplex-chat binary are fetched. Clone the agent
-# repo first (its SSH key must be registered on your git host).
+# Must be run from a semif-agent checkout. The checkout is used as-is and never
+# re-cloned — only the SemIf engine and the simplex-chat binary are fetched.
+# Clone the agent repo first (its SSH key must be registered on your git host).
+#
+# config.json is the per-machine USER config and this script NEVER writes it. It
+# seeds config.json from config.example.json only when config.json is absent,
+# then reads every per-machine value from config.json; only a human edits
+# config.json afterwards. Pinned external refs (SemIf commit, GGUF url+sha256,
+# HF tokenizer revision, simplex-chat version/url+sha256) live in the committed
+# pins.json and the python dep pins in requirements/staging.txt — bump those
+# (via git) and rerun to upgrade.
 #
 # Every installation artifact lives INSIDE this checkout under .runtime/
 # (gitignored), so an end user can find and debug the whole stack in one tree:
@@ -20,45 +27,31 @@
 # Only artifacts that operationally must live elsewhere are outside: the SSH
 # key (~/.ssh) and the real systemd user dir/linger.
 #
-# Pins (SemIf commit, GGUF url+sha256, simplex-chat url+sha256) are read from
-# config.example.json's engine/simplex_chat blocks, and the python dep pins
-# from requirements/staging.txt — all committed here and the single source of
-# truth; bump those and rerun to upgrade.
+# Flags override the values read from config.json FOR THIS RUN ONLY; nothing is
+# written back to config.json.
 #
 # Usage:
-#   scripts/bootstrap.sh --llm-url URL --codegen-url URL --llm-model MODEL
-#                        --codegen-model MODEL [--threads N] [--copy-data SRC]
-#                        [--public-dashboard] [--simplex-allowed-users CSV]
-#                        [--simplex-home-channel X] [--simplex-display-name NAME] [-h]
+#   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
+#                        [--codegen-model MODEL] [--copy-data SRC] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
 
-LLM_URL="http://127.0.0.1:11434"
+LLM_URL=""
 CODEGEN_URL=""
 LLM_MODEL=""
 CODEGEN_MODEL=""
-THREADS=""
 COPY_DATA=""
-PUBLIC_DASHBOARD=0
-SIMPLEX_ALLOWED_USERS=""
-SIMPLEX_HOME_CHANNEL=""
-SIMPLEX_DISPLAY_NAME=""
 
 usage() {
-  sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo
-  echo "  --llm-url URL                ollama API for the small title/description model (default: $LLM_URL; this machine)"
-  echo "  --codegen-url URL            ollama API for codegen skill bodies (required; may be remote)"
-  echo "  --llm-model MODEL            model the llm endpoint serves (required; pulled if the local ollama lacks it)"
-  echo "  --codegen-model MODEL        code-capable model the codegen endpoint serves (required)"
-  echo "  --threads N                  engine threads for config.json (default: config.example value)"
-  echo "  --copy-data SRC              rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
-  echo "  --public-dashboard           bind dashboard to 0.0.0.0 instead of 127.0.0.1"
-  echo "  --simplex-allowed-users CSV  comma-separated contactIds/display names the gateway accepts"
-  echo "  --simplex-home-channel ID    gateway fallback channel for unsolicited messages"
-  echo "  --simplex-display-name NAME  simplex-chat bot display name (default: config.example value)"
-  echo "  -h                           this help"
+  echo "  --llm-url URL          override llm.base_url from config.json for this run (else config.json, else http://127.0.0.1:11434)"
+  echo "  --codegen-url URL      override codegen.base_url from config.json for this run"
+  echo "  --llm-model MODEL      override llm.model from config.json for this run (pulled if the local ollama lacks it)"
+  echo "  --codegen-model MODEL  override codegen.model from config.json for this run"
+  echo "  --copy-data SRC        rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
+  echo "  -h                     this help"
   exit "${1:-0}"
 }
 
@@ -68,12 +61,7 @@ while [[ $# -gt 0 ]]; do
     --codegen-url) CODEGEN_URL="$2"; shift 2 ;;
     --llm-model) LLM_MODEL="$2"; shift 2 ;;
     --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
-    --threads) THREADS="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
-    --public-dashboard) PUBLIC_DASHBOARD=1; shift ;;
-    --simplex-allowed-users) SIMPLEX_ALLOWED_USERS="$2"; shift 2 ;;
-    --simplex-home-channel) SIMPLEX_HOME_CHANNEL="$2"; shift 2 ;;
-    --simplex-display-name) SIMPLEX_DISPLAY_NAME="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
   esac
@@ -81,6 +69,8 @@ done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.json"
+CONFIG="$REPO_ROOT/config.json"
+PINS="$REPO_ROOT/pins.json"
 
 RUNTIME="$REPO_ROOT/.runtime"
 VENV="$RUNTIME/venv"
@@ -98,70 +88,85 @@ if [[ ! -f "$EXAMPLE" ]]; then
   echo "config.example.json not found at $EXAMPLE — run from a semif-agent checkout" >&2
   exit 1
 fi
+if [[ ! -f "$PINS" ]]; then
+  echo "pins.json not found at $PINS — run from a semif-agent checkout" >&2
+  exit 1
+fi
 
-# --- read pins from config.example.json ------------------------------------
-read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
-  SIMPLEX_BIN_URL SIMPLEX_SHA256 SIMPLEX_PORT SIMPLEX_DISPLAY \
-  SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY EXAMPLE_LLM_MODEL \
-  EXAMPLE_CODEGEN_MODEL < <(
-  python3 - "$EXAMPLE" <<'PY'
+# config.json is per-machine USER config. Seed it once from the template, then
+# never write it again — only a human edits config.json.
+if [[ ! -f "$CONFIG" ]]; then
+  echo "== seeding config.json from config.example.json (edit it to configure this machine)"
+  cp "$EXAMPLE" "$CONFIG"
+fi
+
+# --- read pins from the committed pins.json ---------------------------------
+# The ASCII unit separator (\x1f) delimits fields so an empty value never
+# shifts the fields after it (space-splitting collapses runs of whitespace).
+IFS=$'\x1f' read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
+  SIMPLEX_BIN_URL SIMPLEX_SHA256 < <(
+  python3 - "$PINS" <<'PY'
 import json, sys
-cfg = json.load(open(sys.argv[1]))
-e = cfg["engine"]
-s = cfg.get("simplex_chat", {})
-print(
-    " ".join(
-        [
-            str(e.get("semif_repo", "")),
-            str(e.get("semif_ref", "")),
-            str(e.get("gguf_url", "")),
-            str(e.get("gguf_sha256", "")),
-            str(e.get("source", "")),
-            str(e.get("revision", "")),
-            str(s.get("bin_url", "")),
-            str(s.get("sha256", "")),
-            str(s.get("port", "")),
-            str(s.get("display_name", "")),
-            str(s.get("forward_port", "")),
-            str(s.get("forward_display_name", "")),
-            str(cfg.get("llm", {}).get("model", "")),
-            str(cfg.get("codegen", {}).get("model", "")),
-        ]
-    )
-)
+pins = json.load(open(sys.argv[1]))
+e = pins["engine"]
+s = pins.get("simplex_chat", {})
+print("\x1f".join([
+    str(e.get("semif_repo", "")),
+    str(e.get("semif_ref", "")),
+    str(e.get("gguf_url", "")),
+    str(e.get("gguf_sha256", "")),
+    str(e.get("source", "")),
+    str(e.get("revision", "")),
+    str(s.get("bin_url", "")),
+    str(s.get("sha256", "")),
+]))
 PY
 )
 
 if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256" ]]; then
-  echo "engine pins missing in $EXAMPLE (semif_repo/semif_ref/gguf_url/gguf_sha256)" >&2
+  echo "engine pins missing in $PINS (semif_repo/semif_ref/gguf_url/gguf_sha256)" >&2
   exit 1
 fi
-if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" || -z "$SIMPLEX_PORT" ]]; then
-  echo "simplex_chat pins missing in $EXAMPLE (bin_url/sha256/port)" >&2
-  exit 1
-fi
-
-# Model names are deployment-specific and user-supplied: prefer the CLI flag,
-# else fall back to config.example.json. There is deliberately no default.
-LLM_MODEL="${LLM_MODEL:-$EXAMPLE_LLM_MODEL}"
-CODEGEN_MODEL="${CODEGEN_MODEL:-$EXAMPLE_CODEGEN_MODEL}"
-if [[ -z "$CODEGEN_URL" ]]; then
-  echo "--codegen-url is required (the ollama API for codegen skill bodies)" >&2
-  exit 1
-fi
-if [[ -z "$LLM_MODEL" ]]; then
-  echo "--llm-model is required (or set llm.model in config.example.json)" >&2
-  exit 1
-fi
-if [[ -z "$CODEGEN_MODEL" ]]; then
-  echo "--codegen-model is required (or set codegen.model in config.example.json)" >&2
+if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" ]]; then
+  echo "simplex_chat pins missing in $PINS (bin_url/sha256)" >&2
   exit 1
 fi
 
-if [[ -n "$SIMPLEX_DISPLAY_NAME" ]]; then
-  SIMPLEX_DISPLAY="$SIMPLEX_DISPLAY_NAME"
+# --- read per-machine values from config.json (flags override for this run) --
+IFS=$'\x1f' read -r CFG_LLM_URL CFG_LLM_MODEL CFG_CODEGEN_URL CFG_CODEGEN_MODEL \
+  SIMPLEX_PORT SIMPLEX_DISPLAY SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY < <(
+  python3 - "$CONFIG" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+s = cfg.get("simplex_chat", {})
+def strip_v1(u):
+    u = str(u or "").rstrip("/")
+    return u[:-3] if u.endswith("/v1") else u
+print("\x1f".join([
+    strip_v1(cfg.get("llm", {}).get("base_url")),
+    str(cfg.get("llm", {}).get("model", "") or ""),
+    strip_v1(cfg.get("codegen", {}).get("base_url")),
+    str(cfg.get("codegen", {}).get("model", "") or ""),
+    str(s.get("port", "")),
+    str(s.get("display_name", "") or ""),
+    str(s.get("forward_port", "")),
+    str(s.get("forward_display_name", "") or ""),
+]))
+PY
+)
+
+# A flag overrides config.json for this run only; config.json is never touched.
+LLM_URL="${LLM_URL:-${CFG_LLM_URL:-http://127.0.0.1:11434}}"
+CODEGEN_URL="${CODEGEN_URL:-$CFG_CODEGEN_URL}"
+LLM_MODEL="${LLM_MODEL:-$CFG_LLM_MODEL}"
+CODEGEN_MODEL="${CODEGEN_MODEL:-$CFG_CODEGEN_MODEL}"
+
+if [[ -z "$SIMPLEX_PORT" || -z "$SIMPLEX_FORWARD_PORT" ]]; then
+  echo "config.json: simplex_chat.port and simplex_chat.forward_port are required" >&2
+  exit 1
 fi
 SIMPLEX_DISPLAY="${SIMPLEX_DISPLAY:-semif}"
+SIMPLEX_FORWARD_DISPLAY="${SIMPLEX_FORWARD_DISPLAY:-semif-forward}"
 
 # Native ollama API bases (no /v1) for tags/pull; the clients use /v1.
 LLM_API="${LLM_URL%/v1}"; LLM_API="${LLM_API%/}"
@@ -274,57 +279,9 @@ fi
 simplex_ok || { echo "simplex-chat sha256 mismatch: expected $SIMPLEX_SHA256" >&2; exit 1; }
 echo "== simplex-chat verified ($SIMPLEX_BIN)"
 
-# --- stage 7: config.json -----------------------------------------------------------
-if [[ -f "$REPO_ROOT/config.json" ]]; then
-  cp "$REPO_ROOT/config.json" "$REPO_ROOT/config.json.bak.$(date +%s)"
-fi
-echo "== writing config.json (llm -> $LLM_URL, codegen -> $CODEGEN_URL, runtime -> $RUNTIME)"
-python3 - "$REPO_ROOT/config.example.json" "$REPO_ROOT/config.json" "$THREADS" "$LLM_URL" "$CODEGEN_URL" \
-  "$([ "$PUBLIC_DASHBOARD" = 1 ] && echo 0.0.0.0 || echo 127.0.0.1)" \
-  "$REPO_ROOT" "$SIMPLEX_ALLOWED_USERS" "$SIMPLEX_HOME_CHANNEL" "$SIMPLEX_DISPLAY" \
-  "$LLM_MODEL" "$CODEGEN_MODEL" <<'PY'
-import json, os, sys
-(example, out, threads, llm_url, codegen_url, dash_host, repo,
- allowed_csv, home_channel, display, llm_model, codegen_model) = sys.argv[1:]
-cfg = json.load(open(example))
-eng = cfg["engine"]
-runtime = os.path.join(repo, ".runtime")
-eng["gguf"] = os.path.join(runtime, "models", os.path.basename(eng["gguf_url"]))
-if threads and threads != "__example__":
-    eng["threads"] = int(threads)
-# The clients hit {base_url}/chat/completions on ollama's OpenAI-compat path,
-# which lives under /v1. The native API (/api/tags, /api/show) has no /v1.
-def v1(url):
-    url = url.rstrip("/")
-    return url if url.endswith("/v1") else url + "/v1"
-cfg["llm"]["base_url"] = v1(llm_url)
-cfg["llm"]["model"] = llm_model
-cfg["codegen"]["base_url"] = v1(codegen_url)
-cfg["codegen"]["model"] = codegen_model
-cfg["codegen"]["timeout"] = 3600
-cfg.setdefault("simplex_chat", {})["display_name"] = display
-cfg.setdefault("dashboard", {})["port"] = 8765
-cfg["dashboard"]["host"] = dash_host
-allowed = [u.strip() for u in allowed_csv.split(",") if u.strip()]
-simplex = cfg.setdefault("gateway", {}).setdefault("simplex", {})
-simplex["enabled"] = True
-simplex["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('port', 5226)}"
-simplex["allowed_users"] = allowed
-simplex["home_channel"] = home_channel
-# The standalone SimpleX forwarding bridge owns its own daemon/profile
-# (simplex_chat.forward_port), separate from the command gateway, and serves the
-# invite-link / read / send HTTP API skills use. Expose its URL as the top-level
-# `simplex_bridge_url` so the data-contract config search auto-populates it, and
-# mirror its optional shared secret as `simplex_bridge_token` for the auth header.
-bridge = cfg.setdefault("bridges", {}).setdefault("simplex", {})
-bridge_port = int(bridge.get("port", 5227))
-bridge["enabled"] = True
-bridge["ws_url"] = f"ws://127.0.0.1:{cfg['simplex_chat'].get('forward_port', 5228)}"
-cfg["simplex_bridge_url"] = f"http://127.0.0.1:{bridge_port}"
-cfg["simplex_bridge_token"] = bridge.get("token", "") or ""
-simplex.pop("bridge", None)  # legacy key; forwarding is a separate service now
-json.dump(cfg, open(out, "w"), indent=2)
-PY
+# config.json is USER config: seeded above if absent, read for per-machine values,
+# and never written by this script. Edit config.json to change endpoints, models,
+# ports, the dashboard bind, or the gateway allowlist.
 
 # --- stage 8: systemd user units -----------------------------------------------------
 render_unit() {
@@ -433,43 +390,51 @@ echo "== verifying imports"
 
 # The small self-assessment model runs on this machine's local ollama; ensure it
 # is pulled so assess/elicitation/fidelity work without a remote dependency.
-echo "== llm ollama ($LLM_API), model $LLM_MODEL"
-if ! curl -sf --max-time 5 "$LLM_API/api/tags" >/dev/null 2>&1; then
-  echo "WARN: no local ollama at $LLM_API — install/run ollama and pull $LLM_MODEL" >&2
-  echo "      (bootstrap installs no ollama; only codegen is remote)" >&2
+if [[ -z "$LLM_MODEL" ]]; then
+  echo "WARN: llm.model is not set in config.json — set it (and codegen.model) before starting the agent" >&2
 else
-  LLM_TAGS="$(curl -sf --max-time 5 "$LLM_API/api/tags" || true)"
-  if grep -qF "\"$LLM_MODEL\"" <<<"$LLM_TAGS"; then
-    echo "llm model $LLM_MODEL: present"
+  echo "== llm ollama ($LLM_API), model $LLM_MODEL"
+  if ! curl -sf --max-time 5 "$LLM_API/api/tags" >/dev/null 2>&1; then
+    echo "WARN: no local ollama at $LLM_API — install/run ollama and pull $LLM_MODEL" >&2
+    echo "      (bootstrap installs no ollama; only codegen is remote)" >&2
   else
-    echo "== pulling llm model $LLM_MODEL from $LLM_API"
-    if ! curl -sf --max-time 3600 "$LLM_API/api/pull" -H 'Content-Type: application/json' \
-         -d "{\"model\":\"$LLM_MODEL\",\"stream\":false}" >/dev/null; then
-      echo "WARN: /api/pull failed; trying the ollama CLI" >&2
-      if command -v ollama >/dev/null 2>&1; then
-        ollama pull "$LLM_MODEL" || echo "WARN: could not pull $LLM_MODEL" >&2
-      else
-        echo "WARN: could not pull $LLM_MODEL (no ollama CLI)" >&2
+    LLM_TAGS="$(curl -sf --max-time 5 "$LLM_API/api/tags" || true)"
+    if grep -qF "\"$LLM_MODEL\"" <<<"$LLM_TAGS"; then
+      echo "llm model $LLM_MODEL: present"
+    else
+      echo "== pulling llm model $LLM_MODEL from $LLM_API"
+      if ! curl -sf --max-time 3600 "$LLM_API/api/pull" -H 'Content-Type: application/json' \
+           -d "{\"model\":\"$LLM_MODEL\",\"stream\":false}" >/dev/null; then
+        echo "WARN: /api/pull failed; trying the ollama CLI" >&2
+        if command -v ollama >/dev/null 2>&1; then
+          ollama pull "$LLM_MODEL" || echo "WARN: could not pull $LLM_MODEL" >&2
+        else
+          echo "WARN: could not pull $LLM_MODEL (no ollama CLI)" >&2
+        fi
       fi
     fi
-  fi
-  # The OpenAI-compat chat path is what llm actually hits; probe it explicitly.
-  LLM_V1_OK="$(curl -sf --max-time 60 "$LLM_V1/chat/completions" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" || true)"
-  if grep -qE 'chatcmpl|"choices"' <<<"$LLM_V1_OK"; then
-    echo "llm /v1/chat/completions ($LLM_MODEL): OK"
-  else
-    echo "WARN: local llm /v1/chat/completions returned no completion" >&2
+    # The OpenAI-compat chat path is what llm actually hits; probe it explicitly.
+    LLM_V1_OK="$(curl -sf --max-time 60 "$LLM_V1/chat/completions" -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" || true)"
+    if grep -qE 'chatcmpl|"choices"' <<<"$LLM_V1_OK"; then
+      echo "llm /v1/chat/completions ($LLM_MODEL): OK"
+    else
+      echo "WARN: local llm /v1/chat/completions returned no completion" >&2
+    fi
   fi
 fi
 
 # Codegen is the larger model, possibly on a remote host. Warn only — never auto-pull.
-echo "== codegen ollama ($CODEGEN_API)"
-CODEGEN_TAGS="$(curl -sf --max-time 5 "$CODEGEN_API/api/tags" || true)"
-if grep -qF "$CODEGEN_MODEL" <<<"$CODEGEN_TAGS"; then
-  echo "codegen serves $CODEGEN_MODEL: OK"
+if [[ -n "$CODEGEN_URL" && -n "$CODEGEN_MODEL" ]]; then
+  echo "== codegen ollama ($CODEGEN_API)"
+  CODEGEN_TAGS="$(curl -sf --max-time 5 "$CODEGEN_API/api/tags" || true)"
+  if grep -qF "$CODEGEN_MODEL" <<<"$CODEGEN_TAGS"; then
+    echo "codegen serves $CODEGEN_MODEL: OK"
+  else
+    echo "WARN: codegen host $CODEGEN_API serves no $CODEGEN_MODEL (offline? new-skill authoring will fail)" >&2
+  fi
 else
-  echo "WARN: codegen host $CODEGEN_API serves no $CODEGEN_MODEL (offline? new-skill authoring will fail)" >&2
+  echo "WARN: codegen.base_url/model is not set in config.json — set it before starting the agent" >&2
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -483,6 +448,9 @@ fi
 cat <<EOF
 
 Done. Next steps:
+  1. Edit config.json — set llm.model/llm.base_url and codegen.model/codegen.base_url.
+     bootstrap.sh seeded config.json from config.example.json (if it was absent)
+     and NEVER rewrites it; only you edit config.json.
   cd "$REPO_ROOT"
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run
   HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)

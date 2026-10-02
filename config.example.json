@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-machine config. config.json is gitignored; copy this file to config.json and adjust paths. Every machine keeps its own config.json.",
+  "_comment": "Per-machine config. config.json is gitignored. bootstrap.sh seeds config.json from this file only when config.json does not exist, and NOTHING writes config.json afterwards — only a human edits it. Pinned engine/tokenizer/GGUF/simplex-chat refs live in the committed pins.json, not here. Every machine keeps its own config.json.",
   "tau": 0.6,
   "max_reentries": 3,
   "creation_approval": false,
@@ -10,19 +10,13 @@
   },
   "queue": {"max_size": 100, "age_rate": 0.01},
   "engine": {
+    "_comment": "Per-machine engine settings only. The pinned engine/tokenizer/GGUF refs (semif_repo, semif_ref, gguf_url, gguf_sha256, source, revision) live in the committed pins.json — bumped on update, never per-machine config. The GGUF path is derived from pins.json's engine.gguf_url under .runtime/models/; set `gguf` here only to override it with a custom path.",
     "backend": "llamacpp",
-    "source": "Qwen/Qwen3.5-4B",
-    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
-    "gguf": ".runtime/models/Qwen3.5-4B-Q4_K_M.gguf",
-    "gguf_url": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf",
-    "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
-    "semif_repo": "https://github.com/TheoLeeCJ/SemIf.git",
-    "semif_ref": "1f2dea3e25379f9dfc98cb83c324f00ab5deda37",
     "context_tokens": 4096,
     "threads": 8
   },
   "llm": {
-    "_comment": "Small OpenAI-compatible model that authors a new category/skill title + description (never the runnable body — that is `codegen` below). Deliberately its own endpoint/model, so it can be local and fast even when codegen is remote. Runs on THIS machine's local ollama; bootstrap sets base_url from --llm-url (default http://127.0.0.1:11434) and pulls `model` if it is missing. `model` is required (no default): set it to a model the endpoint serves. Uses the same provider machinery as codegen (real SSE stream, token budget, idle watchdog); short JSON replies. Sampler params (temperature/top_p/presence_penalty/frequency_penalty) are opt-in: an unset value is omitted from the request so the server's model default applies — set them here only when you know the right values for the model. The draft is authored asynchronously by a single-slot worker and the request re-runs when it lands; an unreachable endpoint is graceful (traced, user notified), not fatal. disable_thinking sends reasoning_effort:none so a reasoning model answers the short JSON directly instead of spending the reply budget on hidden chain-of-thought (set false only for an endpoint that rejects the parameter). provider selects the transport: \"ollama\" (default; a local OpenAI-compatible server, context auto-detected via /api/show) or \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code or glm-5.3, and provide api_key or api_key_env; the ollama probe is skipped).",
+    "_comment": "Small OpenAI-compatible model that authors a new category/skill title + description (never the runnable body — that is `codegen` below). Deliberately its own endpoint/model, so it can be local and fast even when codegen is remote. Runs on THIS machine's local ollama; bootstrap reads base_url/model from here (a --llm-url/--llm-model flag overrides for that run only) and pulls `model` if it is missing. `model` is required (no default): set it to a model the endpoint serves. Uses the same provider machinery as codegen (real SSE stream, token budget, idle watchdog); short JSON replies. Sampler params (temperature/top_p/presence_penalty/frequency_penalty) are opt-in: an unset value is omitted from the request so the server's model default applies — set them here only when you know the right values for the model. The draft is authored asynchronously by a single-slot worker and the request re-runs when it lands; an unreachable endpoint is graceful (traced, user notified), not fatal. disable_thinking sends reasoning_effort:none so a reasoning model answers the short JSON directly instead of spending the reply budget on hidden chain-of-thought (set false only for an endpoint that rejects the parameter). provider selects the transport: \"ollama\" (default; a local OpenAI-compatible server, context auto-detected via /api/show) or \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code or glm-5.3, and provide api_key or api_key_env; the ollama probe is skipped).",
     "provider": "ollama",
     "base_url": "http://localhost:11434/v1",
     "model": "",
@@ -41,14 +35,14 @@
     "disable_thinking": true
   },
   "codegen": {
-    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Runs on a REMOTE ollama host (bootstrap sets base_url from --codegen-url); the local small model is `llm` above. `model` is required (no default): set it to a code-capable model the endpoint serves. Bodies perform real actions against the user's configured services via stdlib transports, read every operational value from ctx.config, and declare their integration (INTEGRATION: service/transport/config_vars). Larger/slower than the decision or title/description model. The transport always streams so the client-side token budget (output cap / peak total fill) can abort a runaway in real time; stream only toggles console echo of tokens. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream. The context window is auto-detected via ollama /api/show; context_window is the manual fallback (0 = auto/default 100000). smart_limit/warn_limit and max_fill_ratio/warn_fill_ratio bound total fill; max_output caps streamed output (>=1 absolute tokens, 0<x<1 fraction of window); chars_per_token converts chars to the token estimate. temperature/top_p/presence_penalty/frequency_penalty are opt-in: an unset value is omitted from the request so the server's model/Modelfile default applies; set them here only when you know the right values for the model. A rejected body retries with a fresh short prompt (max_attempts attempts), reusing the same sampler params. elicitation asks the product owner implementation questions before the body is written (posted to the question queue; every front end defers). After the body lands it is reviewed for real-action fidelity, then the data contract (contract.json) is derived in a separate call, then skill.test.py (hermetic mechanics test: loopback http.server for HTTP bodies, fixtures inline, no external network) in a shared-context call, and the test is auto-run as a subprocess (test_timeout seconds); on failure a 3-option SemIf decision (code/contract/test) regenerates the failing piece, bounded by test_max_attempts. contract_search.enabled auto-populates the skill config.json via SemIf against the global + category config. provider selects the transport: \"ollama\" (default; local OpenAI-compatible server, context auto-detected via /api/show) or \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code, glm-5.3, or deepseek-v4.1-flash, and provide api_key or api_key_env; the ollama probe is skipped).",
+    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Runs on a REMOTE ollama host (bootstrap reads base_url/model from here; a --codegen-url/--codegen-model flag overrides for that run only); the local small model is `llm` above. `model` is required (no default): set it to a code-capable model the endpoint serves. Bodies perform real actions against the user's configured services via stdlib transports, read every operational value from ctx.config, and declare their integration (INTEGRATION: service/transport/config_vars). Larger/slower than the decision or title/description model. The transport always streams so the client-side token budget (output cap / peak total fill) can abort a runaway in real time; stream only toggles console echo of tokens. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream. The context window is auto-detected via ollama /api/show; context_window is the manual fallback (0 = auto/default 100000). smart_limit/warn_limit and max_fill_ratio/warn_fill_ratio bound total fill; max_output caps streamed output (>=1 absolute tokens, 0<x<1 fraction of window); chars_per_token converts chars to the token estimate. temperature/top_p/presence_penalty/frequency_penalty are opt-in: an unset value is omitted from the request so the server's model/Modelfile default applies; set them here only when you know the right values for the model. A rejected body retries with a fresh short prompt (max_attempts attempts), reusing the same sampler params. elicitation asks the product owner implementation questions before the body is written (posted to the question queue; every front end defers). After the body lands it is reviewed for real-action fidelity, then the data contract (contract.json) is derived in a separate call, then skill.test.py (hermetic mechanics test: loopback http.server for HTTP bodies, fixtures inline, no external network) in a shared-context call, and the test is auto-run as a subprocess (test_timeout seconds); on failure a 3-option SemIf decision (code/contract/test) regenerates the failing piece, bounded by test_max_attempts. contract_search.enabled auto-populates the skill config.json via SemIf against the global + category config. provider selects the transport: \"ollama\" (default; local OpenAI-compatible server, context auto-detected via /api/show) or \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code, glm-5.3, or deepseek-v4.1-flash, and provide api_key or api_key_env; the ollama probe is skipped).",
     "provider": "ollama",
     "base_url": "http://localhost:11434/v1",
     "model": "",
     "api_key": "",
     "api_key_env": "",
     "user_agent": "",
-    "timeout": 1200,
+    "timeout": 3600,
     "stream": true,
     "idle_warn": 60,
     "idle_timeout": 180,
@@ -104,10 +98,7 @@
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
   "simplex_chat": {
-    "_comment": "Pinned simplex-chat daemon(s). The command gateway talks to the daemon on `port` (profile .runtime/simplex/, unit semif-simplex.service). The SimpleX forwarding bridge owns its OWN daemon/profile on `forward_port` (profile .runtime/simplex-forward/, unit semif-simplex-forward.service) so messaging UX never shares the command bot's identity. bootstrap.sh downloads this exact binary (sha256 verified) into .runtime/bin/ and renders both units. Bump version/bin_url/sha256 together. gateway.simplex.ws_url must match `port`; bridges.simplex.ws_url must match `forward_port`.",
-    "version": "v7.0.3",
-    "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
-    "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0",
+    "_comment": "Per-machine simplex-chat daemon settings. The pinned binary (version/bin_url/sha256) lives in the committed pins.json, not here. The command gateway talks to the daemon on `port` (profile .runtime/simplex/, unit semif-simplex.service). The SimpleX forwarding bridge owns its OWN daemon/profile on `forward_port` (profile .runtime/simplex-forward/, unit semif-simplex-forward.service) so messaging UX never shares the command bot's identity. bootstrap.sh renders both units from these values. gateway.simplex.ws_url must match `port`; bridges.simplex.ws_url must match `forward_port`.",
     "port": 5226,
     "display_name": "semif",
     "forward_port": 5228,
@@ -117,7 +108,7 @@
     "_comment": "Standalone third-party API bridges: a simple, secure local HTTP layer between codegen-authored skill bodies and real system services. Each bridge runs as its own process (`python -m semif_agent.cli bridge [--name NAME]`), one process per service daemon, and never runs inside the command gateway — gateway isolation is non-negotiable (see AGENTS.md). The bridge catalog (names, endpoints, config vars) is injected into the code-generation prompts via `semif_agent.bridges.describe_bridges()`.",
     "simplex": {
       "_comment": "SimpleX forwarding bridge: buffers every inbound DM (no allowlist — the point is to see who reached the bot through its invite link), and serves invite-link / read / send over HTTP. It owns its own simplex-chat daemon/profile (`ws_url`, `forward_port` above), separate from the command gateway's. Skills use the top-level `simplex_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
-      "enabled": false,
+      "enabled": true,
       "host": "127.0.0.1",
       "port": 5227,
       "token": "",
@@ -131,7 +122,7 @@
   "gateway": {
     "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
     "simplex": {
-      "enabled": false,
+      "enabled": true,
       "ws_url": "ws://127.0.0.1:5226",
       "allowed_users": [],
       "allow_all_users": false,
@@ -142,5 +133,5 @@
       "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
     }
   },
-  "dashboard": {"port": 8765, "host": "0.0.0.0"}
+  "dashboard": {"port": 8765, "host": "127.0.0.1"}
 }

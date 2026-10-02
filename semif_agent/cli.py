@@ -116,28 +116,69 @@ def _provider_endpoint(cfg: dict, default_base: str) -> dict:
 def load_config(path: str = "config.json") -> dict:
     """Load config.json and anchor its runtime paths to the checkout root.
 
+    config.json is the per-machine user config and is required: bootstrap.sh
+    seeds it from config.example.json once, and only a human edits it. There is
+    no in-code fallback — a missing config.json is a hard error.
+
     Path-valued keys (`skill_seeds`, `skill_bodies`, `category_registry`, `log`,
     `trace`) resolve against REPO_ROOT, not the process cwd, so a fresh clone
     loads its committed seeds and writes runtime artifacts into the checkout no
     matter where the CLI is invoked from. Absolute values pass through untouched.
     """
-    config = json.loads(Path(path).read_text())
+    config_path = Path(path)
+    if not config_path.is_file():
+        raise SystemExit(
+            f"config.json not found at {config_path} — run scripts/bootstrap.sh "
+            f"to seed it from config.example.json, then configure it"
+        )
+    config = json.loads(config_path.read_text())
     for key in _PATH_KEYS:
         config[key] = _anchor_path(config.get(key) or _PATH_DEFAULTS[key])
     return config
 
 
-def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
-    engine = SemIfEngine(
-        EngineConfig(
-            backend=config.get("engine", {}).get("backend", "llamacpp"),
-            source=config.get("engine", {}).get("source", ""),
-            revision=config.get("engine", {}).get("revision", ""),
-            gguf=config.get("engine", {}).get("gguf", ""),
-            context_tokens=int(config.get("engine", {}).get("context_tokens", 4096)),
-            threads=config.get("engine", {}).get("threads"),
-        )
+def load_pins(path: str | None = None) -> dict:
+    """Load the committed pin manifest (pins.json) that owns every external ref.
+
+    Pins are code, not per-machine config: the SemIf engine commit, GGUF
+    url+sha256, HF tokenizer revision, and simplex-chat version/url+sha256 live
+    in pins.json so a `git pull` bump propagates on the next bootstrap run
+    instead of being frozen in each machine's config.json.
+    """
+    pins_path = Path(path) if path else REPO_ROOT / "pins.json"
+    if not pins_path.is_file():
+        raise SystemExit(f"pins.json not found at {pins_path}")
+    return json.loads(pins_path.read_text())
+
+
+def build_engine_config(config: dict, pins: dict | None = None) -> EngineConfig:
+    """Engine settings for a run: per-machine tuning from config.json, pinned
+    refs from pins.json.
+
+    `engine.backend`/`context_tokens`/`threads` are per-machine config. The
+    tokenizer source/revision and the GGUF are pins; the GGUF path is derived
+    from the pin's filename under `.runtime/models/`, unless config.json sets an
+    explicit `engine.gguf` override.
+    """
+    pins = load_pins() if pins is None else pins
+    eng = config.get("engine", {}) or {}
+    pin_eng = pins.get("engine", {}) or {}
+    override = eng.get("gguf")
+    gguf = _anchor_path(override) if override else str(
+        REPO_ROOT / ".runtime" / "models" / os.path.basename(pin_eng.get("gguf_url", ""))
     )
+    return EngineConfig(
+        backend=eng.get("backend", "llamacpp"),
+        source=pin_eng.get("source", ""),
+        revision=pin_eng.get("revision", ""),
+        gguf=gguf,
+        context_tokens=int(eng.get("context_tokens", 4096)),
+        threads=eng.get("threads"),
+    )
+
+
+def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
+    engine = SemIfEngine(build_engine_config(config))
     llm_cfg = config.get("llm", {}) or {}
     llm_provider = str(llm_cfg.get("provider", "ollama") or "ollama").lower()
     llm_cls = ConsoleLLMClient if llm_provider == "opencode" else LLMClient

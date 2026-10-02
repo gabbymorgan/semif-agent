@@ -384,7 +384,8 @@ tests/              stdlib unit tests + tests/integration (real engine + LLM)
 SKILL.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
 AGENTS.md           the operational guide (read this before touching code)
-config.example.json per-machine config template
+config.example.json per-machine config template (seeded to config.json once)
+pins.json           committed pins: engine/GGUF/tokenizer/simplex-chat refs
 local/              gitignored: this deployment's notes (hosts, addresses, models)
 ```
 
@@ -418,12 +419,13 @@ build enables it), not ollama.
 On a fresh Ubuntu machine, from a checkout of this repo:
 
 ```sh
-scripts/bootstrap.sh \
-  --llm-url http://127.0.0.1:11434 \
-  --codegen-url http://<codegen-host>:11434 \
-  --llm-model <small-model> \
-  --codegen-model <code-capable-model>
+scripts/bootstrap.sh
 ```
+
+With no `config.json` yet, the script seeds one from `config.example.json`; edit
+it to set `llm.model`/`codegen.model` (and the endpoints). Flags override those
+values for the run only — `--llm-url`, `--codegen-url`, `--llm-model`,
+`--codegen-model` — and are never written back to `config.json`.
 
 The script is idempotent (every stage no-ops on existing state) and:
 
@@ -435,18 +437,22 @@ The script is idempotent (every stage no-ops on existing state) and:
 4. downloads and sha256-verifies the pinned GGUF into `.runtime/models/`;
 5. pre-fetches the HF tokenizer into `.runtime/hf/`;
 6. downloads and sha256-verifies the pinned `simplex-chat` binary;
-7. writes `config.json` (paths, LLM/codegen URLs, dashboard, SimpleX);
+7. seeds `config.json` from `config.example.json` **only if it does not already
+   exist** — it never rewrites `config.json` (only a human edits that file);
 8. renders and enables systemd **user** units:
    `semif-simplex` (bot daemon), `semif-gateway` (agent gateway),
    `semif-simplex-forward` (the bridge's own daemon), `semif-bridge`;
 9. prints the bot's SimpleX contact address.
 
-Useful flags: `--threads N`, `--public-dashboard`, `--copy-data SRC`,
-`--simplex-allowed-users CSV`, `--simplex-home-channel ID`,
-`--simplex-display-name NAME`. Run `scripts/bootstrap.sh -h` for the full list.
+Flags (`--llm-url`, `--codegen-url`, `--llm-model`, `--codegen-model`,
+`--copy-data SRC`) override the values read from `config.json` for that run only.
+Run `scripts/bootstrap.sh -h` for the full list.
 
 It installs **no ollama**; it expects one for `llm` and pulls `llm.model`,
 warning (never auto-pulling) if the remote codegen host is missing its model.
+Pinned external refs (engine commit, GGUF url+sha256, HF tokenizer revision,
+simplex-chat version/url+sha256) live in the committed `pins.json`, not in
+`config.json`.
 
 ### Option B: core only (stdlib)
 
@@ -458,22 +464,29 @@ python3 -m pytest tests/ -q --ignore=tests/integration
 
 For a full install on a machine you manage, follow the same steps bootstrap
 performs (venv, `semif-phase1 --no-deps`, `requirements/staging.txt`, GGUF,
-tokenizer cache), then copy `config.example.json` to `config.json` and adjust
-paths.
-
-### Configuration
-
-`config.json` is **gitignored and per-machine**. Copy the template and edit:
+tokenizer cache), then create `config.json` from the template and adjust paths:
 
 ```sh
 cp config.example.json config.json
+```
+
+### Configuration
+
+`config.json` is **gitignored, per-machine, and required** — the agent refuses
+to start without it. `scripts/bootstrap.sh` seeds it from `config.example.json`
+once; afterwards only a human edits it (nothing writes `config.json`). Pinned
+external refs live in the committed `pins.json`, so `config.json` holds only
+per-machine settings:
+
+```sh
+cp config.example.json config.json   # if not already created by bootstrap
 ```
 
 Key blocks:
 
 | Block | What it controls |
 | --- | --- |
-| `engine` | SemIf source/revision, GGUF path, context, threads |
+| `engine` | per-machine engine settings: backend, context, threads, optional GGUF path override (refs come from `pins.json`) |
 | `llm` | small model endpoint that authors new category/skill title + description |
 | `codegen` | skill-body model endpoint, timeouts, sampler, elicitation, fidelity, repair, test, degeneration watchdog, token budget |
 | `navigation` | two-stage guards: leaf `intent_tau`, category `category_tau` |
@@ -483,7 +496,7 @@ Key blocks:
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
 | `simplex_bridge_url` / `simplex_bridge_token` | what skill bodies call |
-| `simplex_chat` | pinned simplex-chat binary + gateway/forward ports |
+| `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
 
 `llm.model` and `codegen.model` are **required** (no default): set each to a

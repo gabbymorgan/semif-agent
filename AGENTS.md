@@ -220,10 +220,16 @@ values are yours to choose.
 ## Git / sync
 
 - Push/pull from your git remote — never rsync/tar the code.
-- **`config.json` is gitignored and per-machine** (hosts use different
-  engine/LLM paths and models). Copy `config.example.json` to `config.json` and
-  edit. `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are
-  runtime artifacts and gitignored too.
+- **`config.json` is gitignored, per-machine, and required** (hosts use
+  different LLM/codegen endpoints and models). `scripts/bootstrap.sh` seeds it
+  from `config.example.json` once (only when absent) and **nothing writes it
+  afterwards — only a human edits `config.json`**. `data/decisions.jsonl`,
+  `data/runs.jsonl`, and `data/drafts/` are runtime artifacts and gitignored too.
+- **`pins.json` is committed and code-owned** — the single home for every
+  external ref (SemIf commit, GGUF url+sha256, HF tokenizer revision,
+  simplex-chat version/url+sha256). These are bumped by a git change and picked
+  up on the next bootstrap run; they are deliberately NOT in `config.json` (a
+  ref replaced on every update is not per-machine user config).
 - Decision rows logged before the `run_id` threading landed show up under
   run_id `"?"` in the dashboard — that's expected, not a bug.
 
@@ -453,16 +459,19 @@ CLI, unit tests (24) + integration tests (2).
 ### Provisioning (`scripts/bootstrap.sh`)
 
 - Provision a fresh Ubuntu machine into a running host: clone `semif-agent` to
-  a checkout (register its SSH key on your git host first), then
-  `scripts/bootstrap.sh --llm-url <local-ollama> --codegen-url <codegen-ollama>
-  --llm-model <small-model> --codegen-model <code-capable-model>`.
-  The script must be run from a checkout — it reads pins from that checkout's
-  `config.example.json` and never re-clones the agent repo (only the SemIf
-  engine and the simplex-chat binary). Idempotent and rerunnable; every stage
-  no-ops on existing state, so it also boots an unknown-state machine. It
-  installs **no ollama**: `llm` is the local ollama (bootstrap pulls
-  `llm.model`), `codegen` may point at a peer host. It WARNs (never auto-pulls)
-  if the remote codegen host is missing its model.
+  a checkout (register its SSH key on your git host first), then run
+  `scripts/bootstrap.sh`. With no `config.json` yet it seeds one from
+  `config.example.json`; edit that to set `llm.model`/`codegen.model` and the
+  endpoints. Flags (`--llm-url`, `--codegen-url`, `--llm-model`,
+  `--codegen-model`) override the values read from `config.json` **for that run
+  only** and are never written back. The script must be run from a checkout —
+  it reads pins from that checkout's `pins.json` and never re-clones the agent
+  repo (only the SemIf engine and the simplex-chat binary). Idempotent and
+  rerunnable; every stage no-ops on existing state, so it also boots an
+  unknown-state machine. It installs **no ollama**: `llm` is the local ollama
+  (bootstrap pulls `llm.model` if configured), `codegen` may point at a peer
+  host. It WARNs (never auto-pulls) if the remote codegen host is missing its
+  model, and WARNs if `llm.model`/`codegen.model` are unset.
 - **All installation artifacts live inside the checkout under a gitignored
   `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
   `simplex/`, `systemd/`), so an end user can find and debug the whole stack in
@@ -470,39 +479,41 @@ CLI, unit tests (24) + integration tests (2).
   (`~/.ssh`) and the real systemd user dir + linger (the rendered units are
   stored in `.runtime/systemd/` and symlinked into `~/.config/systemd/user/`).
   See the "Code principles" containment rule.
-- All pins are read from `config.example.json`: the `engine` block
+- All pins are read from the committed `pins.json`: the `engine` block
   (`semif_repo` public GitHub `TheoLeeCJ/SemIf`, `semif_ref` pinned commit,
   `gguf_url`/`gguf_sha256`, HF tokenizer `source`/`revision`) and the
-  `simplex_chat` block (`version`, `bin_url`, `sha256`, `port`,
-  `display_name`). The python dep pins live in `requirements/staging.txt`
-  (committed, one versioned artifact — every host provisions from it).
-  **Maintenance**: bump the pins in `config.example.json` /
-  `requirements/staging.txt`, rerun the script, re-run the integration tests.
-  The script never guesses.
+  `simplex_chat` block (`version`, `bin_url`, `sha256`). Per-machine
+  `simplex_chat` ports/display names stay in `config.json`. The python dep pins
+  live in `requirements/staging.txt` (committed, one versioned artifact — every
+  host provisions from it). The agent reads `engine.source`/`revision` from
+  `pins.json` and derives the GGUF path from `engine.gguf_url` under
+  `.runtime/models/` (an explicit `engine.gguf` in `config.json` overrides it).
+  **Maintenance**: bump the pins in `pins.json` / `requirements/staging.txt`,
+  rerun the script, re-run the integration tests. The script never guesses.
 - pip prints **expected** "dependency conflict" warnings at install time
   (semif-phase1 declares torch/accelerate/protobuf/sentencepiece/numpy 2.2.6
   that we intentionally do not install — the llama.cpp CPU path doesn't need
   them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Do not "fix" them
   by installing torch.
-- Generates `config.json` with `llm.base_url` = `--llm-url`, `codegen.base_url`
-  = `--codegen-url` (`codegen.timeout: 3600` for a LAN), the model names from
-  `--llm-model`/`--codegen-model`, a repo-relative `.runtime/models` GGUF path,
-  and a backup of any prior file. `--threads N` overrides engine threads;
-  `--copy-data SRC` rsyncs a prior host's `data/` for continuity;
-  `--public-dashboard` binds the dashboard to `0.0.0.0`.
-  It also enables the SimpleX gateway (`gateway.simplex.enabled = true`,
-  `ws_url` from `simplex_chat.port`) and the standalone forwarding bridge
-  (`bridges.simplex.enabled = true`, `ws_url` from `simplex_chat.forward_port`,
-  top-level `simplex_bridge_url`), rendering/enabling four user services:
+- Seeds `config.json` from `config.example.json` (only when absent) and **never
+  writes it again** — only a human edits `config.json`. `config.example.json`
+  ships the provisioned defaults, so a seeded `config.json` already has
+  `codegen.timeout: 3600`, the SimpleX gateway enabled
+  (`gateway.simplex.enabled = true`, `ws_url` from `simplex_chat.port`) and the
+  standalone forwarding bridge enabled (`bridges.simplex.enabled = true`,
+  `ws_url` from `simplex_chat.forward_port`, top-level `simplex_bridge_url`);
+  the operator sets `llm.model`/`llm.base_url` and `codegen.model`/
+  `codegen.base_url`. Bootstrap renders/enables four user services:
   `semif-simplex.service` (the command `simplex-chat` bot daemon,
   `--create-bot-display-name` on `simplex_chat.port`), `semif-gateway.service`
   (`.runtime/venv/bin/python -m semif_agent.cli gateway`),
   `semif-simplex-forward.service` (the bridge's **own** daemon/profile on
   `simplex_chat.forward_port`) and `semif-bridge.service`
-  (`.runtime/venv/bin/python -m semif_agent.cli bridge`). `--simplex-allowed-users
-  CSV` / `--simplex-home-channel ID` / `--simplex-display-name NAME` populate
-  the gateway allowlist/fallback/identity; with an empty allowlist the gateway
+  (`.runtime/venv/bin/python -m semif_agent.cli bridge`). The gateway allowlist
+  (`gateway.simplex.allowed_users`) and fallback (`home_channel`) are
+  `config.json` fields the operator edits; with an empty allowlist the gateway
   denies everyone (the safe default until the human adds their contact id).
+  `--copy-data SRC` rsyncs a prior host's `data/` for continuity.
   Bootstrap then runs `scripts/simplex-address.py` to create/print the command
   bot's contact address (and the forwarding bot's, via `--ws-url`).
 - First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
