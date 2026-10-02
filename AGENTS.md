@@ -122,7 +122,7 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 act (pre_act), collects it, and re-runs the full path
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
-                bodies against SKILL.md (real actions via stdlib transports,
+                bodies against CODEGEN.md (real actions via stdlib transports,
                 data from the runner via ctx.config, never embedded; bodies
                 declare INTEGRATION service/transport/config_vars, and declare
                 their own flat `CONTRACT` {var: description});
@@ -132,7 +132,7 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 (describe_bridges()) is injected into the body, retry, regen,
                 elicitation, and testgen prompts — it is the single source of
                 bridge specifics (service, base-URL var, auth header/token var,
-                config-var docs, endpoints with error shapes), while SKILL.md/
+                config-var docs, endpoints with error shapes), while CODEGEN.md/
                 TESTGEN.md carry only the generic pattern; the advisory
                 elicitation integration hint rides on every body/retry/regen
                 prompt; elicitation questions
@@ -254,7 +254,7 @@ CLI, unit tests (24) + integration tests (2).
   merged into the running tree as a leaf. Since Sep 2026 the leaf also gets a
   real runnable body via the async authoring pipeline: a larger
   OpenAI-compatible model (`codegen`, your configured code-capable model) writes an `act`-only
-  body plus its own flat `CONTRACT` against `SKILL.md`, then a test
+  body plus its own flat `CONTRACT` against `CODEGEN.md`, then a test
   (against `TESTGEN.md`) is generated and auto-run before the leaf
   is declared ready — all persisted to a folder in `data/skills/` and
   hot-loaded. Authoring is **asynchronous**: the draft is authored by a
@@ -564,7 +564,7 @@ CLI, unit tests (24) + integration tests (2).
   gitignored), loaded back at startup via `importlib`, so
   skills stay runnable and configurable across restarts. The **old single-file
   layout** (`data/skills/<category>/<name>.py`) is **not read** — clean switch,
-  no compat shim. `SKILL.md` at the repo root is the contract the codegen model
+  no compat shim. `CODEGEN.md` at the repo root is the contract the codegen model
   is prompted with — change it only with intent, it shapes every generated body.
   Bodies declare `INTEGRATION` (service/transport/config_vars) and must perform
   the real action via stdlib transports with values from `ctx.config`.
@@ -583,15 +583,15 @@ CLI, unit tests (24) + integration tests (2).
   forwarding bridge) and `simplex.connect_link` (show/create the forwarding
   bot's contact link) are the messenger seeds; `tests/test_seed_skills.py` keeps
   them honest.
-- **Contract provenance.** Each authored body records the SKILL.md revision it
+- **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
   `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read
-  under (revive with `git show <ref>:SKILL.md`) and `dirty` records whether the
+  under (revive with `git show <ref>:CODEGEN.md`) and `dirty` records whether the
   working-tree contract differed from that commit; both degrade to `None`
   outside a git checkout. Recorded as `contract_ref`/`contract_dirty` on the
-  `skill_writing` trace event; the dashboard shows `SKILL.md @ <ref>` with a `*`
+  `skill_writing` trace event; the dashboard shows `CODEGEN.md @ <ref>` with a `*`
   when dirty. **Deferred:** this pointer covers only the generic pattern now that
-  bridge specifics live in the runtime catalog, not SKILL.md — recording a
+  bridge specifics live in the runtime catalog, not CODEGEN.md — recording a
   catalog revision on the trace is future work.
 - **Trust boundary**: generated skill code is executed locally (it is imported
   as a module and its `act` runs in-process; `skill.test.py` runs as a
@@ -609,7 +609,7 @@ CLI, unit tests (24) + integration tests (2).
      time, waiting `codegen.elicitation.answer_timeout` seconds for each (the
      clock resets on every answer submit; a timeout stops the sequence).
   2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
-     repair): SKILL.md + request + tree + requirements answers; the body is a
+     repair): CODEGEN.md + request + tree + requirements answers; the body is a
      single `act(ctx, request)`, reads every operational value from `ctx.config`,
      performs the real action, and declares `INTEGRATION` and its own flat
      `CONTRACT` (every contract key must be read from `ctx.config`, enforced by
@@ -867,7 +867,7 @@ CLI, unit tests (24) + integration tests (2).
   with one-line docs, auth header + token config var, and endpoints with
   request/response/error shapes) is injected into every codegen prompt
   (body/retry/regen/elicitation/testgen) via `describe_bridges()` and is the
-  single source of bridge specifics — SKILL.md/TESTGEN.md carry only the generic
+  single source of bridge specifics — CODEGEN.md/TESTGEN.md carry only the generic
   pattern. The bridge's optional shared secret is mirrored to the top-level
   `simplex_bridge_token` config var (bootstrap syncs it) so bodies can send the
   `X-Semif-Token` header.

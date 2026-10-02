@@ -1,9 +1,7 @@
-# SKILL.md — the contract for new skills
+# CODEGEN.md — the contract for new skills
 
 This file is the authoritative spec for what a new skill is and how its code
-body must be written. It is fed verbatim to the code-generation model so every
-generated skill is consistent, and it is read by humans who want to know what a
-good skill looks like.
+body must be written.
 
 The mocking/testing side of a skill is NOT specified here — it has its own
 contract, `TESTGEN.md`. This file is about the runnable body only.
@@ -11,12 +9,7 @@ contract, `TESTGEN.md`. This file is about the runnable body only.
 ## What a skill is
 
 Semif-agent is an end-user application: an everyday person asks it to do a task,
-and it does that task for real against their actual service. A skill is the
-thing that does it.
-
-A skill is a **leaf** in the agent's skill tree, reached by a chain of SemIf
-decisions (category -> skill). It is one specific, single-purpose action the
-agent can take — never a broad bucket (that is a category's job).
+and it does that task using a combination of user-provided data and a catalog of basic services known as bridges. A skill is the thing that performs one of those tasks: it is the leaf in the skill tree that the agent navigates to when it has resolved a request to a single, concrete action.
 
 A skill is three things:
 

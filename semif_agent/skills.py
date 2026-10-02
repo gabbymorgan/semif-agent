@@ -112,7 +112,7 @@ class SkillDraft:
     authoring) to their answers; they are fed to the body-writer so the body
     reflects the refined product goal. `integration` carries the service and
     transport the answers point at; it is fed to the body writer as an advisory
-    hint only — the SKILL.md contract, request, and requirements still win.
+    hint only — the CODEGEN.md contract, request, and requirements still win.
     """
 
     name: str

@@ -37,7 +37,7 @@ def describe_bridges() -> str:
     prompts so codegen knows which real services it may build a skill against,
     how to reach and authenticate to each one, and which `ctx.config` variables
     carry its URL, token, and other values. This is the single source of bridge
-    specifics — SKILL.md/TESTGEN.md carry only the generic pattern. Static: no
+    specifics — CODEGEN.md/TESTGEN.md carry only the generic pattern. Static: no
     bridge needs to be running or enabled.
     """
     lines = [

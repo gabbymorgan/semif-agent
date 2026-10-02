@@ -2,7 +2,7 @@
 
 This file is the authoritative spec for the **testing** side of a skill. It is
 fed verbatim (alongside the finished `skill.py`) to the model that produces the
-test artifact. The runnable body contract lives in `SKILL.md`; this file is
+test artifact. The runnable body contract lives in `CODEGEN.md`; this file is
 deliberately separate so the body writer never embeds test data and the test
 writer never worries about body semantics.
 
@@ -33,7 +33,7 @@ each value is a plain-language, semantic description of the expected values for
 that variable (what it is, what good values look like).
 
 The body declares this itself as a module-level `CONTRACT` constant (see
-`SKILL.md`); `contract.json` is a persisted mirror of it, provided to the test
+`CODEGEN.md`); `contract.json` is a persisted mirror of it, provided to the test
 writer as context. The test writer does not author or change the contract.
 
 This contract exists for exactly two consumers:

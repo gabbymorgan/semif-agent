@@ -96,7 +96,7 @@ def test_read_skill_contract_loads_contract():
 
 def test_skill_contract_ref_returns_git_commit_in_repo():
     """In a git checkout the ref is the real short HEAD sha (revivable with
-    `git show <ref>:SKILL.md`), and dirty is a bool. Real subprocess, no
+    `git show <ref>:CODEGEN.md`), and dirty is a bool. Real subprocess, no
     mocking."""
     repo = Path(__file__).resolve().parent.parent
     git = subprocess.run(
@@ -114,7 +114,7 @@ def test_skill_contract_ref_returns_git_commit_in_repo():
 def test_skill_contract_ref_degrades_off_repo(tmp_path):
     """Outside a git checkout the pointer degrades to None rather than a
     non-revivable hash; a missing contract still raises like read_skill_contract."""
-    contract = tmp_path / "SKILL.md"
+    contract = tmp_path / "CODEGEN.md"
     contract.write_text("contract\n")
     info = skill_contract_ref(str(contract))
     assert info == {"ref": None, "dirty": None}
@@ -123,7 +123,7 @@ def test_skill_contract_ref_degrades_off_repo(tmp_path):
 
 
 def test_contract_directs_runner_provided_data():
-    """SKILL.md must tell the model that data comes from the runner via
+    """CODEGEN.md must tell the model that data comes from the runner via
     ctx.config — never embedded, fabricated, or asked of the human. Mock-data
     directives belong in TESTGEN.md, not here."""
     text = read_skill_contract()
@@ -433,8 +433,8 @@ def test_generate_skill_body_end_to_end(tmp_path):
 
 
 def test_sent_payload_system_message_contains_contract_phrase():
-    """The real SKILL.md contract must actually reach the model: the recorded
-    HTTP payload's system message carries a SKILL.md phrase (no mocking — the
+    """The real CODEGEN.md contract must actually reach the model: the recorded
+    HTTP payload's system message carries a CODEGEN.md phrase (no mocking — the
     fake server records the real request body)."""
     httpd, base = _fake_server(GOOD_BODY)
     try:
@@ -1664,7 +1664,7 @@ def test_regenerate_skill_body_rewrites_from_raw_evidence(tmp_path):
 # ---- real-action contract + integration declaration ----
 
 def test_skill_contract_directs_real_actions():
-    """SKILL.md must forbid simulation and name the stdlib transports a body
+    """CODEGEN.md must forbid simulation and name the stdlib transports a body
     uses for real integrations; fixture addresses must not appear in the body."""
     text = read_skill_contract()
     assert "Perform the real action" in text
@@ -1685,7 +1685,7 @@ def test_skill_contract_lists_all_transports():
 
 def test_skill_contract_documents_bridge_pattern_only():
     text = read_skill_contract()
-    # The generic pattern lives in SKILL.md; the bridge specifics do not.
+    # The generic pattern lives in CODEGEN.md; the bridge specifics do not.
     assert "describe_bridges()" in text
     assert "never speak a service's native protocol" in text
     assert "simplex_bridge_url" not in text

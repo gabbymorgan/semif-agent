@@ -1,6 +1,6 @@
 """The committed seed skills are real, inspectable, and hermetically tested.
 
-A seed is a starter integration shipped in the repo in the SKILL.md folder
+A seed is a starter integration shipped in the repo in the CODEGEN.md folder
 format. These tests keep every seed honest: the declared integration must match
 the code, the contract must cover what the body reads, and the hermetic
 mechanics test must pass. They are not proof of the live integration — only a

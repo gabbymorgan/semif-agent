@@ -140,7 +140,7 @@ flowchart TD
     QS -- "answers" --> BODY
     QS -- "timeout" --> BODY
 
-    BODY["generate_skill_body()<br/>or regenerate_skill_body() for repair<br/>SKILL.md + bridge catalog<br/>declares INTEGRATION + flat CONTRACT"] --> FID["SemIf choice<br/>phase 'authoring:fidelity'<br/>accept / reconsider<br/>+ static integration_findings"]
+    BODY["generate_skill_body()<br/>or regenerate_skill_body() for repair<br/>CODEGEN.md + bridge catalog<br/>declares INTEGRATION + flat CONTRACT"] --> FID["SemIf choice<br/>phase 'authoring:fidelity'<br/>accept / reconsider<br/>+ static integration_findings"]
     FID -- "reconsider" --> BODY
     FID -- "accept" --> CONTRACT["parse_contract()<br/>read body's CONTRACT constant"]
 

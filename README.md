@@ -176,7 +176,7 @@ worker. It is **asynchronous**, so the gate stays free while either model thinks
    gateway) defers to a question queue and the worker waits
    (`codegen.elicitation.wait_timeout`).
 3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
-   (`codegen`, your configured code-capable model) writes a single `act` against `SKILL.md`,
+   (`codegen`, your configured code-capable model) writes a single `act` against `CODEGEN.md`,
    reading every operational value from `ctx.config` and declaring `INTEGRATION`
    (service / transport / config_vars) plus its own flat `CONTRACT`
    (variable → description; every key must be read from `ctx.config`).
@@ -220,7 +220,7 @@ A **generative call** (`llm` for titles/descriptions, `codegen` for bodies and
 tests) is a built OpenAI-style `messages` list. Its context is assembled from
 the request, the tree, the elicitation answers, the runtime **bridge catalog**
 (`describe_bridges()`), and — for bodies and tests — the contract files
-(`SKILL.md`, `TESTGEN.md`).
+(`CODEGEN.md`, `TESTGEN.md`).
 
 #### SemIf decisions
 
@@ -249,17 +249,17 @@ the request, the tree, the elicitation answers, the runtime **bridge catalog**
 | --- | --- | --- | --- | --- |
 | `generate_category` | `llm` | authoring instruction: propose one broad category, JSON-only | request text + full tree summary | `skills.py:896` |
 | `generate_skill` | `llm` | authoring instruction: propose one specific skill, JSON-only | request + category + existing skill names | `skills.py:947` |
-| `generate_skill_body` | `codegen` | full **SKILL.md** | request, category, name, description, existing skills + tree summary, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:156` |
-| body retry | `codegen` | full **SKILL.md** | rejection reason, request, category, name, description, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:474` |
+| `generate_skill_body` | `codegen` | full **CODEGEN.md** | request, category, name, description, existing skills + tree summary, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:156` |
+| body retry | `codegen` | full **CODEGEN.md** | rejection reason, request, category, name, description, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:474` |
 | `generate_elicitation` | `codegen` | elicitation instructions + example questions + anti-patterns + `max_questions` | request, category, name, description, existing skills + tree summary, **bridge catalog** | `codegen.py:580` |
 | `generate_data_contract` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog** + the contract ask | `codegen.py:833` |
 | `generate_skill_tests` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog**; continued with the accepted **contract JSON** as an assistant turn + the test-gen ask | `codegen.py:942` |
-| `regenerate_skill_body` | `codegen` | full **SKILL.md** | correction header, request, description, **raw evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
+| `regenerate_skill_body` | `codegen` | full **CODEGEN.md** | correction header, request, description, **raw evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
 
 The **bridge catalog** is `describe_bridges()` (`bridges/registry.py:33`): each
 known bridge's name, service, description, base-URL config var, auth header +
 token var, documented config vars, and endpoints. It is the single runtime
-source of bridge specifics — `SKILL.md` and `TESTGEN.md` carry only the generic
+source of bridge specifics — `CODEGEN.md` and `TESTGEN.md` carry only the generic
 pattern — so a bridge can be added without touching either contract file.
 
 The **raw evidence bundle** handed to a corrective regen carries the request,
@@ -293,7 +293,7 @@ data/skills/<category>/<name>/
   config.json     # recorded values (secrets live here, gitignored)
 ```
 
-Each body also records the `SKILL.md` revision it was written against
+Each body also records the `CODEGEN.md` revision it was written against
 (`contract_ref` / `contract_dirty` on the `skill_writing` trace).
 
 ### Repairing a failed run
@@ -381,7 +381,7 @@ seeds/              committed starter skills (calendar, simplex)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
-SKILL.md            the contract fed to the skill-body codegen model
+CODEGEN.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
 AGENTS.md           the operational guide (read this before touching code)
 config.example.json per-machine config template (seeded to config.json once)
@@ -639,7 +639,7 @@ navigation. It is three things:
 3. an **`INTEGRATION` declaration** (service / transport / config_vars) and a
    flat **`CONTRACT`** (the operational values the runner must provide).
 
-`SKILL.md` is the authoritative body contract and is fed verbatim to the codegen
+`CODEGEN.md` is the authoritative body contract and is fed verbatim to the codegen
 model. It requires: perform the real action; stdlib transports only
 (`urllib`/`http.client`, `imaplib`/`smtplib`/`poplib`, `subprocess`, file I/O);
 no mocking; data from `ctx.config` (never embedded or fabricated); request

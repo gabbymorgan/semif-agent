@@ -2,7 +2,7 @@
 
 The small `llm` provider authors a skill's title + description; writing the
 runnable body is a separate step: a larger OpenAI-compatible model (a
-code-capable model on your configured codegen endpoint) is prompted with the SKILL.md contract plus the request
+code-capable model on your configured codegen endpoint) is prompted with the CODEGEN.md contract plus the request
 and the existing tree, and must reply with valid Python implementing `act` plus
 the `INTEGRATION` and `CONTRACT` module constants. The shared provider transport
 lives in `provider.py`.
@@ -23,7 +23,7 @@ from .decisions import Request
 from .provider import OpenAICompatClient, ProviderError
 from .skills import SkillDraft, tree_summary
 
-DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "SKILL.md"
+DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "CODEGEN.md"
 
 
 class CodegenError(ProviderError):
@@ -47,11 +47,11 @@ def read_skill_contract(path: str | None = None) -> str:
 
 
 def skill_contract_ref(path: str | None = None) -> dict:
-    """Provenance pointer for the SKILL.md revision at authoring time.
+    """Provenance pointer for the CODEGEN.md revision at authoring time.
 
     Returns {"ref": str | None, "dirty": bool | None}. `ref` is the short git
     commit sha the contract was read under — revivable with
-    `git show <ref>:SKILL.md` — and `dirty` records whether the working-tree
+    `git show <ref>:CODEGEN.md` — and `dirty` records whether the working-tree
     contract differed from that commit. Both are None when the contract is not
     inside a git checkout (the pointer degrades to nothing rather than a
     non-revivable hash). Any subprocess failure degrades the same way; only a
@@ -107,7 +107,7 @@ BODY_DIRECTIVES = (
     "for operational data. Ask the human only to refine the product goal and "
     "requirements.\n"
     "Write a single `act(ctx, request)` function. Declare the required "
-    "operational values as a module-level `CONTRACT` dict exactly as SKILL.md "
+    "operational values as a module-level `CONTRACT` dict exactly as CODEGEN.md "
     "specifies: a flat map of variable name -> semantic description. Every key "
     "in CONTRACT must be read from `ctx.config`; do not declare optional "
     "values with safe defaults — read those with `ctx.config.get(...)` instead.\n"
@@ -122,7 +122,7 @@ BODY_DIRECTIVES = (
     "no localhost defaults, test ports, or fixture values may appear in the "
     "body.\n"
     "Declare the integration as a module-level `INTEGRATION` dict exactly as "
-    "SKILL.md specifies: service, transport, config_vars.\n"
+    "CODEGEN.md specifies: service, transport, config_vars.\n"
     "If this skill interacts with one of the available bridge services listed "
     "below, call that bridge over HTTP with the URL from its config variable — "
     "never speak the service's native protocol directly (no WebSocket to "
@@ -146,7 +146,7 @@ def _requirements_block(requirements: dict[str, str] | None) -> str:
 def _integration_hint_block(draft: SkillDraft) -> str:
     """Advisory integration hint from elicitation: service + transport.
 
-    Never overrides the request, requirements, or SKILL.md contract — it only
+    Never overrides the request, requirements, or CODEGEN.md contract — it only
     biases the body writer toward the integration the questions were aiming at.
     """
     integration = getattr(draft, "integration", None) or {}
@@ -172,7 +172,7 @@ def build_skill_body_prompt(
     """Messages for the code-generation model.
 
     The small model already chose the title + description; the big model only
-    writes the runnable body against the SKILL.md contract, informed by the
+    writes the runnable body against the CODEGEN.md contract, informed by the
     request, the category, and the existing skills so it avoids duplication.
     `requirements` carries the answers to elicitation questions asked of the
     human during authoring.

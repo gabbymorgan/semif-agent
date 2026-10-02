@@ -17,7 +17,7 @@ Two boundaries matter:
   every code-generation prompt (body, retry, regen, elicitation, testgen) and is
   the single source of bridge specifics: the model learns which real services it
   may build against, each one's base-URL config var, auth header/token var,
-  config-var docs, and its endpoints with request/response/error shapes. SKILL.md
+  config-var docs, and its endpoints with request/response/error shapes. CODEGEN.md
   and TESTGEN.md carry only the generic pattern.
 """
 

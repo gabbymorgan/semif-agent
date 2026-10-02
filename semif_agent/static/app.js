@@ -133,7 +133,7 @@ function eventRow(evt) {
   } else if (evt.kind === "skill_writing") {
     div.textContent = `writing skill ${evt.skill} — ${evt.description} (${evt.model || "codegen"})`;
     if (evt.contract_ref) {
-      div.title = `SKILL.md @ ${evt.contract_ref}${evt.contract_dirty ? "*" : ""}`;
+      div.title = `CODEGEN.md @ ${evt.contract_ref}${evt.contract_dirty ? "*" : ""}`;
     }
   } else if (evt.kind === "skill_created") {
     div.textContent = `created ${evt.skill}${evt.written ? " (body written)" : " (stub)"}`;
@@ -421,7 +421,7 @@ function eventNode(evt) {
     if (evt.contract_ref) {
       const ref = document.createElement("div");
       ref.className = "muted";
-      ref.textContent = `SKILL.md @ ${evt.contract_ref}${evt.contract_dirty ? "*" : ""}`;
+      ref.textContent = `CODEGEN.md @ ${evt.contract_ref}${evt.contract_dirty ? "*" : ""}`;
       body.appendChild(ref);
     }
     const badge = document.createElement("span");
