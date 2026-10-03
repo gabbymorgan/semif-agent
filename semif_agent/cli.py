@@ -177,6 +177,50 @@ def build_engine_config(config: dict, pins: dict | None = None) -> EngineConfig:
     )
 
 
+def build_codegen_client(config: dict) -> CodegenClient:
+    """Build the codegen client from the `codegen` config block.
+
+    `provider` selects the class (`opencode` -> the Console client, which adds
+    bearer auth and a User-Agent) and the endpoint/auth come from
+    `_provider_endpoint`. Shared by `build_scheduler` and the integration tests
+    so both exercise the configured provider rather than assuming ollama.
+    """
+    codegen_cfg = config.get("codegen", {}) or {}
+    deg_cfg = codegen_cfg.get("degeneration", {}) or {}
+    provider = str(codegen_cfg.get("provider", "ollama") or "ollama").lower()
+    client_cls = ConsoleCodegenClient if provider == "opencode" else CodegenClient
+    endpoint = _provider_endpoint(
+        codegen_cfg,
+        config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
+    )
+    return client_cls(
+        base_url=endpoint["base_url"],
+        model=_required_model(codegen_cfg, "codegen"),
+        timeout=float(codegen_cfg.get("timeout", 1200.0)),
+        stream=bool(codegen_cfg.get("stream", False)),
+        idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
+        idle_timeout=float(codegen_cfg.get("idle_timeout", 180.0)),
+        context_window=float(codegen_cfg.get("context_window", 0.0)),
+        smart_limit=int(codegen_cfg.get("smart_limit", 250000)),
+        warn_limit=int(codegen_cfg.get("warn_limit", 500000)),
+        max_fill_ratio=float(codegen_cfg.get("max_fill_ratio", 0.9)),
+        warn_fill_ratio=float(codegen_cfg.get("warn_fill_ratio", 0.7)),
+        max_output=float(codegen_cfg.get("max_output", 0.85)),
+        chars_per_token=float(codegen_cfg.get("chars_per_token", 4.0)),
+        degeneration_interval=int(deg_cfg.get("interval", 8000)),
+        degeneration_window=int(deg_cfg.get("window", 2000)),
+        degeneration_min_chars=int(deg_cfg.get("min_chars", 4000)),
+        temperature=_opt_float(codegen_cfg.get("temperature")),
+        top_p=_opt_float(codegen_cfg.get("top_p")),
+        presence_penalty=_opt_float(codegen_cfg.get("presence_penalty")),
+        frequency_penalty=_opt_float(codegen_cfg.get("frequency_penalty")),
+        max_attempts=int(codegen_cfg.get("max_attempts", 3)),
+        api_key=endpoint["api_key"],
+        extra_headers=endpoint["extra_headers"],
+        user_agent=endpoint["user_agent"],
+    )
+
+
 def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
     engine = SemIfEngine(build_engine_config(config))
     llm_cfg = config.get("llm", {}) or {}
@@ -204,40 +248,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     codegen_cfg = config.get("codegen", {})
     deg_cfg = codegen_cfg.get("degeneration", {}) or {}
-    codegen_provider = str(codegen_cfg.get("provider", "ollama") or "ollama").lower()
-    codegen_cls = (
-        ConsoleCodegenClient if codegen_provider == "opencode" else CodegenClient
-    )
-    codegen_endpoint = _provider_endpoint(
-        codegen_cfg,
-        config.get("llm", {}).get("base_url", "http://localhost:11434/v1"),
-    )
-    codegen = codegen_cls(
-        base_url=codegen_endpoint["base_url"],
-        model=_required_model(codegen_cfg, "codegen"),
-        timeout=float(codegen_cfg.get("timeout", 1200.0)),
-        stream=bool(codegen_cfg.get("stream", False)),
-        idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
-        idle_timeout=float(codegen_cfg.get("idle_timeout", 180.0)),
-        context_window=float(codegen_cfg.get("context_window", 0.0)),
-        smart_limit=int(codegen_cfg.get("smart_limit", 250000)),
-        warn_limit=int(codegen_cfg.get("warn_limit", 500000)),
-        max_fill_ratio=float(codegen_cfg.get("max_fill_ratio", 0.9)),
-        warn_fill_ratio=float(codegen_cfg.get("warn_fill_ratio", 0.7)),
-        max_output=float(codegen_cfg.get("max_output", 0.85)),
-        chars_per_token=float(codegen_cfg.get("chars_per_token", 4.0)),
-        degeneration_interval=int(deg_cfg.get("interval", 8000)),
-        degeneration_window=int(deg_cfg.get("window", 2000)),
-        degeneration_min_chars=int(deg_cfg.get("min_chars", 4000)),
-        temperature=_opt_float(codegen_cfg.get("temperature")),
-        top_p=_opt_float(codegen_cfg.get("top_p")),
-        presence_penalty=_opt_float(codegen_cfg.get("presence_penalty")),
-        frequency_penalty=_opt_float(codegen_cfg.get("frequency_penalty")),
-        max_attempts=int(codegen_cfg.get("max_attempts", 3)),
-        api_key=codegen_endpoint["api_key"],
-        extra_headers=codegen_endpoint["extra_headers"],
-        user_agent=codegen_endpoint["user_agent"],
-    )
+    codegen = build_codegen_client(config)
 
     def make_degeneration_check(run_id: str):
         """2-option SemIf decision (continue/stop) that aborts a degenerating

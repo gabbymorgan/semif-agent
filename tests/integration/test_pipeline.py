@@ -13,8 +13,7 @@ import time
 import pytest
 
 from semif_agent.cli import (
-    _opt_float,
-    _required_model,
+    build_codegen_client,
     build_engine_config,
     build_scheduler,
     load_config,
@@ -297,17 +296,11 @@ def test_generate_skill_body_codegen(tmp_path):
     """
     config = load_config()
     require_real(config)
-    codegen_cfg = config.get("codegen", {})
-    client = CodegenClient(
-        base_url=codegen_cfg.get("base_url", "http://localhost:11434/v1"),
-        model=_required_model(codegen_cfg, "codegen"),
-        timeout=float(codegen_cfg.get("timeout", 1200.0)),
-        stream=True,
-        temperature=_opt_float(codegen_cfg.get("temperature")),
-        top_p=_opt_float(codegen_cfg.get("top_p")),
-        presence_penalty=_opt_float(codegen_cfg.get("presence_penalty")),
-        frequency_penalty=_opt_float(codegen_cfg.get("frequency_penalty")),
-    )
+    # Build the client exactly as build_scheduler does, so the test exercises the
+    # configured provider (e.g. the hosted Console, which needs auth + a
+    # User-Agent) rather than assuming an unauthenticated ollama endpoint.
+    config["codegen"] = {**(config.get("codegen") or {}), "stream": True}
+    client = build_codegen_client(config)
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(
         name="check_service",
