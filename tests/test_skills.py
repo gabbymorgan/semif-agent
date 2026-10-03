@@ -1318,6 +1318,77 @@ def test_skill_pre_act_contract_pause_and_resume(tmp_path):
     assert scheduler.pending is None
 
 
+def test_pre_act_skip_leaves_variable_unset_and_does_not_reask(tmp_path):
+    """An empty answer skips a contract variable: it is left unset, the run
+    proceeds, and the same variable is never re-asked (regression: the old
+    no-op skip re-asked the identical question forever)."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["tracking"] = []
+    scheduler.body_store.write_contract(
+        "tracking", "track_live", {"token": "The tracking token."}
+    )
+
+    seen = {}
+
+    def act(ctx, request):
+        seen.update(ctx.config)
+        return ActionResult(action_log="done", new_state="done")
+
+    skill = Skill(
+        name="track_live",
+        category="tracking",
+        description="Follow a package.",
+        act=act,
+        contract={"token": "The tracking token."},
+    )
+
+    result = scheduler._run_skill(skill, Request("track my package"))
+    assert result.kind == "needs_input"
+    assert scheduler.pending is not None and scheduler.pending.pre_act is True
+
+    status, detail = scheduler.answer("")
+    assert status == "ran", detail
+    assert scheduler.pending is None
+    assert "token" not in seen, "a skipped variable must stay unset"
+
+
+def test_pre_act_skip_advances_to_next_missing_variable(tmp_path):
+    """Skipping one contract variable leaves just that one empty and moves on to
+    the next missing variable, then runs."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["tracking"] = []
+    scheduler.body_store.write_contract(
+        "tracking", "probe", {"alpha": "first", "beta": "second"}
+    )
+
+    seen = {}
+
+    def act(ctx, request):
+        seen.update(ctx.config)
+        return ActionResult(action_log="done", new_state="done")
+
+    skill = Skill(
+        name="probe",
+        category="tracking",
+        description="Probe.",
+        act=act,
+        contract={"alpha": "first", "beta": "second"},
+    )
+
+    result = scheduler._run_skill(skill, Request("probe"))
+    assert result.kind == "needs_input"
+    assert "`alpha`" in result.summary
+
+    status, detail = scheduler.answer("")
+    assert status == "needs_input"
+    assert scheduler.pending is not None
+    assert "`beta`" in scheduler.pending.question
+
+    status, detail = scheduler.answer("")
+    assert status == "ran", detail
+    assert "alpha" not in seen and "beta" not in seen
+
+
 def test_unresolved_variables_respects_tiered_config(tmp_path):
     """Contract vars are satisfied by global config, category config, skill
     config, or per-fire answers — in that order of precedence."""

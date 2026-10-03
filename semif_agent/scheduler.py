@@ -572,7 +572,10 @@ class Scheduler:
         """Feed the human's answer to a run paused for input.
 
         Routed directly to the pending run — no gate, score, or navigation —
-        and the run resumes by re-invoking `act`.
+        and the run resumes by re-invoking `act`. An empty answer is accepted:
+        a pre-act contract variable is left unset and marked skipped, and an
+        act-driven pause receives the empty string (the body may then fail,
+        which is assessed normally).
         """
         with self._lock:
             if self.pending is None:
@@ -580,7 +583,12 @@ class Scheduler:
             pending = self.pending
             self.pending = None
             pending.request.user_input = text
-            self.trace.append("answered", pending.request.id, text=text)
+            self.trace.append(
+                "answered",
+                pending.request.id,
+                text=text,
+                skipped=not (text or "").strip(),
+            )
             outcome = self.runner.resume(
                 pending.skill, pending.request, pre_act=pending.pre_act
             )

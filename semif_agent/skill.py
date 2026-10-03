@@ -125,17 +125,22 @@ class SkillRunner:
             return []
         answered = request.meta.get("config_answers", {})
         if self.store is not None:
-            return unresolved_variables(self.store, skill, self.ctx.config, answered)
-        merged = {**self.ctx.config}
-        merged.update(skill.config or {})
-        merged.update(answered)
-        return [name for name in skill.contract if name not in merged]
+            missing = unresolved_variables(self.store, skill, self.ctx.config, answered)
+        else:
+            merged = {**self.ctx.config}
+            merged.update(skill.config or {})
+            merged.update(answered)
+            missing = [name for name in skill.contract if name not in merged]
+        # A variable the human chose to skip (empty answer) stays unresolved but
+        # must never be re-asked: the run proceeds with it left unset.
+        skipped = request.meta.get("config_skipped", ())
+        return [name for name in missing if name not in skipped]
 
     def _variable_question(self, skill: Skill, variable: str) -> str:
         desc = (skill.contract or {}).get(variable, "")
         return (
             f"To run {skill.category}.{skill.name} I need `{variable}`. {desc}\n"
-            "Reply with the value, or 'skip' to leave it empty."
+            "Reply with the value, or leave it empty to skip."
         )
 
     def _decide_record(self, skill: Skill, request: Request, variable: str, value: str) -> bool:
@@ -172,6 +177,8 @@ class SkillRunner:
     def _record_answer(self, skill: Skill, request: Request) -> None:
         """Persist (or stash per-fire) the human's answer to the last question.
 
+        An empty answer (or the literal "skip") leaves the variable unset and
+        marks it skipped for this run, so the run continues instead of re-asking.
         `request.user_input` is cleared after consumption so a contract answer
         does not leak into a later act-driven pause or the skill's own
         user_input checks.
@@ -183,6 +190,7 @@ class SkillRunner:
             return
         value = answer.strip()
         if not value or value.lower() == "skip":
+            request.meta.setdefault("config_skipped", set()).add(variable)
             return
         if self._decide_record(skill, request, variable, value):
             skill.config = {**(skill.config or {}), variable: value}

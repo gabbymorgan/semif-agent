@@ -2,5 +2,7 @@
   "nextcloud_url": "Base URL of the Nextcloud instance, e.g. https://cloud.example.com (no path, no trailing slash needed).",
   "nextcloud_username": "The Nextcloud username whose calendars are used.",
   "nextcloud_app_password": "A Nextcloud app password (Settings > Security > Devices & sessions) used for CalDAV Basic auth; the account password only works when two-factor auth is off.",
-  "nextcloud_default_calendar": "Name of the calendar new events go to by default, e.g. personal (a request may still name another calendar)."
+  "nextcloud_default_calendar": "Name of the calendar new events go to by default, e.g. personal (a request may still name another calendar).",
+  "llm_bridge_url": "Base URL of the local LLM bridge, e.g. http://127.0.0.1:5229 (no trailing slash needed); used to extract the event title and description.",
+  "llm_bridge_token": "Shared secret for the LLM bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth."
 }

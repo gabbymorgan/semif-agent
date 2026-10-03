@@ -182,7 +182,8 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 `gateway.simplex`. The gateway MUST NOT read history, show/create
                 invite links, or compose messages — see "gateway isolation"
                 below.
-bridges/        standalone third-party API bridges (SimpleX first). base.py:
+bridges/        standalone third-party API bridges (SimpleX first, plus the
+                LLM bridge). base.py:
                 BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
                 `X-Semif-Token` guard). inbox.py: MessagingInbox (bounded FIFO +
                 contacts learned from inbound DMs and the daemon contact list,
@@ -191,8 +192,13 @@ bridges/        standalone third-party API bridges (SimpleX first). base.py:
                 gateway's), buffers every inbound DM, refreshes the daemon
                 contact list on (re)connect + on demand, serves invite-link/
                 read/send plus daemon-backed unread + per-chat history.
+                llm.py: LLMBridge — a generic `POST /chat` in front of the
+                scheduler's configured `llm` client (reused, not re-configured),
+                so bodies get short generated text (e.g. an event title +
+                description) over HTTP.
                 registry.py: CATALOG, describe_bridges() (catalog injected
-                into the codegen prompts), run_bridges(). Run with `python -m
+                into the codegen prompts), run_bridges() (threads the scheduler's
+                `llm` client into the LLM bridge). Run with `python -m
                 semif_agent.cli bridge [--name NAME]`; config under `bridges`.
 simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
                 adapter and the bridge (parse direct text across v7 shapes,
@@ -501,7 +507,9 @@ CLI, unit tests (24) + integration tests (2).
   `codegen.timeout: 3600`, the SimpleX gateway enabled
   (`gateway.simplex.enabled = true`, `ws_url` from `simplex_chat.port`) and the
   standalone forwarding bridge enabled (`bridges.simplex.enabled = true`,
-  `ws_url` from `simplex_chat.forward_port`, top-level `simplex_bridge_url`);
+  `ws_url` from `simplex_chat.forward_port`, top-level `simplex_bridge_url`) and
+  the LLM bridge enabled (`bridges.llm.enabled = true`, top-level
+  `llm_bridge_url`; it reuses the `llm` model);
   the operator sets `llm.model`/`llm.base_url` and `codegen.model`/
   `codegen.base_url`. Bootstrap renders/enables four user services:
   `semif-simplex.service` (the command `simplex-chat` bot daemon,
@@ -663,6 +671,11 @@ CLI, unit tests (24) + integration tests (2).
   satisfy pause the run **before act** (`pre_act`), asking the human one at a
   time. Each answer gets a SemIf `record-as-config vs ask-again-each-fire` choice
   (phase `config:record`); recorded values persist to the skill `config.json`.
+  **An empty answer (or the literal "skip") skips that variable for the run**: it
+  stays unset in `ctx.config` and is never re-asked, and the run proceeds (or
+  asks the next missing variable). An act-driven `needs_input` also accepts an
+  empty answer — it is forwarded to `act` as `user_input=""`; a body that then
+  fails for lack of the info is assessed/repair-offered normally.
 - **Resolved-input observation.** The `assess:outcome` / `assess:requeue` state
   includes the resolved contract values (`resolved inputs:` block) so the
   decision sees the full query → resolution → action path; secret-named
@@ -907,6 +920,21 @@ CLI, unit tests (24) + integration tests (2).
   it in sync with the bridge port. Skills reach a bridge with the ordinary `http`
   transport, so their hermetic tests are loopback HTTP like any other HTTP body.
   `simplex.next_message` and `simplex.connect_link` are the seeds.
+- **LLM bridge** (`bridges/llm.py`). A generic `POST /chat`
+  `{"messages": [{"role","content"}, ...], "max_tokens"?: int}` ->
+  `{"text": "<model reply>"}` (plus `GET /health`, `400` bad body, `502` model
+  error) in front of the agent's language model, so a body can ask for short
+  generated text over HTTP instead of speaking the OpenAI-compatible protocol
+  itself. It does **not** own the model connection: `run_bridge` passes the
+  scheduler's already-configured `llm` client through `run_bridges`/`build_bridge`
+  into `LLMBridge`, so the endpoint/model/sampler stay configured once in the
+  top-level `llm` block; the `bridges.llm` block carries only the local listener
+  (`enabled`/`host`/`port`/`token`). Bodies reach it via the top-level
+  `llm_bridge_url` (+ optional `llm_bridge_token`). It runs inside the existing
+  `semif-bridge.service` process (all enabled bridges start together); with no
+  client it reports `502`, never a fabricated reply. `calendar.create_event` is
+  the first consumer (title + description extraction, cached in `request.meta`
+  across a `needs_input` resume).
 
 ## Bridge backlog (one session per item)
 
@@ -939,7 +967,12 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   outbound counterpart to `simplex.next_message`: resolve the recipient with a
   SemIf sub-decision over `/contacts`, send only on explicit user intent, and
   report the bridge's `contact_id` / errors honestly.
-- [ ] **4. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
+- [x] **4. LLM bridge** (`bridges/llm.py`). Shipped: `LLMBridge` exposes a
+  generic `POST /chat` in front of the scheduler's configured `llm` client
+  (threaded through `run_bridges`/`build_bridge`, never re-configured), registered
+  in `CATALOG` and seeded under `bridges.llm` + top-level `llm_bridge_url`.
+  `calendar.create_event` extracts its title + description through it.
+- [ ] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
   + config block + `CATALOG` entry; the codegen prompts pick it up automatically
   through `describe_bridges()`.
 

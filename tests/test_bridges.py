@@ -14,6 +14,7 @@ import urllib.request
 
 import pytest
 
+from semif_agent.bridges.llm import LLMBridge
 from semif_agent.bridges.registry import describe_bridges, known_infos
 from semif_agent.bridges.simplex import SimplexBridge
 
@@ -442,6 +443,94 @@ def test_history_lookup_failure_is_reported():
         bridge.stop()
 
 
+# ---- LLM bridge ----
+
+class FakeLLMClient:
+    """Stands in for the scheduler's configured `llm` client."""
+
+    def __init__(self, reply="ok", error=None):
+        self.reply = reply
+        self.error = error
+        self.calls = []
+
+    def chat(self, messages, max_tokens=None):
+        self.calls.append((messages, max_tokens))
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+def start_llm_bridge(client=None, **config):
+    bridge = LLMBridge(config, client=client)
+    port = bridge.start()
+    return bridge, f"http://127.0.0.1:{port}"
+
+
+def test_llm_bridge_chat_returns_model_text():
+    client = FakeLLMClient(reply='{"title": "x", "description": ""}')
+    bridge, base = start_llm_bridge(client)
+    try:
+        messages = [{"role": "user", "content": "add lunch tomorrow"}]
+        assert post(f"{base}/chat", {"messages": messages}) == {
+            "text": client.reply
+        }
+        assert client.calls == [(messages, None)]
+    finally:
+        bridge.stop()
+
+
+def test_llm_bridge_forwards_max_tokens():
+    client = FakeLLMClient()
+    bridge, base = start_llm_bridge(client)
+    try:
+        post(f"{base}/chat", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 64})
+        assert client.calls[0][1] == 64
+    finally:
+        bridge.stop()
+
+
+def test_llm_bridge_rejects_bad_body():
+    bridge, base = start_llm_bridge(FakeLLMClient())
+    try:
+        for payload in ({"messages": []}, {"messages": [{"role": "user"}]}, {}):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                post(f"{base}/chat", payload)
+            assert exc.value.code == 400
+    finally:
+        bridge.stop()
+
+
+def test_llm_bridge_without_a_client_is_unavailable():
+    bridge, base = start_llm_bridge(None)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            post(f"{base}/chat", {"messages": [{"role": "user", "content": "hi"}]})
+        assert exc.value.code == 502
+    finally:
+        bridge.stop()
+
+
+def test_llm_bridge_maps_client_error_to_502():
+    bridge, base = start_llm_bridge(FakeLLMClient(error=RuntimeError("down")))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            post(f"{base}/chat", {"messages": [{"role": "user", "content": "hi"}]})
+        assert exc.value.code == 502
+    finally:
+        bridge.stop()
+
+
+def test_llm_bridge_health_and_token():
+    bridge, base = start_llm_bridge(FakeLLMClient(), token="sekret")
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/health")
+        assert exc.value.code == 401
+        assert get(f"{base}/health", token="sekret") == {"ok": True, "platform": "llm"}
+    finally:
+        bridge.stop()
+
+
 # ---- catalog / codegen surface ----
 
 def test_known_infos_include_simplex():
@@ -452,6 +541,17 @@ def test_known_infos_include_simplex():
     assert info.url_config_var == "simplex_bridge_url"
     assert info.auth_header == "X-Semif-Token"
     assert info.auth_config_var == "simplex_bridge_token"
+
+
+def test_known_infos_include_llm():
+    infos = {info.name: info for info in known_infos()}
+    assert "llm" in infos
+    info = infos["llm"]
+    assert info.service == "llm"
+    assert info.url_config_var == "llm_bridge_url"
+    assert info.auth_header == "X-Semif-Token"
+    assert info.auth_config_var == "llm_bridge_token"
+    assert any("/chat" in endpoint for endpoint in info.endpoints)
 
 
 def test_every_bridge_documents_its_config_vars_and_auth():

@@ -699,7 +699,7 @@ function renderStatus() {
   const pending = state.status.pending;
   $("#answer-form").classList.toggle("hidden", !pending);
   if (pending) {
-    $("#answer-input").placeholder = `${pending.skill}: ${pending.question}`;
+    $("#answer-input").placeholder = `${pending.skill}: ${pending.question} (empty to skip)`;
     const p = document.createElement("div");
     p.className = "pending-line";
     p.textContent = `awaiting input (${pending.run_id || pending.skill}): ${pending.question}`;

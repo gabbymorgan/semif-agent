@@ -1,11 +1,12 @@
 """Third-party API bridges: a secure local layer between skills and services.
 
 A **bridge service** is a standalone process that exposes one third-party system
-(SimpleX first, more later) to codegen-authored skill bodies over a local,
-token-guarded HTTP API. It exists so a generated body never speaks a system's
-native protocol (WebSocket, SMTP, CalDAV, a CLI's private flags) directly: it
-calls a small, documented, uniform HTTP surface instead, and the bridge owns the
-messy integration details and credentials.
+(SimpleX, the local language model) to codegen-authored skill bodies over a
+local, token-guarded HTTP API. It exists so a generated body never speaks a
+system's native protocol (WebSocket, SMTP, CalDAV, an OpenAI-compatible chat
+API, a CLI's private flags) directly: it calls a small, documented, uniform HTTP
+surface instead, and the bridge owns the messy integration details and
+credentials.
 
 Two boundaries matter:
 

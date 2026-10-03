@@ -4,25 +4,29 @@ Real integration: CalDAV against the user's Nextcloud (SabreDAV). Connection
 details and the default calendar come from `ctx.config` (`nextcloud_url`,
 `nextcloud_username`, `nextcloud_app_password`, `nextcloud_default_calendar`).
 
-`act` reads `request.text` and derives the event's per-request arguments — the
-title, the start date/time, the duration, and (when named) the target calendar.
-Missing arguments are asked one at a time and the answer is stashed in
-`request.meta`; because `act` is single-phase and re-runs from the top after a
-`needs_input` pause, the body re-parses the query each pass and never re-asks a
-question it already has an answer for. Calendars are discovered over PROPFIND and
-a named target is resolved with a SemIf sub-decision when more than one matches;
-otherwise the configured default calendar is used. The event is created with a
-real CalDAV PUT (iCalendar, UTC timestamps, `If-None-Match: *`) and the real
-outcome is reported.
+`act` reads `request.text` and derives the event's per-request arguments. The
+title and description are extracted by the local LLM bridge (`llm_bridge_url`,
+`llm_bridge_token`) with one generic chat call, cached in `request.meta` so a
+`needs_input` resume does not re-call it; the start date/time and duration are
+parsed deterministically. Missing arguments are asked one at a time and the
+answer is stashed in `request.meta`; because `act` is single-phase and re-runs
+from the top after a `needs_input` pause, the body never re-asks a question it
+already has an answer for. Calendars are discovered over PROPFIND and the target
+is resolved by a single SemIf choice over every owned calendar (state = the user
+query), asking which one the request refers to; a strong winner (probability >=
+`CALENDAR_WINNER_TAU`) is used, otherwise the configured default calendar is
+used. The event is created with a real CalDAV PUT (iCalendar, UTC timestamps,
+`If-None-Match: *`) and the real outcome is reported.
 
-Parsing is deliberately bounded and stdlib-only (no text generation is available
-to a skill body): when a required field cannot be derived confidently the body
-asks rather than guessing.
+The date/time parse is deliberately bounded; the title/description come from the
+model. When the model bridge is unavailable the body reports the real failure
+rather than guessing.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import re
 import urllib.error
 import urllib.parse
@@ -42,6 +46,8 @@ INTEGRATION = {
         "nextcloud_username",
         "nextcloud_app_password",
         "nextcloud_default_calendar",
+        "llm_bridge_url",
+        "llm_bridge_token",
     ],
 }
 
@@ -50,12 +56,17 @@ CONTRACT = {
     "nextcloud_username": "The Nextcloud username whose calendars are used.",
     "nextcloud_app_password": "A Nextcloud app password (Settings > Security > Devices & sessions) used for CalDAV Basic auth; the account password only works when two-factor auth is off.",
     "nextcloud_default_calendar": "Name of the calendar new events go to by default, e.g. personal (a request may still name another calendar).",
+    "llm_bridge_url": "Base URL of the local LLM bridge, e.g. http://127.0.0.1:5229 (no trailing slash needed); used to extract the event title and description.",
+    "llm_bridge_token": "Shared secret for the LLM bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
 }
 
 DAV = "DAV:"
 CALDAV = "urn:ietf:params:xml:ns:caldav"
 TIMEOUT_SECONDS = 30
 DEFAULT_DURATION_MINUTES = 60
+# A SemIf probability at or above this counts as a "strong winner" for the
+# target calendar; below it the configured default calendar is used instead.
+CALENDAR_WINNER_TAU = 0.6
 
 PROPFIND_BODY = (
     '<?xml version="1.0" encoding="utf-8"?>'
@@ -106,23 +117,12 @@ _MONTH_ALT = (
     r"|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
 
-_LEADING_NOISE = re.compile(
-    r"^\s*(please\s+)?(add|create|schedule|put|make|set\s+up|new|insert|book|a|an|the)\b[\s:,-]*",
-    re.I,
-)
-_TITLE_NOISE = [
-    re.compile(r"\b(to|on|in)\s+(my|the)\s+[A-Za-z0-9_'-]+\s+calendar\b", re.I),
-    re.compile(r"\b(to|on|in)\s+(my|the)\s+calendar\b", re.I),
-    re.compile(r"\b(new\s+|calendar\s+)*event\b", re.I),
-    re.compile(r"\b(called|titled|named)\b", re.I),
-]
-_TRAILING_NOISE = re.compile(
-    r"[\s,;:-]*\b(for|on|at|to|the|my|a|an|in|of)\b[\s,;:-]*$", re.I
-)
-
-
 class CalDavError(Exception):
     """A real failure talking to the calendar service."""
+
+
+class BridgeError(Exception):
+    """A real failure talking to the local LLM bridge."""
 
 
 def _now():
@@ -210,30 +210,65 @@ def _calendar_path(ctx, calendar):
     )
 
 
-# ---- request -> arguments ----
+# ---- LLM field extraction ----
 
 
-def _remove_spans(text, spans):
-    for start, end in sorted(spans, reverse=True):
-        text = text[:start] + " " + text[end:]
-    return text
+def _extract_fields(ctx, request):
+    """Ask the LLM bridge for the event title and description.
+
+    One generic `POST /chat` call to the local LLM bridge; the reply is the JSON
+    object the prompt asks for. Raises `BridgeError` when the bridge is
+    unreachable or the reply carries no usable object.
+    """
+    base = str(ctx.config.get("llm_bridge_url", "") or "").strip().rstrip("/")
+    if not base:
+        raise BridgeError("llm_bridge_url is not configured")
+    token = str(ctx.config.get("llm_bridge_token", "") or "").strip()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Extract the calendar event from the user's request. Reply with "
+                'ONLY a JSON object: {"title": "<short event title>", '
+                '"description": "<one short sentence, or empty>"}. The title must '
+                "not contain the date, the time, or words like add/schedule/create."
+            ),
+        },
+        {"role": "user", "content": request.text},
+    ]
+    payload = json.dumps({"messages": messages}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Semif-Token"] = token
+    http_request = urllib.request.Request(
+        base + "/chat", data=payload, method="POST", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(http_request, timeout=TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()[:200]
+        raise BridgeError(f"llm bridge /chat: HTTP {exc.code} {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise BridgeError(f"llm bridge /chat: {exc}") from exc
+    return _parse_fields(str(data.get("text") or ""))
 
 
-def _clean_title(text):
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    previous = None
-    while previous != text:
-        previous = text
-        text = _LEADING_NOISE.sub("", text)
-        for pattern in _TITLE_NOISE:
-            text = pattern.sub(" ", text)
-        text = _TRAILING_NOISE.sub("", text)
-        text = re.sub(r"\s{2,}", " ", text).strip()
-    return text.strip(" \t,;:-.")
-
-
-def _extract_title(text, spans):
-    return _clean_title(_remove_spans(text or "", spans))
+def _parse_fields(text):
+    """Pull the `{"title","description"}` object out of the model's reply."""
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise BridgeError("llm bridge returned no JSON object")
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError as exc:
+        raise BridgeError(f"llm bridge returned invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise BridgeError("llm bridge returned JSON that is not an object")
+    return {
+        "title": str(data.get("title") or "").strip(),
+        "description": str(data.get("description") or "").strip(),
+    }
 
 
 def _month_number(token):
@@ -261,8 +296,9 @@ def _parse_when(text, now):
     """Best-effort extraction of date/time/duration from free text.
 
     Returns a dict with `date` (datetime.date | None), `time` (datetime.time |
-    None), `all_day` (bool), `duration_minutes` (int | None), `from_weekday`
-    (bool) and `spans` (matched ranges, so the title can be cleaned).
+    None), `all_day` (bool), `duration_minutes` (int | None) and `from_weekday`
+    (bool). The title and description come from the LLM bridge, so no matched
+    spans are tracked here.
     """
     text = text or ""
     result = {
@@ -272,22 +308,18 @@ def _parse_when(text, now):
         "duration_minutes": None,
         "from_weekday": False,
     }
-    spans = []
 
     match = re.search(r"\ball[\s-]?day\b|\bwhole\s+day\b", text, re.I)
     if match:
         result["all_day"] = True
-        spans.append(match.span())
 
     match = re.search(r"\bfor\s+(\d+(?:\.\d+)?)\s*(hours?|hrs?|h)\b", text, re.I)
     if match:
         result["duration_minutes"] = int(round(float(match.group(1)) * 60))
-        spans.append(match.span())
     else:
         match = re.search(r"\bfor\s+(\d+)\s*(minutes?|mins?|m)\b", text, re.I)
         if match:
             result["duration_minutes"] = int(match.group(1))
-            spans.append(match.span())
         else:
             for phrase, minutes in (
                 (r"\bfor\s+half\s+an?\s+hour\b", 30),
@@ -297,7 +329,6 @@ def _parse_when(text, now):
                 match = re.search(phrase, text, re.I)
                 if match:
                     result["duration_minutes"] = minutes
-                    spans.append(match.span())
                     break
 
     date = None
@@ -307,7 +338,6 @@ def _parse_when(text, now):
             date = datetime(
                 int(match.group(1)), int(match.group(2)), int(match.group(3))
             ).date()
-            spans.append(match.span())
         except ValueError:
             date = None
 
@@ -321,8 +351,6 @@ def _parse_when(text, now):
             month = _month_number(match.group(1))
             year = int(match.group(3)) if match.group(3) else None
             date = _resolve_month_day(month, int(match.group(2)), year, now)
-            if date is not None:
-                spans.append(match.span())
 
     if date is None:
         match = re.search(
@@ -334,8 +362,6 @@ def _parse_when(text, now):
             month = _month_number(match.group(2))
             year = int(match.group(3)) if match.group(3) else None
             date = _resolve_month_day(month, int(match.group(1)), year, now)
-            if date is not None:
-                spans.append(match.span())
 
     if date is None:
         match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", text)
@@ -346,8 +372,6 @@ def _parse_when(text, now):
             if year is not None and year < 100:
                 year += 2000
             date = _resolve_month_day(month, day, year, now)
-            if date is not None:
-                spans.append(match.span())
 
     if date is None:
         match = re.search(
@@ -361,7 +385,6 @@ def _parse_when(text, now):
                 date = now.date() + timedelta(days=1)
             else:
                 date = now.date() + timedelta(days=7)
-            spans.append(match.span())
 
     if date is None:
         match = _WEEKDAY_RE.search(text)
@@ -371,19 +394,14 @@ def _parse_when(text, now):
             prefix = text[max(0, match.start() - 6):match.start()]
             if re.search(r"\bnext\s*$", prefix, re.I):
                 date += timedelta(days=7)
-                spans.append((match.start() - len("next "), match.end()))
-            else:
-                spans.append(match.span())
             result["from_weekday"] = True
 
     parsed_time = None
     match = re.search(r"\bnoon\b", text, re.I)
     if match:
         parsed_time = time(12, 0)
-        spans.append(match.span())
     elif re.search(r"\bmidnight\b", text, re.I):
         parsed_time = time(0, 0)
-        spans.append(re.search(r"\bmidnight\b", text, re.I).span())
     else:
         match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\b", text, re.I)
         if match:
@@ -393,44 +411,23 @@ def _parse_when(text, now):
                 hour += 12
             if hour < 24 and minute < 60:
                 parsed_time = time(hour, minute)
-                spans.append(match.span())
         else:
             match = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
             if match:
                 hour, minute = int(match.group(1)), int(match.group(2))
                 if hour < 24 and minute < 60:
                     parsed_time = time(hour, minute)
-                    spans.append(match.span())
             else:
                 match = re.search(r"\bat\s+(\d{1,2})\b", text, re.I)
                 if match and 13 <= int(match.group(1)) < 24:
                     parsed_time = time(int(match.group(1)), 0)
-                    spans.append(match.span())
 
     result["date"] = date
     result["time"] = parsed_time
-    result["spans"] = spans
     return result
 
 
 # ---- calendar resolution ----
-
-
-def _mentioned_calendars(calendars, text):
-    low = (text or "").lower()
-    found = []
-    for calendar in calendars:
-        for token in {calendar["name"].lower(), calendar["label"].lower()}:
-            if len(token) < 3:
-                continue
-            pattern = (
-                rf"\b{re.escape(token)}\b\s+calendar\b"
-                rf"|\bcalendar\b\s+\b{re.escape(token)}\b"
-            )
-            if re.search(pattern, low):
-                found.append(calendar)
-                break
-    return found
 
 
 def _resolve_calendar(ctx, request, calendars, decisions):
@@ -441,33 +438,22 @@ def _resolve_calendar(ctx, request, calendars, decisions):
             default = calendar
             break
 
-    mentioned = _mentioned_calendars(calendars, request.text)
-    if len(mentioned) == 1:
-        return mentioned[0]["name"]
-    if len(mentioned) > 1:
-        return _choose_calendar(ctx, request, mentioned, default, decisions)
-    if default is not None:
-        return default["name"]
     if len(calendars) == 1:
         return calendars[0]["name"]
-    return _choose_calendar(ctx, request, calendars, default, decisions)
 
-
-def _choose_calendar(ctx, request, candidates, default, decisions):
-    options = []
-    for calendar in candidates:
-        label = calendar["label"]
-        if default is not None and calendar["name"] == default["name"]:
-            label = f"{label} (default)"
-        options.append(Option(calendar["name"], label))
     decision = DecisionRequest(
         state=request.text,
-        question="Which calendar should the event go on?",
-        options=options,
+        question="Which calendar is referred to in the user query?",
+        options=[Option(c["name"], c["label"]) for c in calendars],
     )
     result = ctx.engine.call(decision)
     decisions.append((decision, result))
-    return result.selected
+    winner = result.selected
+    if result.prob(winner) >= CALENDAR_WINNER_TAU:
+        return winner
+    if default is not None:
+        return default["name"]
+    return winner
 
 
 # ---- iCalendar ----
@@ -532,9 +518,21 @@ def act(ctx, request):
             answers[awaiting] = request.user_input.strip()
         request.meta.pop("create_event_awaiting", None)
 
+    fields = request.meta.get("create_event_fields")
+    if fields is None:
+        try:
+            fields = _extract_fields(ctx, request)
+        except BridgeError as exc:
+            return ActionResult(
+                action_log=f"calendar.create_event: {exc}",
+                new_state=request.text,
+            )
+        request.meta["create_event_fields"] = fields
+    title = fields["title"]
+    description = fields["description"]
+
     now = _now()
     parsed = _parse_when(request.text, now)
-    title = _extract_title(request.text, parsed["spans"])
 
     if answers.get("title"):
         title = answers["title"].strip()
@@ -589,7 +587,9 @@ def act(ctx, request):
     calendar = _resolve_calendar(ctx, request, calendars, decisions)
 
     uid = f"{uuid.uuid4().hex}@semif-agent"
-    body = _build_ics(uid, title, start, end, all_day, _utc_stamp(now))
+    body = _build_ics(
+        uid, title, start, end, all_day, _utc_stamp(now), description=description
+    )
     path = _calendar_path(ctx, calendar) + urllib.parse.quote(uid, safe="") + ".ics"
     try:
         _request(

@@ -479,4 +479,9 @@ SimpleX forwarding bridge (messaging UX for skills):
   - Skills reach it over HTTP via the top-level simplex_bridge_url
     (default http://127.0.0.1:5227); simplex.connect_link shows its address and
     simplex.next_message reads messages sent to it.
+
+LLM bridge (generation for skills):
+  - Runs inside the same 'semif-bridge' process. It reuses the top-level `llm`
+    model (configured once) and serves a generic POST /chat; skills call it via
+    the top-level llm_bridge_url (default http://127.0.0.1:5229).
 EOF

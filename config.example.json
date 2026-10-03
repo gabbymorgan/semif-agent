@@ -94,6 +94,8 @@
   "skill_seeds": "seeds",
   "simplex_bridge_url": "http://127.0.0.1:5227",
   "simplex_bridge_token": "",
+  "llm_bridge_url": "http://127.0.0.1:5229",
+  "llm_bridge_token": "",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
@@ -117,6 +119,13 @@
       "user_id": 1,
       "auto_accept": true,
       "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+    },
+    "llm": {
+      "_comment": "LLM bridge: a generic `POST /chat` in front of the agent's configured `llm` model, so skill bodies can ask for short generated text (e.g. an event title + description) over HTTP instead of speaking the OpenAI-compatible protocol. It reuses the top-level `llm` client (endpoint/model/sampler configured once there); this block only carries the local listener. Skills use the top-level `llm_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. It runs inside the same `semif-bridge.service` process as the other enabled bridges.",
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 5229,
+      "token": ""
     }
   },
   "gateway": {

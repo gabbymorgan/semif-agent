@@ -173,3 +173,33 @@ def test_resume_can_ask_again(tmp_path):
     assert status == "ran"
     assert scheduler.pending is None
     assert scheduler.current is None
+
+
+def test_empty_answer_is_accepted_and_forwarded(tmp_path):
+    """An act-driven pause always accepts an empty answer: it is forwarded to
+    `act` as user_input='' (never rejected). A body that cannot proceed without
+    the info simply produces a failed run, which assessment handles."""
+    scheduler = build_scheduler(tmp_path)
+    seen = []
+
+    def act(ctx, request):
+        seen.append(request.user_input)
+        if request.user_input is None:
+            return ActionResult(
+                action_log="ask",
+                new_state=request.text,
+                needs_input="What's the tracking number?",
+            )
+        return ActionResult(action_log="empty answer", new_state="unresolved")
+
+    skill = Skill(name="track.manual", category="tracking", description="", act=act)
+    result = scheduler._run_skill(skill, Request("track my package"))
+    assert result.kind == "needs_input"
+
+    status, detail = scheduler.answer("")
+    assert status == "ran", detail
+    assert seen == [None, ""], "the empty answer must reach act"
+    assert scheduler.pending is None
+    assert scheduler.current is None
+    answered = [e for e in scheduler.trace.read() if e["kind"] == "answered"]
+    assert answered and answered[-1]["skipped"] is True

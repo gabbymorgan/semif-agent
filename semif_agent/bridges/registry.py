@@ -13,10 +13,11 @@ from __future__ import annotations
 import threading
 
 from .base import BridgeInfo, BridgeService
+from .llm import LLMBridge
 from .simplex import SimplexBridge
 
 #: Known bridge services. Order is presentation order.
-CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge,)
+CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge, LLMBridge)
 
 
 def _class_for(name: str) -> type[BridgeService] | None:
@@ -67,12 +68,21 @@ def describe_bridges() -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_bridge(config: dict, name: str, trace=None) -> BridgeService:
-    """Instantiate one bridge from the top-level `bridges.<name>` config block."""
+def build_bridge(
+    config: dict, name: str, trace=None, llm=None
+) -> BridgeService:
+    """Instantiate one bridge from the top-level `bridges.<name>` config block.
+
+    `llm` is the scheduler's configured language-model client, handed to the LLM
+    bridge so it reuses the top-level `llm` endpoint/model instead of duplicating
+    that config. Other bridges ignore it.
+    """
     bridge_class = _class_for(name)
     if bridge_class is None:
         raise KeyError(f"unknown bridge: {name!r}")
     block = (config.get("bridges", {}) or {}).get(name, {}) or {}
+    if bridge_class is LLMBridge:
+        return LLMBridge(block, trace=trace, client=llm)
     return bridge_class(block, trace=trace)
 
 
@@ -80,11 +90,13 @@ def run_bridges(
     config: dict,
     names: list[str] | None = None,
     trace=None,
+    llm=None,
 ) -> int:
     """Run the selected (+ enabled) bridges until interrupted.
 
     With explicit `names`, a bridge runs even if disabled is not set; with no
-    names, only `enabled` bridges run. Returns a process exit code.
+    names, only `enabled` bridges run. Returns a process exit code. `llm` is the
+    scheduler's configured language-model client (see `build_bridge`).
     """
     blocks = config.get("bridges", {}) or {}
     selected: list[BridgeService] = []
@@ -95,7 +107,7 @@ def run_bridges(
         block = blocks.get(name, {}) or {}
         if not names and not block.get("enabled", False):
             continue
-        bridge = bridge_class(block, trace=trace)
+        bridge = build_bridge(config, name, trace=trace, llm=llm)
         ok, hint = bridge.check_requirements()
         if not ok:
             print(f"bridge {name} unavailable: {hint}")

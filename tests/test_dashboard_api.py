@@ -318,6 +318,30 @@ def test_answer_roundtrip_via_api(tmp_path):
     finally:
         server.close()
 
+def test_answer_accepts_empty_via_api(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    seen = []
+
+    def act(ctx, request):
+        seen.append(request.user_input)
+        if request.user_input is None:
+            return ActionResult(
+                action_log="ask", new_state=request.text, needs_input="Tracking number?"
+            )
+        return ActionResult(action_log="empty answer", new_state="unresolved")
+
+    skill = Skill(name="track.manual", category="tracking", description="", act=act)
+    scheduler._run_skill(skill, Request("track my package"))
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/answer", {"text": ""})
+        assert status == 200
+        assert payload["status"] == "ran"
+        assert seen == [None, ""], "empty answer must be forwarded to act"
+    finally:
+        server.close()
+
+
 def test_questions_endpoint_roundtrip(tmp_path):
     scheduler = build_scheduler(tmp_path)
     scheduler.questions.append(

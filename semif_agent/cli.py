@@ -486,7 +486,8 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         if _fatal_exit(scheduler) is not None:
             return 1
         while scheduler.pending is not None:
-            answer = input(f"{scheduler.pending.question} ")
+            hint = "" if scheduler.pending.pre_act else " [leave empty to skip]"
+            answer = input(f"{scheduler.pending.question}{hint} ")
             status, detail = scheduler.answer(answer)
             print(f"[{status}] {detail}")
             if _fatal_exit(scheduler) is not None:
@@ -629,7 +630,9 @@ def run_bridge(scheduler: Scheduler, config: dict, name: str | None = None) -> i
     from .bridges.registry import run_bridges
 
     names = [name] if name else None
-    return run_bridges(config, names=names, trace=scheduler.trace)
+    return run_bridges(
+        config, names=names, trace=scheduler.trace, llm=scheduler.llm
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

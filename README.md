@@ -376,7 +376,7 @@ semif_agent/
   static/           dashboard frontend (html/js/css)
   simplex_ws.py     neutral SimpleX daemon protocol (shared by gateway + bridge)
   gateway/          messenger COMMAND intake/reply (SimpleX first)
-  bridges/          standalone third-party API bridges (SimpleX first)
+  bridges/          standalone third-party API bridges (SimpleX + the LLM bridge)
 seeds/              committed starter skills (calendar, simplex)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
@@ -496,6 +496,8 @@ Key blocks:
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
 | `simplex_bridge_url` / `simplex_bridge_token` | what skill bodies call |
+| `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
+| `llm_bridge_url` / `llm_bridge_token` | what skill bodies call for generation |
 | `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
 
@@ -616,6 +618,22 @@ acking is a client-side read receipt, not an API call.
 is injected into every codegen prompt via `describe_bridges()`, so it is the
 single source of bridge specifics. Adding a bridge = a class + a config block +
 a `CATALOG` entry.
+
+The **LLM bridge** (`semif_agent/bridges/llm.py`) is the second: a generic
+
+```
+POST /chat {"messages": [{"role","content"}, ...], "max_tokens"?: int} -> {"text": "..."}
+```
+
+in front of the agent's language model, so a body can ask for short generated
+text (e.g. extract an event title + description) over HTTP instead of speaking
+the OpenAI-compatible protocol itself. It does not own the model connection:
+`cli bridge` threads the scheduler's already-configured `llm` client into it, so
+the endpoint/model/sampler live only in the top-level `llm` block; `bridges.llm`
+carries just the local listener. Skills call it via `llm_bridge_url`
+(+ optional `llm_bridge_token`); with no client it returns `502`, never a
+fabricated reply. It starts in the same `semif-bridge.service` process as the
+other enabled bridges.
 
 ### Dream report
 

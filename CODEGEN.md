@@ -9,7 +9,7 @@ contract, `TESTGEN.md`. This file is about the runnable body only.
 ## What a skill is
 
 Semif-agent is an end-user application: an everyday person asks it to do a task,
-and it does that task using a combination of user-provided data and a catalog of basic services known as bridges. A skill is the thing that performs one of those tasks: it is the leaf in the skill tree that the agent navigates to when it has resolved a request to a single, concrete action.
+and it does that task using a combination of user-provided data and a catalog of basic services known as bridges. A skill is the thing that performs one of those tasks: it is the leaf in the skill tree that the agent navigates to when it has resolved a request to a single, concrete action. Navigation is performed by an llm-based classification engine known as SemIf.
 
 A skill is three things:
 
@@ -58,8 +58,6 @@ def act(ctx, request) -> ActionResult:
   type. `decisions` carries any `(DecisionRequest, DecisionResult)` pairs made
   during `act` so they are logged as training rows. `needs_input` carries a
   question for the human; see the rules below.
-
-There is no `predict` phase. Resolution and the action happen in `act`.
 
 ### Data contract
 
