@@ -477,10 +477,14 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )
     calendar = scheduler.tree["calendar"]
-    assert [s.name for s in calendar] == ["next_event"]
-    assert calendar[0].description.startswith("Report the next")
-    assert calendar[0].status == "ready"
-    assert calendar[0].integration["transport"] == "caldav"
+    assert [s.name for s in calendar] == ["create_event", "next_event"]
+    next_event = next(s for s in calendar if s.name == "next_event")
+    assert next_event.description.startswith("Report the next")
+    assert next_event.status == "ready"
+    assert next_event.integration["transport"] == "caldav"
+    create_event = next(s for s in calendar if s.name == "create_event")
+    assert create_event.description.startswith("Create a calendar event")
+    assert create_event.integration["transport"] == "caldav"
 
 
 def test_load_config_anchors_runtime_paths_to_checkout(tmp_path):
@@ -535,7 +539,10 @@ def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
         "connect_link",
         "next_message",
     ]
-    assert [s.name for s in scheduler.tree["calendar"]] == ["next_event"]
+    assert [s.name for s in scheduler.tree["calendar"]] == [
+        "create_event",
+        "next_event",
+    ]
 
 
 def test_navigate_empty_tree_short_circuits(tmp_path):

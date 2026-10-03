@@ -31,6 +31,7 @@ def seed_id(seed: Path) -> str:
 def test_expected_seeds_exist():
     ids = {seed_id(seed) for seed in SEED_DIRS}
     assert "calendar.next_event" in ids
+    assert "calendar.create_event" in ids
     assert "simplex.next_message" in ids
     assert "simplex.connect_link" in ids
 

@@ -1,0 +1,6 @@
+{
+  "nextcloud_url": "Base URL of the Nextcloud instance, e.g. https://cloud.example.com (no path, no trailing slash needed).",
+  "nextcloud_username": "The Nextcloud username whose calendars are used.",
+  "nextcloud_app_password": "A Nextcloud app password (Settings > Security > Devices & sessions) used for CalDAV Basic auth; the account password only works when two-factor auth is off.",
+  "nextcloud_default_calendar": "Name of the calendar new events go to by default, e.g. personal (a request may still name another calendar)."
+}

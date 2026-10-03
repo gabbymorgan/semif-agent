@@ -579,7 +579,10 @@ CLI, unit tests (24) + integration tests (2).
   at first fire) is written to the runtime store `data/skills/`, so the committed
   seed never holds secrets, and a generated body with the same name replaces the
   seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
-  server-side) is the reference seed; `simplex.next_message` (read via the
+  server-side) is the reference read seed and `calendar.create_event` (CalDAV
+  PUT; derives the title/date/time from the query, asks for missing fields and
+  resumes, resolves the target calendar against the configured default) is the
+  reference write seed; `simplex.next_message` (read via the
   forwarding bridge) and `simplex.connect_link` (show/create the forwarding
   bot's contact link) are the messenger seeds; `tests/test_seed_skills.py` keeps
   them honest.
