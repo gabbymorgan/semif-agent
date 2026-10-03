@@ -46,11 +46,71 @@ skill is exercised.
 ## Code body contract
 
 The generated module is persisted to `data/skills/<category>/<name>/skill.py`
-and imported at runtime. It must satisfy **all** of the following:
+and imported at runtime. It must satisfy **all** of the following.
+
+**Import everything you use.** The module is not handed `ActionResult`, the
+engine types, or any stdlib module for free — the runner imports your file
+as-is. A body that calls `urllib.request.urlopen`, `json.loads`, `re.match`, or
+returns `ActionResult` **without importing them raises `NameError` the moment it
+runs**. Start every body with its imports (see the complete example below).
+
+### Complete minimal example
+
+This is the whole shape of a body — imports first, then `INTEGRATION`,
+`CONTRACT`, and `act`. Copy this structure.
+
+```python
+"""Check whether a configured HTTP service is reachable.
+
+Real integration: the service over HTTP. Operational values come from
+`ctx.config` (declared in CONTRACT).
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+
+from semif_agent.skills import ActionResult
+
+INTEGRATION = {
+    "service": "example_service",
+    "transport": "http",
+    "config_vars": ["example_base_url"],
+}
+
+CONTRACT = {
+    "example_base_url": "Base URL of the service, e.g. https://service.example.org.",
+}
+
+
+def act(ctx, request) -> ActionResult:
+    """Perform the real action and return the result + new state."""
+    base_url = ctx.config["example_base_url"]
+    try:
+        with urllib.request.urlopen(f"{base_url}/status", timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError) as exc:
+        return ActionResult(
+            action_log=f"could not reach {base_url}: {exc}",
+            new_state=request.text,
+        )
+    return ActionResult(
+        action_log=f"{base_url} returned {payload}",
+        new_state=json.dumps(payload),
+    )
+```
+
+That example checks a fixed configured endpoint, so it takes no per-request
+argument; a skill that acts on the query reads `request.text` and derives its
+arguments from it — see "Turning the request into arguments".
 
 ### Required function
 
 ```python
+from semif_agent.skills import ActionResult
+
 def act(ctx, request) -> ActionResult:
     """Perform the real action and return the result + new state."""
 ```
@@ -113,6 +173,7 @@ argument is missing or genuinely ambiguous and no candidate set can resolve it,
 return `needs_input` (below); do not invent a value.
 
 ```python
+# DecisionRequest/Option come from semif_agent.decisions (not .skills).
 # The recipient is a per-request argument: read it from the query, then resolve
 # it against the real contact list with a SemIf sub-decision.
 matches = [c for c in contacts if c["display_name"].lower() in request.text.lower()]
@@ -167,9 +228,12 @@ talk to. Declaring a transport the body does not use is a broken skill.
 
 When the body has a **set of candidates to choose from** — contacts,
 conversations, calendars, folders, targets — it must employ a relevant SemIf
-query over them:
+query over them. The decision types come from the agent package, not
+`semif_agent.skills`:
 
 ```python
+from semif_agent.decisions import DecisionRequest, Option
+
 decision = DecisionRequest(
     state=request.text,
     question="Which calendar is the intended one?",
@@ -237,7 +301,8 @@ Rules:
   exists; fail honestly when it does not.
 - **No mocking.** Sub-decisions use the real engine: build a
   `DecisionRequest(state, question, options=[Option(id, description), ...])`
-  and call `ctx.engine.call(decision)`; return it inside
+  (both imported from `semif_agent.decisions`) and call
+  `ctx.engine.call(decision)`; return it inside
   `ActionResult.decisions`.
 - **Never swallow the request.** If the skill cannot act, return an
   `ActionResult` with a short `action_log` explaining why and set `new_state`
@@ -343,7 +408,10 @@ Rules:
 
 A generated skill is accepted only if:
 
-1. It compiles (`compile(..., "exec")` succeeds) and defines `act`.
+1. It compiles (`compile(..., "exec")` succeeds), imports every name it uses
+   (`ActionResult` from `semif_agent.skills`; `DecisionRequest`/`Option` from
+   `semif_agent.decisions` only when it actually builds a sub-decision; each
+   stdlib module it calls — no `NameError` at run time), and defines `act`.
 2. Its `name` matches the manifest regex and its `category` is given.
 3. Its body imports nothing outside the stdlib and the agent package.
 4. It uses `ctx.engine` (never mocks) and returns proper `ActionResult` types.

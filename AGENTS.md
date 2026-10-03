@@ -127,7 +127,8 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 declare INTEGRATION service/transport/config_vars, and declare
                 their own flat `CONTRACT` {var: description});
                 parse/validate (compile + act + CONTRACT keys all read from
-                ctx.config) + parse_contract / parse_integration /
+                ctx.config + every referenced name imported/bound, via symtable)
+                + parse_contract / parse_integration /
                 infer_integration / integration_findings; the bridge catalog
                 (describe_bridges()) is injected into the body, retry, regen,
                 elicitation, and testgen prompts — it is the single source of
@@ -623,7 +624,8 @@ CLI, unit tests (24) + integration tests (2).
      repair): CODEGEN.md + request + tree + requirements answers; the body is a
      single `act(ctx, request)`, reads every operational value from `ctx.config`,
      performs the real action, and declares `INTEGRATION` and its own flat
-     `CONTRACT` (every contract key must be read from `ctx.config`, enforced by
+     `CONTRACT` (every contract key must be read from `ctx.config`, and every
+     name the body references must be imported/bound — both enforced by
      `parse_skill_body`).
   3. **fidelity gate** (`authoring:fidelity` SemIf decision +
      `integration_findings`): a rapid sanity check (accept/reconsider) — is the

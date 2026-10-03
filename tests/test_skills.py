@@ -1274,6 +1274,58 @@ def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
         httpd.server_close()
 
 
+def test_async_skill_write_fails_gracefully_on_unimported_names(tmp_path):
+    """A body with a valid CONTRACT but a name it never imports is rejected by
+    the parse gate, so the retry ladder runs and the leaf stays a restartable
+    stub — never a leaf that only fails at first run.
+
+    Regression: the static gate used to accept a body that returned
+    `ActionResult` without importing it; materialize then raised
+    `name 'ActionResult' is not defined`.
+    """
+    body = (
+        "INTEGRATION = {'service': 'probe_service', 'transport': 'compute', "
+        "'config_vars': ['sender_address']}\n"
+        "CONTRACT = {'sender_address': 'The sender.'}\n"
+        "def act(ctx, request):\n"
+        "    sender = ctx.config['sender_address']\n"
+        "    return ActionResult(action_log=sender, new_state=request.text)\n"
+    )
+    httpd, base = _pipeline_codegen_server([body])
+    try:
+        scheduler = _scheduler(
+            tmp_path,
+            codegen=CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2),
+        )
+        scheduler.tree["tracking"] = [
+            Skill(name="track_live", category="tracking", description="Follow a package.")
+        ]
+        leaf = scheduler.tree["tracking"][0]
+
+        request = Request("track my drone delivery in real time")
+        scheduler._start_skill_write(
+            request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5
+        )
+
+        deadline = time.monotonic() + 10
+        failed = None
+        while time.monotonic() < deadline:
+            failed = next(
+                (e for e in scheduler.trace.read() if e["kind"] == "skill_write_failed"),
+                None,
+            )
+            if failed:
+                break
+            time.sleep(0.05)
+        assert failed is not None, "worker must surface the failure"
+        assert "never imports" in failed.get("message", ""), failed
+        assert not leaf.writing
+        assert leaf.is_noop(), "leaf must stay a restartable stub"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_skill_pre_act_contract_pause_and_resume(tmp_path):
     """A contract variable the runner cannot satisfy pauses BEFORE act; the
     answer is recorded (engine unavailable -> ask-again, per-fire), then the run

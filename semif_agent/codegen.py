@@ -11,9 +11,11 @@ lives in `provider.py`.
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import re
 import subprocess
+import symtable
 import sys
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -210,13 +212,74 @@ def build_skill_body_prompt(
     ]
 
 
+_MODULE_SCOPE_NAMES = frozenset(
+    {
+        "__name__",
+        "__file__",
+        "__doc__",
+        "__package__",
+        "__spec__",
+        "__loader__",
+        "__builtins__",
+        "__annotations__",
+        "__cached__",
+    }
+)
+
+
+def _unresolved_names(code: str) -> list[str]:
+    """Names the body references but never binds (and that aren't builtins).
+
+    Catches a body that calls `urllib.request.urlopen` or returns
+    `ActionResult` without importing them: the generated body must import
+    everything it uses, since the runner imports the file as-is. Scope-aware via
+    stdlib `symtable` and purely static — it never executes the body, so it
+    cannot catch a wrong module path (the import statement binds the name
+    regardless); the real import in `materialize_skill` catches that.
+    """
+    try:
+        table = symtable.symtable(code, "<generated>", "exec")
+    except SyntaxError:
+        return []
+    bound = {
+        symbol.get_name()
+        for symbol in table.get_symbols()
+        if symbol.is_assigned() or symbol.is_imported() or symbol.is_namespace()
+    }
+    unresolved: set[str] = set()
+
+    def visit(scope: symtable.SymbolTable) -> None:
+        for symbol in scope.get_symbols():
+            name = symbol.get_name()
+            if not symbol.is_referenced():
+                continue
+            if (
+                symbol.is_local()
+                or symbol.is_parameter()
+                or symbol.is_assigned()
+                or symbol.is_imported()
+            ):
+                continue
+            if symbol.is_free():
+                # Closure over an enclosing function's local — bound, not free.
+                continue
+            if name in bound or name in _MODULE_SCOPE_NAMES or hasattr(builtins, name):
+                continue
+            unresolved.add(name)
+        for child in scope.get_children():
+            visit(child)
+
+    visit(table)
+    return sorted(unresolved)
+
+
 def parse_skill_body(raw: str) -> str:
     """Extract and validate a Python skill body from the model's reply.
 
     Accepts bare code, ```fenced``` code, or JSON {"code": "..."}. The body
-    must parse, define a module-level `act` function, and declare a valid flat
-    `CONTRACT` whose keys are all read from `ctx.config`. Returns the cleaned
-    source. Raises ValueError otherwise.
+    must parse, define a module-level `act` function, declare a valid flat
+    `CONTRACT` whose keys are all read from `ctx.config`, and import every name
+    it uses. Returns the cleaned source. Raises ValueError otherwise.
     """
     text = raw.strip()
     if "code" in text[:400] and "{" in text and "}" in text:
@@ -252,6 +315,14 @@ def parse_skill_body(raw: str) -> str:
     if dead:
         raise ValueError(
             f"CONTRACT declares {dead} but the body never reads them from ctx.config"
+        )
+    unresolved = _unresolved_names(text)
+    if unresolved:
+        raise ValueError(
+            "skill body references names it never imports or defines: "
+            f"{unresolved}; import everything you use "
+            "(e.g. `from semif_agent.skills import ActionResult`, "
+            "`import urllib.request`)"
         )
     return text
 

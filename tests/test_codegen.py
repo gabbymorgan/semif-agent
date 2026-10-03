@@ -288,6 +288,78 @@ def test_parse_skill_body_rejects_dead_contract_key():
         parse_skill_body(body)
 
 
+def test_parse_skill_body_rejects_missing_imports():
+    """A body that uses a name it never imports must be rejected at parse time.
+
+    Regression: a 4B codegen model wrote a plausible body that called
+    urllib.request.urlopen and returned ActionResult without importing either;
+    the static gate accepted it and it only failed later at materialize/run.
+    """
+    body = (
+        "INTEGRATION = {'service': 'probe_service', 'transport': 'http', "
+        "'config_vars': ['service_url']}\n"
+        "CONTRACT = {'service_url': 'The endpoint.'}\n"
+        "def act(ctx, request):\n"
+        "    url = ctx.config['service_url']\n"
+        "    with urllib.request.urlopen(url) as response:\n"
+        "        code = response.status\n"
+        "    return ActionResult(action_log=str(code), new_state=request.text)\n"
+    )
+    with pytest.raises(ValueError, match="never imports"):
+        parse_skill_body(body)
+
+
+def test_parse_skill_body_accepts_scoped_locals_closures_and_builtins():
+    """Locals, closures, comprehensions, with/except bindings, classes, and
+    builtins are all bound names — never flagged as unresolved."""
+    body = (
+        "from semif_agent.skills import ActionResult\n"
+        "CONTRACT = {'path': 'A path.'}\n"
+        "class Helper:\n"
+        "    def value(self):\n"
+        "        return 'ok'\n"
+        "def act(ctx, request):\n"
+        "    def inner():\n"
+        "        return Helper().value()\n"
+        "    items = [i for i in range(3)]\n"
+        "    with open(ctx.config['path']) as handle:\n"
+        "        text = handle.read()\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ValueError as exc:\n"
+        "        text = str(exc)\n"
+        "    return ActionResult(action_log=inner() + text + str(items), "
+        "new_state=request.text)\n"
+    )
+    code = parse_skill_body(body)
+    assert "def act" in code
+
+
+def test_parse_skill_body_allows_module_scope_dunders():
+    body = (
+        "from semif_agent.skills import ActionResult\n"
+        "CONTRACT = {}\n"
+        "if __name__ == '__main__':\n"
+        "    pass\n"
+        "def act(ctx, request):\n"
+        "    return ActionResult(action_log=__file__, new_state=request.text)\n"
+    )
+    assert "def act" in parse_skill_body(body)
+
+
+def test_parse_skill_body_does_not_catch_wrong_module_path():
+    """A wrong module path binds the name, so the static check cannot see it —
+    that failure belongs to the real import in materialize_skill."""
+    body = (
+        "from semif_agent.skills.decision import DecisionRequest\n"
+        "from semif_agent.skills import ActionResult\n"
+        "CONTRACT = {}\n"
+        "def act(ctx, request):\n"
+        "    return ActionResult(action_log='x', new_state=request.text)\n"
+    )
+    assert "def act" in parse_skill_body(body)
+
+
 def test_body_store_roundtrip(tmp_path):
     store = SkillStore(str(tmp_path / "skills"))
     assert store.list_skills() == []
