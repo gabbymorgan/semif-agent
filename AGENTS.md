@@ -586,14 +586,14 @@ CLI, unit tests (24) + integration tests (2).
   loads them into every tree at startup; recorded config (credentials collected
   at first fire) is written to the runtime store `data/skills/`, so the committed
   seed never holds secrets, and a generated body with the same name replaces the
-  seed. `calendar.next_event` (Nextcloud CalDAV, recurring events expanded
-  server-side) is the reference read seed and `calendar.create_event` (CalDAV
-  PUT; derives the title/date/time from the query, asks for missing fields and
-  resumes, resolves the target calendar against the configured default) is the
-  reference write seed; `simplex.next_message` (read via the
-  forwarding bridge) and `simplex.connect_link` (show/create the forwarding
-  bot's contact link) are the messenger seeds; `tests/test_seed_skills.py` keeps
-  them honest.
+  seed. `calendar.create_event` is the authoritative worked example (CalDAV PUT;
+  derives the title/date/time from the query, asks for missing fields and
+  resumes, resolves the target calendar with a SemIf choice over the owned
+  calendars — a strong winner is used, otherwise the configured default);
+  `calendar.next_event` is the read counterpart (Nextcloud CalDAV, recurring
+  events expanded server-side); `simplex.next_message` (read via the forwarding
+  bridge) and `simplex.connect_link` (show/create the forwarding bot's contact
+  link) are the messenger seeds; `tests/test_seed_skills.py` keeps them honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
   `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read

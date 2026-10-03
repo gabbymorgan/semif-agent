@@ -21,6 +21,11 @@ A skill is three things:
    talks to and how) and the `CONTRACT` constant (the values the runner must
    provide).
 
+The committed seed `seeds/calendar/create_event/` is the **authoritative worked
+example** of all three. Read its `manifest.json`, its `skill.py` (which declares
+`INTEGRATION` and `CONTRACT`), and its `skill.test.py` alongside this file; a new
+body should look and behave like it.
+
 ## Manifest schema
 
 Registered in `data/categories.json` (and mirrored in the running tree). Fields:
@@ -181,6 +186,9 @@ return ActionResult(..., decisions=[(decision, result)])
   `ActionResult.decisions` so the choice is logged with the run outcome.
 - Include any configured default (a value read from `ctx.config`) as one of the
   options, so the request can override the stored default.
+- When the winner is weak (its probability is below the skill's confidence
+  threshold), fall back to the configured default; with no configured default,
+  keep the weak winner. See how `calendar.create_event` resolves its calendar.
 
 ### Producing the result (output)
 
@@ -302,7 +310,7 @@ Rules:
 - **Resolve the recipient/target with a SemIf sub-decision.** When more than one
   conversation or target is relevant, resolve which one with a
   `ctx.engine.call(...)` sub-decision over the catalog's list endpoint (e.g.
-  contacts or buffered senders), mirroring how `calendar.next_event` picks a
+  contacts or buffered senders), mirroring how `calendar.create_event` picks a
   calendar. Use the catalog's default config var as the configured option when
   the request does not already make it clear.
 - **Sending requires user intent.** Send only because the request (or the
@@ -321,8 +329,8 @@ Rules:
 - Single purpose, single file, single module.
 - Avoid duplicating an existing skill in the same category.
 - `act` resolves ambiguity (arguments, recipients, targets) with SemIf
-  sub-decisions, mirroring how `calendar.next_event` resolves which calendar
-  to read.
+  sub-decisions, mirroring how `calendar.create_event` resolves which calendar
+  to write to.
 - `act` performs the concrete real action and writes a human-readable
   `action_log` that the SemIf assessment step can judge. Include what the
   service actually returned.

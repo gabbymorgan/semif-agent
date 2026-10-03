@@ -1,15 +1,20 @@
 """Report the next upcoming event on the user's Nextcloud calendar.
 
 Real integration: CalDAV against the user's Nextcloud (SabreDAV). Connection
-details come from `ctx.config` (`nextcloud_url`, `nextcloud_username`,
-`nextcloud_app_password`). `act` discovers the user's calendars over PROPFIND
-and resolves which one the request means with a SemIf sub-decision when there
-is more than one, then issues a `calendar-query` REPORT with server-side
-recurrence expansion and reports the earliest instance that has not ended yet.
+details and the default calendar come from `ctx.config` (`nextcloud_url`,
+`nextcloud_username`, `nextcloud_app_password`, `nextcloud_default_calendar`).
 
-Recurring events are expanded by the server (`<c:expand>`), so no RRULE
-engine lives here; a server that ignores expansion is reported honestly
-rather than guessed at.
+`act` discovers the user's calendars over PROPFIND and resolves which one the
+request means with a single SemIf choice over every owned calendar (state = the
+user query): a strong winner (probability >= `CALENDAR_WINNER_TAU`) is used,
+otherwise the configured default calendar is used; with no configured default
+the weak winner stands. It then issues a `calendar-query` REPORT with
+server-side recurrence expansion and reports the earliest instance that has not
+ended yet.
+
+Recurring events are expanded by the server (`<c:expand>`), so no RRULE engine
+lives here; a server that ignores expansion is reported honestly rather than
+guessed at.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ INTEGRATION = {
         "nextcloud_url",
         "nextcloud_username",
         "nextcloud_app_password",
+        "nextcloud_default_calendar",
     ],
 }
 
@@ -40,12 +46,16 @@ CONTRACT = {
     "nextcloud_url": "Base URL of the Nextcloud instance, e.g. https://cloud.example.com (no path, no trailing slash needed).",
     "nextcloud_username": "The Nextcloud username whose calendars are read.",
     "nextcloud_app_password": "A Nextcloud app password (Settings > Security > Devices & sessions) used for CalDAV Basic auth; the account password only works when two-factor auth is off.",
+    "nextcloud_default_calendar": "Name of the calendar read by default when the request names none, e.g. personal (a request may still name another calendar).",
 }
 
 DAV = "DAV:"
 CALDAV = "urn:ietf:params:xml:ns:caldav"
 LOOKAHEAD_DAYS = 60
 TIMEOUT_SECONDS = 30
+# A SemIf probability at or above this counts as a "strong winner" for the
+# target calendar; below it the configured default calendar is used instead.
+CALENDAR_WINNER_TAU = 0.6
 
 PROPFIND_BODY = (
     '<?xml version="1.0" encoding="utf-8"?>'
@@ -64,6 +74,11 @@ DURATION_RE = re.compile(
 
 class CalDavError(Exception):
     """A real failure talking to the calendar service."""
+
+
+def _now():
+    """Current local time (aware). A test seam; the body never freezes time."""
+    return datetime.now().astimezone()
 
 
 # ---- transport ----
@@ -180,6 +195,43 @@ def _calendar_payloads(body):
             if data.text:
                 payloads.append(data.text)
     return payloads
+
+
+# ---- calendar resolution ----
+
+
+def _default_calendar(ctx, calendars):
+    """The configured default calendar, if it is one of the account's."""
+    default_name = str(ctx.config.get("nextcloud_default_calendar", "") or "").strip().lower()
+    for calendar in calendars:
+        if default_name and default_name in (calendar["name"].lower(), calendar["label"].lower()):
+            return calendar
+    return None
+
+
+def _resolve_calendar(ctx, request, calendars, decisions):
+    """Resolve which calendar the request means, mirroring calendar.create_event.
+
+    A strong SemIf winner is used; a weak winner falls back to the configured
+    default calendar, and with no configured default the weak winner stands.
+    """
+    default = _default_calendar(ctx, calendars)
+    if len(calendars) == 1:
+        return calendars[0]["name"]
+
+    decision = DecisionRequest(
+        state=request.text,
+        question="Which calendar is referred to in the user query?",
+        options=[Option(c["name"], c["label"]) for c in calendars],
+    )
+    result = ctx.engine.call(decision)
+    decisions.append((decision, result))
+    winner = result.selected
+    if result.prob(winner) >= CALENDAR_WINNER_TAU:
+        return winner
+    if default is not None:
+        return default["name"]
+    return winner
 
 
 # ---- iCalendar parsing ----
@@ -316,28 +368,18 @@ def act(ctx, request):
             action_log="calendar.next_event: calendar discovery failed: no calendars found",
             new_state=request.text,
         )
+
     decisions = []
-    if len(calendars) == 1:
-        calendar = calendars[0]["name"]
-    else:
-        decision = DecisionRequest(
-            state=request.text,
-            question="Which calendar is the intended one?",
-            options=[
-                Option(c["name"], c["label"]) for c in calendars
-            ],
-        )
-        result = ctx.engine.call(decision)
-        decisions.append((decision, result))
-        calendar = result.selected
+    calendar = _resolve_calendar(ctx, request, calendars, decisions)
     if not calendar:
         return ActionResult(
             action_log="calendar.next_event aborted: no calendar resolved.",
             new_state=request.text,
             decisions=decisions,
         )
-    local_tz = datetime.now().astimezone().tzinfo or timezone.utc
-    now = datetime.now(local_tz)
+
+    now = _now()
+    local_tz = now.tzinfo or timezone.utc
     window_start = now - timedelta(days=1)
     window_end = now + timedelta(days=LOOKAHEAD_DAYS)
     try:
@@ -355,6 +397,7 @@ def act(ctx, request):
             new_state=request.text,
             decisions=decisions,
         )
+
     next_event = _pick_next(events, now)
     if next_event is None:
         message = (
@@ -362,6 +405,7 @@ def act(ctx, request):
             f"{window_end.strftime('%Y-%m-%d')}."
         )
         return ActionResult(action_log=message, new_state=message, decisions=decisions)
+
     summary = next_event.get("summary") or "(no title)"
     when = _format_when(next_event)
     message = f"Next event on {calendar!r}: {summary} — {when}"

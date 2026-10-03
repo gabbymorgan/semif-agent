@@ -341,8 +341,9 @@ fine-tuning loop — it is not yet the fine-tune itself.
 - **Messenger command gateway (SimpleX)** — take commands and reply over DM.
 - **Standalone bridge services** — a token-guarded localhost HTTP layer in front
   of third-party systems, so generated bodies never speak native protocols.
-- **Seeds** — shipped real starter skills: `calendar.next_event` (Nextcloud
-  CalDAV) and `simplex.next_message` / `simplex.connect_link`.
+- **Seeds** — shipped real starter skills: `calendar.create_event` (the
+  authoritative worked example), `calendar.next_event` (Nextcloud CalDAV), and
+  `simplex.next_message` / `simplex.connect_link`.
 - **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
 - **Stdlib-only core** — SemIf/llama.cpp are lazy imports, so the package stays
   importable and testable without the heavy engine installed.
@@ -675,11 +676,18 @@ folder format, plus a `manifest.json`. `merge_seed_store` loads them into every
 tree at startup; recorded config is written to the runtime store, so the
 committed seed never holds secrets.
 
+- `calendar.create_event` — create an event on Nextcloud CalDAV (the
+  authoritative worked example); resolves the target calendar with a SemIf
+  choice over the owned calendars (strong winner, else the configured default);
+  config vars `nextcloud_url`, `nextcloud_username`, `nextcloud_app_password`,
+  `nextcloud_default_calendar`, plus the LLM bridge (`llm_bridge_url`,
+  `llm_bridge_token`).
 - `calendar.next_event` — next upcoming event from Nextcloud CalDAV (recurring
   events expanded server-side); config vars `nextcloud_url`,
-  `nextcloud_username`, `nextcloud_app_password`.
+  `nextcloud_username`, `nextcloud_app_password`, `nextcloud_default_calendar`.
 - `simplex.next_message` — read the next unread message via the forwarding
-  bridge.
+  bridge; config vars `simplex_bridge_url`, `simplex_bridge_token`,
+  `simplex_default_contact`.
 - `simplex.connect_link` — show/create the forwarding bot's contact link.
 
 ---

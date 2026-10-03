@@ -1,14 +1,14 @@
 """Show the SimpleX contact link others use to connect to this agent.
 
 Real integration: the standalone SimpleX forwarding bridge
-(`simplex_bridge_url`). The bridge's own connection to the `simplex-chat`
-daemon is the only thing that can read (or create) the forwarding bot's *user
-contact address*; this body asks the bridge for it and reports the link
-honestly. It never opens a WebSocket to the daemon and never invents a link: if
-the bridge is not running or has no address, it says so.
+(`simplex_bridge_url`, `simplex_bridge_token`). The bridge's own connection to
+the `simplex-chat` daemon is the only thing that can read (or create) the
+forwarding bot's *user contact address*; this body asks the bridge for it and
+reports the link honestly. It never opens a WebSocket to the daemon and never
+invents a link: if the bridge is not running or has no address, it says so.
 
-`GET /address` shows the existing link and creates one on first call, returning
-`{short_link, full_link, created}`.
+`act` health-checks the bridge, then `GET /address` shows the existing link and
+creates one on first call, returning `{short_link, full_link, created}`.
 """
 
 from __future__ import annotations
@@ -37,6 +37,9 @@ class BridgeError(Exception):
     """The SimpleX forwarding bridge is unreachable or returned an error."""
 
 
+# ---- transport ----
+
+
 def _base(ctx):
     url = str(ctx.config.get("simplex_bridge_url", "") or "").strip().rstrip("/")
     if not url:
@@ -61,6 +64,9 @@ def _get(ctx, path):
         raise BridgeError(f"GET {path}: HTTP {exc.code} {detail}") from exc
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         raise BridgeError(f"GET {path}: {exc}") from exc
+
+
+# ---- skill phases ----
 
 
 def act(ctx, request):

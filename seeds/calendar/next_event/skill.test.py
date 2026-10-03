@@ -3,9 +3,10 @@
 Run from this folder: `python skill.test.py`. No external network: a loopback
 http.server plays the Nextcloud CalDAV endpoint. This proves the body builds
 real CalDAV requests, discovers calendars, resolves the calendar through a
-SemIf sub-decision, parses expanded iCalendar events, and fails honestly when
-the service errors. It does NOT prove the live integration — only a real run
-against the user's Nextcloud does.
+SemIf sub-decision (a strong winner is used, otherwise the configured default,
+otherwise the weak winner), parses expanded iCalendar events, and fails honestly
+when the service errors. It does NOT prove the live integration — only a real
+run against the user's Nextcloud does.
 """
 
 import base64
@@ -49,19 +50,28 @@ def build_ics():
 
 
 class FakeEngine:
-    """Test-only engine: picks the requested option id, else the first."""
+    """Test-only engine.
 
-    def __init__(self, pick=None):
+    By default it picks the requested option id (else the first) with full
+    confidence. Pass `probs` (a mapping of option id -> probability) to script an
+    arbitrary distribution, e.g. a near-tie that must fall back to the default.
+    """
+
+    def __init__(self, pick=None, probs=None):
         self.pick = pick
+        self.probs = probs
         self.decisions = []
 
     def call(self, decision):
         self.decisions.append(decision)
         option_ids = [option.id for option in decision.options]
-        chosen = self.pick if self.pick in option_ids else option_ids[0]
-        probabilities = [
-            1.0 if option_id == chosen else 0.0 for option_id in option_ids
-        ]
+        if self.probs is not None:
+            probabilities = [float(self.probs.get(option_id, 0.0)) for option_id in option_ids]
+        else:
+            chosen = self.pick if self.pick in option_ids else option_ids[0]
+            probabilities = [
+                1.0 if option_id == chosen else 0.0 for option_id in option_ids
+            ]
         return DecisionResult(
             request=decision, option_ids=option_ids, probabilities=probabilities
         )
@@ -137,11 +147,12 @@ def start_server(**overrides):
     return server, handler, f"http://127.0.0.1:{server.server_address[1]}"
 
 
-def fixture_config(url):
+def fixture_config(url, default="personal"):
     return {
         "nextcloud_url": url,
         "nextcloud_username": "testuser",
         "nextcloud_app_password": "app-pw",
+        "nextcloud_default_calendar": default,
     }
 
 
@@ -149,6 +160,7 @@ def main():
     global ICS
     ICS = build_ics()
 
+    # A strong winner is used even though a default is configured.
     server, handler, url = start_server()
     try:
         engine = FakeEngine(pick="work")
@@ -157,6 +169,10 @@ def main():
         action = skill.act(ctx, request)
         assert len(action.decisions) == 1, "act must log the calendar choice"
         assert len(engine.decisions) == 1
+        assert [option.id for option in engine.decisions[0].options] == [
+            "personal",
+            "work",
+        ], engine.decisions[0].options
         assert "Team sync" in action.action_log, action.action_log
         assert action.new_state, "act must set a new state"
 
@@ -174,6 +190,36 @@ def main():
         server.shutdown()
         server.server_close()
 
+    # A weak winner falls back to the configured default calendar.
+    server, handler, url = start_server()
+    try:
+        engine = FakeEngine(probs={"personal": 0.45, "work": 0.5})
+        ctx = ActionContext(engine=engine, config=fixture_config(url, default="personal"))
+        request = Request("what is the next event on my calendar?")
+        action = skill.act(ctx, request)
+        assert len(engine.decisions) == 1
+        assert handler.requests[1]["path"] == "/remote.php/dav/calendars/testuser/personal/", handler.requests[1]["path"]
+        assert "Team sync" in action.action_log, action.action_log
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # A weak winner with no configured default stands.
+    server, handler, url = start_server()
+    try:
+        engine = FakeEngine(probs={"personal": 0.45, "work": 0.5})
+        ctx = ActionContext(engine=engine, config=fixture_config(url, default=""))
+        request = Request("what is the next event on my calendar?")
+        action = skill.act(ctx, request)
+        assert len(engine.decisions) == 1
+        assert handler.requests[1]["path"] == "/remote.php/dav/calendars/testuser/work/", handler.requests[1]["path"]
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # A single calendar needs no SemIf decision.
     server, handler, url = start_server(calendar_count=1)
     try:
         engine = FakeEngine()
@@ -188,6 +234,7 @@ def main():
         server.shutdown()
         server.server_close()
 
+    # A failing REPORT is reported honestly.
     server, handler, url = start_server(report_status=500)
     try:
         engine = FakeEngine(pick="personal")

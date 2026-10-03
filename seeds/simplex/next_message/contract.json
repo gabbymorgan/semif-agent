@@ -1,4 +1,5 @@
 {
   "simplex_bridge_url": "Base URL of the standalone SimpleX forwarding bridge, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
-  "simplex_bridge_token": "Shared secret for the bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth."
+  "simplex_bridge_token": "Shared secret for the bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
+  "simplex_default_contact": "Default SimpleX contact (contact id or display name) used when the request does not strongly point at a conversation; leave blank to always use the strongest candidate."
 }

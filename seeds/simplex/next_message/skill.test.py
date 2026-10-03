@@ -2,10 +2,11 @@
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
 http.server plays the standalone SimpleX forwarding bridge. This proves the body
-peeks the inbox, resolves the conversation through a SemIf sub-decision (or a
-configured default), pops the real `next` message, and fails honestly when the
-bridge is unreachable. It does NOT prove the live integration — only a real run
-against the bridge and a real contact does.
+peeks the inbox, resolves the conversation through a SemIf sub-decision (a
+strong winner is used, otherwise the configured default, otherwise the weak
+winner), pops the real `next` message, and fails honestly when the bridge is
+unreachable. It does NOT prove the live integration — only a real run against
+the bridge and a real contact does.
 """
 
 import json
@@ -21,19 +22,28 @@ import skill
 
 
 class FakeEngine:
-    """Test-only engine: picks the requested option id, else the first."""
+    """Test-only engine.
 
-    def __init__(self, pick=None):
+    By default it picks the requested option id (else the first) with full
+    confidence. Pass `probs` (a mapping of option id -> probability) to script an
+    arbitrary distribution, e.g. a near-tie that must fall back to the default.
+    """
+
+    def __init__(self, pick=None, probs=None):
         self.pick = pick
+        self.probs = probs
         self.decisions = []
 
     def call(self, decision):
         self.decisions.append(decision)
         option_ids = [option.id for option in decision.options]
-        chosen = self.pick if self.pick in option_ids else option_ids[0]
-        probabilities = [
-            1.0 if option_id == chosen else 0.0 for option_id in option_ids
-        ]
+        if self.probs is not None:
+            probabilities = [float(self.probs.get(option_id, 0.0)) for option_id in option_ids]
+        else:
+            chosen = self.pick if self.pick in option_ids else option_ids[0]
+            probabilities = [
+                1.0 if option_id == chosen else 0.0 for option_id in option_ids
+            ]
         return DecisionResult(
             request=decision, option_ids=option_ids, probabilities=probabilities
         )
@@ -129,7 +139,7 @@ def test_multiple_senders_uses_semif_decision():
         server.server_close()
 
 
-def test_default_contact_skips_decision():
+def test_strong_winner_overrides_default_contact():
     server, handler, url = start_server(
         [
             message("m1", "4", "Alice", "hello there"),
@@ -137,13 +147,55 @@ def test_default_contact_skips_decision():
         ]
     )
     try:
-        engine = FakeEngine()
+        engine = FakeEngine(probs={"4": 0.1, "7": 0.9})
+        ctx = ActionContext(engine=engine, config=config(url, default="Alice"))
+        request = Request("read my next simplex message from Bob")
+        action = skill.act(ctx, request)
+        assert len(engine.decisions) == 1, "the conversation is chosen with one SemIf decision"
+        assert handler.requests[1] == "/inbox/next?contact=7", handler.requests
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_weak_winner_falls_back_to_default_contact():
+    server, handler, url = start_server(
+        [
+            message("m1", "4", "Alice", "hello there"),
+            message("m2", "7", "Bob", "shipment arrived"),
+        ]
+    )
+    try:
+        # Bob edges out Alice but stays below the strong-winner threshold, so the
+        # configured default ("Alice") is used instead.
+        engine = FakeEngine(probs={"4": 0.45, "7": 0.5})
         ctx = ActionContext(engine=engine, config=config(url, default="Alice"))
         request = Request("read my next simplex message")
         action = skill.act(ctx, request)
-        assert engine.decisions == [], "a configured default needs no SemIf decision"
-        assert "Alice" in action.action_log, action.action_log
+        assert len(engine.decisions) == 1
         assert handler.requests[1] == "/inbox/next?contact=4", handler.requests
+        assert "hello there" in action.action_log, action.action_log
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_weak_winner_without_default_stands():
+    server, handler, url = start_server(
+        [
+            message("m1", "4", "Alice", "hello there"),
+            message("m2", "7", "Bob", "shipment arrived"),
+        ]
+    )
+    try:
+        engine = FakeEngine(probs={"4": 0.45, "7": 0.5})
+        ctx = ActionContext(engine=engine, config=config(url))
+        request = Request("read my next simplex message")
+        action = skill.act(ctx, request)
+        assert len(engine.decisions) == 1
+        assert handler.requests[1] == "/inbox/next?contact=7", handler.requests
         print(action.action_log)
     finally:
         server.shutdown()
@@ -207,7 +259,9 @@ def test_auth_token_is_sent_when_configured():
 
 def main():
     test_multiple_senders_uses_semif_decision()
-    test_default_contact_skips_decision()
+    test_strong_winner_overrides_default_contact()
+    test_weak_winner_falls_back_to_default_contact()
+    test_weak_winner_without_default_stands()
     test_single_sender_needs_no_decision()
     test_empty_inbox_is_reported_honestly()
     test_unreachable_bridge_fails_honestly()
