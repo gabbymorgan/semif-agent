@@ -26,6 +26,152 @@ example** of all three. Read its `manifest.json`, its `skill.py` (which declares
 `INTEGRATION` and `CONTRACT`), and its `skill.test.py` alongside this file; a new
 body should look and behave like it.
 
+## The decision engine: SemIf
+
+A skill body turns a request into an action, and along the way it must decide
+things: which calendar the query means, whether the evidence is enough, what to
+call the event. Those decisions are made by **SemIf** — the agent's decision
+engine — not by text generation. This section explains what SemIf is, what it
+can do, and when a body should reach for it instead of plain code or an LLM.
+
+### What SemIf is
+
+SemIf ("semantic ifs", formerly OpenJev) is a small, pinned, local language
+model whose single job is to answer a **typed, runtime-defined decision**
+without generating any text. You give it three things:
+
+- a **state** — the unstructured evidence, usually `request.text` (sometimes the
+  query plus a list of candidates);
+- a **question** — the criterion in plain language ("Which calendar is referred
+  to in the user query?");
+- **options** — 2–16 named, described alternatives (`work`, `personal`, ...).
+
+It performs one forward pass and reads the probabilities of the declared answer
+tokens directly. It returns a probability for each option — no sentence, no
+JSON, no decoding loop, nothing to parse. In effect it is a semantic `if`:
+software asks a yes/no/which question in natural language and gets back a typed,
+thresholdable number. The `state` may also be a nonempty JSON object or array.
+
+The whole point is that the **question and options arrive with the request**.
+Routing, selection, and assessment are not baked into the model or the prompt;
+they are supplied at call time. You never fine-tune SemIf to add a new decision —
+you just describe a new question.
+
+That is the difference from a chat model: a chat model answers by generating text
+that your code immediately parses back into an `if`. SemIf skips the text. On the
+reference hardware, reading 21 binary decisions directly took about 1.0 s and
+zero output tokens; the same decisions as a generated JSON array took about
+5.3 s and 111 tokens. It is decision-native and cheap enough to embed in ordinary
+code.
+
+### SemIf's feature set
+
+SemIf (<https://github.com/TheoLeeCJ/SemIf-OpenJev>) is a broader project than
+the one call this agent makes. Its full feature set:
+
+- **Runtime-defined decisions** — state, criterion, and option descriptions are
+  supplied per call; no retraining, no per-decision prompt engineering.
+- **Decision-native readout** — one forward pass over the declared option
+  logits, softmaxed over the allowed answer tokens. No token is sampled, so
+  there is no generation, no JSON repair, and no decoding loop to get stuck.
+- **Typed probabilities** — a probability per option, conditional on exactly the
+  options you supplied. 2–16 described options per decision.
+- **Structured state** — the state can be a string or a nonempty JSON object or
+  array; direct modes preserve it as structured JSON rather than flattening it.
+- **Shared-state awareness** — one long state can be prefetched once and branched
+  across many criteria: serial prefix reuse (~10.8 decisions/s) and parallel
+  suffix branches (~20 decisions/s) instead of re-scoring the state per decision.
+  Best when every decision shares the same state.
+- **Multiple backends** — CUDA/PyTorch, Apple Silicon (MLX and PyTorch/MPS), and
+  a CPU llama.cpp path over a local GGUF. This agent pins the llama.cpp CPU
+  backend.
+- **Reranker mode** — a second readout that scores each candidate as a yes/no
+  relevance proposition and softmaxes the log-odds across options; strongest for
+  ranking/retrieval rather than categorical decisions.
+- **Auditability** — every row carries the option scores, timing, the exact model
+  revision, and a `prompt_sha256`, so a decision can be reproduced and compared.
+- **Calibration** — optional per-workload temperature scaling fitted on labeled
+  decisions, which tightens expected calibration error (e.g. WANLI 0.208 → 0.069
+  out of fold). Calibration does not change the selected option.
+- **Batch scoring CLI** (`semif-score`) — reads a JSONL of decisions and writes a
+  JSONL of typed scores, for offline evaluation.
+- **Open, auditable evidence** — owned fixtures, committed runners, raw results,
+  and known failure modes.
+
+Two caveats shape how the agent uses it: the probabilities are **conditional on
+the options you supplied** — not calibrated operational confidence — so treat
+them as conditional scores and threshold them rather than believing them; and a
+forced typed output can still be semantically wrong. Quality depends on the
+model: the pinned 4B reaches ~0.81 balanced accuracy on the project's authored
+decision set (a 27B EXL3 bridge reaches ~0.96).
+
+### What a skill body can use
+
+A body does not speak SemIf's wire protocol. It reaches the engine through
+**one** interface: the typed decision call.
+
+```python
+from semif_agent.decisions import DecisionRequest, Option
+
+decision = DecisionRequest(
+    state=request.text,
+    question="Which calendar is referred to in the user query?",
+    options=[Option(c["name"], c["label"]) for c in calendars],
+)
+result = ctx.engine.call(decision)
+result.selected      # option id with the highest probability
+result.prob("work")  # that option's probability
+result.probs         # {option_id: probability}
+```
+
+The engine is always real (`ctx.engine`); there is no mock path. The runner
+serializes calls onto one model, so keep decisions few. Return every
+`(DecisionRequest, DecisionResult)` pair on `ActionResult.decisions` so the choice
+is logged as a training row with the run outcome.
+
+The shared-state, reranker, batch, and calibration features above are
+engine/runtime concerns, not body-level tools: a body makes direct typed
+decisions and lets the runner own the model.
+
+Note that the runner's own **assessment** of whether a run succeeded
+(`assess:outcome`) is itself a SemIf decision over the body's `action_log`, the
+goal, and the resolved inputs. The body does not self-assess; it reports
+truthfully and lets SemIf judge.
+
+### Choosing between deterministic code, SemIf, and LLM text
+
+Every value a body produces comes from one of three sources. Pick deliberately;
+mixing them up is the most common way a body goes wrong.
+
+| Source | Use it for | Examples |
+| ------ | ---------- | -------- |
+| **Deterministic code** | Exact, mechanical mappings that are right every time | parsing a date/time or number, formatting output, computing a duration, building a URL, comparing ids, iterating a fetched list, reading a status code, escaping text |
+| **SemIf** (`ctx.engine.call`) | A judgment among a known, enumerated set of options, when the right one is semantic rather than an exact match | which calendar/contact/conversation/folder the query means; whether the evidence supports / contradicts / is insufficient; which target to use when several fit |
+| **LLM text** (the LLM bridge) | Novel natural-language content that is not chosen from a set | an event title, a subject line, a message body, a summary, a description, a reformulation |
+
+Rules:
+
+- **Deterministic code is the default.** If a rule can decide it, write the rule.
+  Never spend a model call on something a regex, a dict lookup, or arithmetic
+  settles.
+- **Use SemIf for choices, not for generation.** SemIf returns a probability over
+  the options you gave it; it cannot write a title or a sentence. Give it the
+  real candidate set (fetched from the service), include any configured default as
+  one of the options, and threshold the winner: use it when its probability clears
+  the skill's confidence threshold, otherwise fall back to the configured default
+  (see `calendar.create_event` and `simplex.next_message`).
+- **Use the LLM bridge for text, not for routing or assessment.** Generated text
+  goes through the LLM bridge (`llm_bridge_url`, `llm_bridge_token`) — a generic
+  `POST /chat` — never by speaking a model's protocol directly. Keep the model
+  extractive and bounded (see how `calendar.create_event` asks only for a title
+  and description), and report a real failure when the bridge is down rather than
+  guessing the text.
+- **Never blur the boundaries.** SemIf never generates; an LLM never routes,
+  selects, or assesses; deterministic code never invents a value it cannot
+  observe. A request input is resolved by SemIf, not by substring matching by
+  hand; a title is generated by the LLM, not assembled by string concatenation
+  when it should be written; a date is parsed by code, not asked of a model.
+
 ## Manifest schema
 
 Registered in `data/categories.json` (and mirrored in the running tree). Fields:
