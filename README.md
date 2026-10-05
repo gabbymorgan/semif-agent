@@ -70,9 +70,12 @@ model entirely:
 - **Simulated Agile patterns.** A skill is a real integration into the active tool chain for end user satisfaction. It takes existing mail
   protocols, SimpleX, CalDAV/WebDAV, configured local CLIs, HTTP APIs and your supplied data to produce actions that best fit your query. In the absence of a an existing skill, the skill generation process is activated. Skill generation has four major phases - definition, refinement, coding, testing (unit and integration). Each step in this process has deterministic and probabilistic handling optimized to achieve the stated goal of the user in the context of the platform's core mission.
 - **Nothing is gated out up front.** Every input is dispatched and scored.
-  Inputs that are not tasks fall through navigation into the closed `response`
+  Inputs that are not requests fall through navigation into the closed `response`
   category — a hardcoded tree of canned replies (`greeting`, `thanks`,
-  `acknowledge`, `farewell`, `affirm`, `unable`, and the catchall `clarify`).
+  `acknowledge`, `farewell`, `affirm`, and the catchall `clarify`). A request no
+  skill covers is **not** a canned reply: the actionability guard
+  (`navigate:actionability`) sends it to skill authoring instead, so
+  `response` is reached only when the input asks for nothing.
   `response` never goes through codegen and its runs are never assessed (a canned
   line has no side effect to succeed or fail). It never offers generated text. By design, you will never be having a "conversation" with an LLM through this platform.
 - **Everything is a training row.** Every SemIf decision is logged as a labeled

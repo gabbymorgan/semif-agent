@@ -225,6 +225,7 @@ class Scheduler:
         nav_cfg = config.get("navigation", {}) or {}
         self.intent_tau = float(nav_cfg.get("intent_tau", 0.6))
         self.category_tau = float(nav_cfg.get("category_tau", 0.75))
+        self.action_tau = float(nav_cfg.get("action_tau", 0.5))
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
@@ -461,6 +462,7 @@ class Scheduler:
             request,
             self.tree,
             category_tau=self.category_tau,
+            action_tau=self.action_tau,
         )
         if isinstance(navigation, CreateCategory):
             return self._dispatch_create_category(request, weight)

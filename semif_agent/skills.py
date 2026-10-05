@@ -522,11 +522,6 @@ _CANNED_RESPONSES = [
         "Okay!",
     ),
     (
-        "unable",
-        "A request the agent understands but has no way to perform.",
-        "I'm not able to do that yet.",
-    ),
-    (
         "clarify",
         "The input is too vague to act on; ask the user to be more specific.",
         "Could you try being more specific?",
@@ -543,8 +538,8 @@ _RESPONSE_MESSAGES = {f"response.{name}": message for name, _, message in _CANNE
 # the fallback for a legacy entry with no description.
 CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "response": (
-        "Anything that is not a request to perform an action: greetings, thanks, "
-        "chit-chat, off-topic statements, and inputs the agent cannot act on."
+        "Anything that is not a request to perform an action or produce a result: "
+        "greetings, thanks, acknowledgements, chit-chat, and off-topic statements."
     ),
     "calendar": (
         "Calendar and scheduling: reading or changing the user's calendar "
@@ -691,6 +686,7 @@ def navigate(
     request: Request,
     tree: dict[str, list[Skill]],
     category_tau: float = 0.75,
+    action_tau: float = 0.5,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
@@ -698,13 +694,21 @@ def navigate(
     every existing category **with its description** plus a `create_category`
     branch; the winner is then confirmed by `confirm_category_fit`, a name-anchored
     scope check. A confirmed winner is descended into; a winner that does not
-    cover the request (or a `create_category` win) authors a new category. Bare
-    category names carry no signal — real runs sent "book a flight to japan" to
-    the `simplex` bucket (0.49 vs create_category 0.12) until the descriptions
-    were added — so the descriptions are load-bearing, and the confirm guard is
-    the create door (there is no threshold gate any more). A level with nothing
-    to choose from (an empty tree) short-circuits straight to create: SemIf
-    decisions need at least two options.
+    cover the request authors a new category. Bare category names carry no signal
+    — real runs sent "book a flight to japan" to the `simplex` bucket (0.49 vs
+    create_category 0.12) until the descriptions were added — so the descriptions
+    are load-bearing. A level with nothing to choose from (an empty tree)
+    short-circuits straight to create: SemIf decisions need at least two options.
+
+    The `response` catchall and `create_category` share a boundary arbitrated by
+    `confirm_non_action`, the **actionability guard** (`navigate:actionability`,
+    keyed by `navigation.action_tau`): the closed `response` tree is reached
+    **only** when the input is not a request (a greeting, thanks, acknowledgement,
+    small talk, or a stray statement). A request — even one no skill covers, e.g.
+    "what is 255 * 12?" — authors a skill instead, never a canned reply. This
+    runs whichever side of the boundary the softmax proposed, because a
+    description alone cannot draw the line: "1+1=2" (a statement) and
+    "what is 255 * 12?" (a request) both look like math to the category softmax.
 
     The leaf level is two-stage too: navigation only ever picks among the
     existing skills (`create_skill` is deliberately NOT in the softmax), and the
@@ -738,31 +742,37 @@ def navigate(
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
-    if category != "create_category" and not confirm_category_fit(
-        engine, log, trace, request, category, descriptions.get(category, ""),
-        category_tau,
-    ):
-        trace.append(
-            "category_scope_rejected",
-            request.id,
-            category=category,
-            probs=top_result.probs,
-        )
-        category = "create_category"
-    if category == "create_category":
-        trace.append(
-            "create_category",
-            request.id,
-            state=top.state,
-            question=top.question,
-            options=[o.id for o in top.options],
-            selected=top_result.selected,
-            probs=top_result.probs,
-        )
-        return CreateCategory()
+    if category != "create_category" and category not in CANNED_CATEGORIES:
+        if not confirm_category_fit(
+            engine, log, trace, request, category, descriptions.get(category, ""),
+            category_tau,
+        ):
+            trace.append(
+                "category_scope_rejected",
+                request.id,
+                category=category,
+                probs=top_result.probs,
+            )
+            category = "create_category"
+    if category == "create_category" or category in CANNED_CATEGORIES:
+        # The actionability guard is the create door for the catchall: only
+        # non-request input gets a canned reply, so a request that merely fell
+        # through the softmax (or was pushed out by the reworded scope) authors.
+        if not confirm_non_action(engine, log, trace, request, action_tau) or not tree.get(
+            "response"
+        ):
+            trace.append(
+                "create_category",
+                request.id,
+                state=top.state,
+                question=top.question,
+                options=[o.id for o in top.options],
+                selected=top_result.selected,
+                probs=top_result.probs,
+            )
+            return CreateCategory()
+        return _navigate_canned(engine, log, trace, request, "response", tree["response"])
     skills = tree[category]
-    if category in CANNED_CATEGORIES:
-        return _navigate_canned(engine, log, trace, request, category, skills)
     if not skills:
         trace.append(
             "skill_needed",
@@ -859,6 +869,63 @@ def confirm_category_fit(
         fits=fits,
     )
     return fits
+
+
+def confirm_non_action(
+    engine: SemIfEngine,
+    log: DecisionLog,
+    trace: TraceLog,
+    request: Request,
+    tau: float = 0.5,
+) -> bool:
+    """Is this input non-request (chit-chat/statement) rather than a request?
+
+    The actionability guard and the create door shared by the `response` catchall
+    and `create_category`: it arbitrates whichever of the two the category softmax
+    proposed. A request — even one no skill covers — must author a skill; only
+    input that asks for nothing gets a canned reply. This is what keeps
+    "what is 255 * 12?" (a request) out of the closed `response` tree while
+    "1+1=2" (a statement) stays in it — a line no single category description can
+    draw, because both read as math to the softmax. Returns True when the input is
+    non-action (route to `response`); the threshold is `navigation.action_tau`
+    (default 0.5, deliberately separate from the other taus so tuning
+    actionability moves nothing else).
+    """
+    decision = DecisionRequest(
+        state=request.text,
+        question=(
+            "Is this input a request to the agent (it asks for an answer, result, "
+            "or task), or is it non-request input (a greeting, thanks, "
+            "acknowledgement, small talk, or a statement)?"
+        ),
+        options=[
+            Option(
+                "action",
+                "It is a request: the user asks the agent for an answer, a result, "
+                "or an action (including one the agent has no skill for yet).",
+            ),
+            Option(
+                "non_action",
+                "It is not a request: a greeting, thanks, acknowledgement, small "
+                "talk, or a statement.",
+            ),
+        ],
+    )
+    result = engine.call(decision)
+    log.append(
+        decision,
+        result,
+        extra={"phase": "navigate:actionability", "run_id": request.id},
+    )
+    non_action = result.prob("non_action") >= tau
+    trace.append(
+        "actionability",
+        request.id,
+        selected=result.selected,
+        probs=result.probs,
+        non_action=non_action,
+    )
+    return non_action
 
 
 def confirm_skill_fit(

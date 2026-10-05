@@ -32,6 +32,7 @@ from semif_agent.scheduler import SkillWrite
 from semif_agent.skills import (
     ActionResult,
     CategoryDraft,
+    CreateCategory,
     Skill,
     SkillDraft,
     SkillStore,
@@ -169,6 +170,37 @@ def test_navigation_routes_noise_into_the_response_tree(tmp_path):
         )
         print(f"[noise] {text!r} -> {result!r}")
         assert getattr(result, "category", None) == "response", f"noise left the response tree: {text!r}"
+
+
+def test_navigation_routes_uncovered_requests_to_create(tmp_path):
+    """A request no skill covers must author a skill, not get a canned reply: the
+    actionability guard keeps the closed `response` tree for non-request input
+    only. Regression: "what is 255 * 12?" landed in `response.unable` because the
+    response scope said it covered "inputs the agent cannot act on"."""
+    config = load_config()
+    require_real(config)
+    _isolate_runtime(config, tmp_path)
+    scheduler, config = build_scheduler(config)
+
+    requests = [
+        "what is 255 * 12?",
+        "what is the capital of France?",
+        "convert 10 km to miles",
+        "tell me a joke",
+    ]
+    for text in requests:
+        result = navigate(
+            scheduler.engine,
+            scheduler.log,
+            scheduler.trace,
+            Request(text),
+            scheduler.tree,
+            action_tau=scheduler.action_tau,
+        )
+        print(f"[request] {text!r} -> {result!r}")
+        assert isinstance(result, CreateCategory), (
+            f"request did not author a skill: {text!r} -> {result!r}"
+        )
 
 
 def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):

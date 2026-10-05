@@ -44,6 +44,7 @@ from semif_agent.skills import (
     build_skills,
     build_tree,
     confirm_category_fit,
+    confirm_non_action,
     confirm_skill_fit,
     category_descriptions,
     CATEGORY_DESCRIPTIONS,
@@ -557,29 +558,20 @@ def test_navigate_empty_tree_short_circuits(tmp_path):
 
 def test_navigate_canned_category_never_offers_create(tmp_path):
     """The `response` tree is closed: its leaf choice has no create_skill option
-    and never authors, regardless of how weak the match is."""
+    and never authors, regardless of how weak the match is. The actionability
+    guard is what routes a non-request input into it."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = build_tree(build_skills({"skills": {}}))
 
-    class Recording:
-        def __init__(self):
-            self.request = None
-
-        def call(self, request):
-            from semif_agent.decisions import DecisionResult
-
-            self.request = request
-            ids = [o.id for o in request.options]
-            return DecisionResult(request=request, option_ids=ids, probabilities=[1.0] * len(ids))
-
-    engine = Recording()
+    engine = ScriptedEngine(choices={"non-request input": "non_action"})
     result = navigate(engine, log, trace, Request("hello there"), tree)
     assert isinstance(result, Skill)
     assert result.category == "response"
-    assert all(o.id != "create_skill" for o in engine.request.options)
-    assert "create_skill" not in [o.id for o in engine.request.options]
-    assert result.name in [o.id for o in engine.request.options]
+    leaf = next(c for c in engine.calls if "canned response" in c.question)
+    assert all(o.id != "create_skill" for o in leaf.options)
+    assert "create_skill" not in [o.id for o in leaf.options]
+    assert result.name in [o.id for o in leaf.options]
 
 
 def test_navigate_canned_category_points_at_the_catchall(tmp_path):
@@ -588,7 +580,12 @@ def test_navigate_canned_category_points_at_the_catchall(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = build_tree(build_skills({"skills": {}}))
-    engine = _ProbEngine({"canned response": {"response.clarify": 1.0}})
+    engine = _ProbEngine(
+        {
+            "non-request input": {"non_action": 1.0},
+            "canned response": {"response.clarify": 1.0},
+        }
+    )
     result = navigate(engine, log, trace, Request("do the thing"), tree)
     assert result.name == "response.clarify"
     leaf = engine.calls[-1]
@@ -818,6 +815,104 @@ def test_confirm_category_fit_threshold(tmp_path):
         )
         is False
     )
+
+
+def test_confirm_non_action_threshold(tmp_path):
+    """The actionability guard returns True for non-request input and False for a
+    request, logging phase `navigate:actionability`."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = ScriptedEngine(choices={"non-request input": "non_action"})
+    assert (
+        confirm_non_action(engine, log, trace, Request("hello there"), tau=0.5) is True
+    )
+    assert log.read()[-1]["extra"]["phase"] == "navigate:actionability"
+
+    engine = ScriptedEngine(choices={"non-request input": "action"})
+    assert (
+        confirm_non_action(engine, log, trace, Request("what is 255 * 12?"), tau=0.5)
+        is False
+    )
+    assert any(
+        e["kind"] == "actionability" and e["non_action"] is False for e in trace.read()
+    )
+
+
+def test_navigate_actionability_sends_a_request_to_create(tmp_path):
+    """A request the softmax dumps in the catchall must author, not get a canned
+    reply: the actionability guard is the create door ("what is 255 * 12?")."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = build_tree(build_skills({"skills": {}}))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"response": 1.0},
+            "non-request input": {"action": 1.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("what is 255 * 12?"), tree)
+    assert isinstance(result, CreateCategory)
+    assert any(
+        e["kind"] == "actionability" and e["non_action"] is False for e in trace.read()
+    )
+    assert any(e["kind"] == "create_category" for e in trace.read())
+
+
+def test_navigate_actionability_keeps_a_statement_in_response(tmp_path):
+    """The mirror: a statement the reworded scope pushes to create_category must
+    still get a canned reply ("1+1=2"), not author a category."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = build_tree(build_skills({"skills": {}}))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"create_category": 1.0},
+            "non-request input": {"non_action": 1.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("1+1=2"), tree)
+    assert isinstance(result, Skill)
+    assert result.category == "response"
+    assert any(
+        e["kind"] == "actionability" and e["non_action"] is True for e in trace.read()
+    )
+
+
+def test_dispatch_action_tau_controls_catchall_routing(tmp_path):
+    """navigation.action_tau is the catchall create door, separate from the other
+    taus: a borderline non-action verdict flips on it."""
+    def build(action_tau: float):
+        scheduler = Scheduler(
+            engine=_ProbEngine(
+                {
+                    "top-level category": {"response": 1.0},
+                    "non-request input": {"non_action": 0.6, "action": 0.4},
+                }
+            ),
+            llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+            log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+            config={
+                "skills": {},
+                "navigation": {"action_tau": action_tau},
+                "category_registry": str(tmp_path / "categories.json"),
+                "skill_bodies": str(tmp_path / "skills"),
+                "skill_seeds": str(tmp_path / "seeds"),
+            },
+            trace=TraceLog(str(tmp_path / "runs.jsonl")),
+        )
+        scheduler.tree = build_tree(build_skills({"skills": {}}))
+        scheduler._queue_draft = lambda *a, **k: None
+        return scheduler
+
+    low = build(0.5)
+    assert low.action_tau == 0.5
+    ran = low._dispatch(Request("hmm"))
+    assert ran.kind == "ran", "non_action 0.6 clears action_tau 0.5: canned reply"
+
+    high = build(0.7)
+    assert high.action_tau == 0.7
+    created = high._dispatch(Request("hmm"))
+    assert created.kind == "create_category", "non_action 0.6 fails action_tau 0.7: author"
 
 
 
