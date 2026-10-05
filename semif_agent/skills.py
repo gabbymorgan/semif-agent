@@ -690,32 +690,67 @@ def navigate(
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
-    The category level is **two-stage** (mirroring the leaf). The softmax offers
-    every existing category **with its description** plus a `create_category`
-    branch; the winner is then confirmed by `confirm_category_fit`, a name-anchored
-    scope check. A confirmed winner is descended into; a winner that does not
-    cover the request authors a new category. Bare category names carry no signal
-    — real runs sent "book a flight to japan" to the `simplex` bucket (0.49 vs
-    create_category 0.12) until the descriptions were added — so the descriptions
-    are load-bearing. A level with nothing to choose from (an empty tree)
-    short-circuits straight to create: SemIf decisions need at least two options.
+    The **actionability guard** (`confirm_non_action`, phase
+    `navigate:actionability`, keyed by `navigation.action_tau`) runs at the **top**
+    of navigation, before any category is considered: the closed `response` tree
+    is reached **only** when the input is not a request (a greeting, thanks,
+    acknowledgement, small talk, or a stray statement). A request — even one no
+    skill covers, e.g. "what is 255 * 12?" — authors a skill instead, never a
+    canned reply. Deciding this first (rather than only when the category softmax
+    happens to propose `response`/`create_category`) is what keeps a non-request
+    out of a real category: a description alone cannot draw the line — "1+1=2" (a
+    statement) and "what is 255 * 12?" (a request) both read as math to the
+    category softmax — and `confirm_category_fit` is deliberately permissive.
 
-    The `response` catchall and `create_category` share a boundary arbitrated by
-    `confirm_non_action`, the **actionability guard** (`navigate:actionability`,
-    keyed by `navigation.action_tau`): the closed `response` tree is reached
-    **only** when the input is not a request (a greeting, thanks, acknowledgement,
-    small talk, or a stray statement). A request — even one no skill covers, e.g.
-    "what is 255 * 12?" — authors a skill instead, never a canned reply. This
-    runs whichever side of the boundary the softmax proposed, because a
-    description alone cannot draw the line: "1+1=2" (a statement) and
-    "what is 255 * 12?" (a request) both look like math to the category softmax.
+    Only once the guard says the input is a request does the category softmax
+    run, over the **real** categories (the canned `response` tree is never an
+    option) plus `create_category`. The winner is then confirmed by
+    `confirm_category_fit`, a name-anchored scope check: a rejected winner (or a
+    `create_category` win) authors a new category. Descriptions are load-bearing —
+    with bare names the model sent "book a flight to japan" to the `simplex`
+    bucket (0.49 vs create_category 0.12); with descriptions it picks
+    `create_category` 0.87. An empty tree short-circuits straight to create: SemIf
+    decisions need at least two options.
 
     The leaf level is two-stage too: navigation only ever picks among the
     existing skills (`create_skill` is deliberately NOT in the softmax), and the
     reuse-vs-create decision is the intent guard in dispatch
     (`confirm_skill_fit`), keyed by `navigation.intent_tau`.
     """
-    categories = sorted(tree.keys())
+    if not tree:
+        trace.append(
+            "create_category",
+            request.id,
+            state=compose_state(request),
+            question="Which top-level category handles this request?",
+            options=[],
+            selected="create_category",
+            probs={},
+        )
+        return CreateCategory()
+
+    # Actionability first: is this input a request at all? A non-request goes to
+    # the closed `response` tree (a canned reply) and never reaches the category
+    # softmax; a request always proceeds to category selection, so it can never
+    # be canned.
+    if confirm_non_action(engine, log, trace, request, action_tau):
+        response_skills = tree.get("response")
+        if response_skills:
+            return _navigate_canned(
+                engine, log, trace, request, "response", response_skills
+            )
+        trace.append(
+            "create_category",
+            request.id,
+            state=compose_state(request),
+            question="Which top-level category handles this request?",
+            options=[],
+            selected="create_category",
+            probs={},
+        )
+        return CreateCategory()
+
+    categories = [c for c in sorted(tree.keys()) if c not in CANNED_CATEGORIES]
     descriptions = category_descriptions(tree)
     create_category = Option(
         "create_category",
@@ -742,7 +777,7 @@ def navigate(
     top_result = engine.call(top)
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
-    if category != "create_category" and category not in CANNED_CATEGORIES:
+    if category != "create_category":
         if not confirm_category_fit(
             engine, log, trace, request, category, descriptions.get(category, ""),
             category_tau,
@@ -754,24 +789,17 @@ def navigate(
                 probs=top_result.probs,
             )
             category = "create_category"
-    if category == "create_category" or category in CANNED_CATEGORIES:
-        # The actionability guard is the create door for the catchall: only
-        # non-request input gets a canned reply, so a request that merely fell
-        # through the softmax (or was pushed out by the reworded scope) authors.
-        if not confirm_non_action(engine, log, trace, request, action_tau) or not tree.get(
-            "response"
-        ):
-            trace.append(
-                "create_category",
-                request.id,
-                state=top.state,
-                question=top.question,
-                options=[o.id for o in top.options],
-                selected=top_result.selected,
-                probs=top_result.probs,
-            )
-            return CreateCategory()
-        return _navigate_canned(engine, log, trace, request, "response", tree["response"])
+    if category == "create_category":
+        trace.append(
+            "create_category",
+            request.id,
+            state=top.state,
+            question=top.question,
+            options=[o.id for o in top.options],
+            selected=top_result.selected,
+            probs=top_result.probs,
+        )
+        return CreateCategory()
     skills = tree[category]
     if not skills:
         trace.append(
@@ -878,36 +906,41 @@ def confirm_non_action(
     request: Request,
     tau: float = 0.5,
 ) -> bool:
-    """Is this input non-request (chit-chat/statement) rather than a request?
+    """Is this input non-action (not a request) rather than an actionable request?
 
-    The actionability guard and the create door shared by the `response` catchall
-    and `create_category`: it arbitrates whichever of the two the category softmax
-    proposed. A request — even one no skill covers — must author a skill; only
-    input that asks for nothing gets a canned reply. This is what keeps
-    "what is 255 * 12?" (a request) out of the closed `response` tree while
-    "1+1=2" (a statement) stays in it — a line no single category description can
-    draw, because both read as math to the softmax. Returns True when the input is
-    non-action (route to `response`); the threshold is `navigation.action_tau`
-    (default 0.5, deliberately separate from the other taus so tuning
-    actionability moves nothing else).
+    The actionability guard, run at the top of `navigate` before any category is
+    considered. A request — even one no skill covers — must author a skill; only
+    non-action input gets a canned reply. Non-action covers chit-chat and
+    statements ("1+1=2") **and** fragments too vague/incomplete to act on
+    ("what"), which reach `response.clarify` ("Could you try being more
+    specific?"). This is what keeps "what is 255 * 12?" (a specific request) out
+    of the closed `response` tree while "what" (nothing to act on) stays in it —
+    a line no single category description can draw, because both read as
+    questions to the softmax. Returns True when the input is non-action (route to
+    `response`); the threshold is `navigation.action_tau` (default 0.5,
+    deliberately separate from the other taus so tuning actionability moves
+    nothing else).
     """
     decision = DecisionRequest(
         state=request.text,
         question=(
-            "Is this input a request to the agent (it asks for an answer, result, "
-            "or task), or is it non-request input (a greeting, thanks, "
-            "acknowledgement, small talk, or a statement)?"
+            "Is this input a request to the agent (it asks for a specific answer, "
+            "result, or task), or is it non-request input (a greeting, thanks, "
+            "acknowledgement, small talk, a statement, or a fragment too "
+            "vague/incomplete to act on)?"
         ),
         options=[
             Option(
                 "action",
-                "It is a request: the user asks the agent for an answer, a result, "
-                "or an action (including one the agent has no skill for yet).",
+                "It is a request: the user asks the agent for a specific answer, a "
+                "result, or an action (including one the agent has no skill for "
+                "yet).",
             ),
             Option(
                 "non_action",
                 "It is not a request: a greeting, thanks, acknowledgement, small "
-                "talk, or a statement.",
+                "talk, a statement, or an incomplete fragment that names nothing to "
+                "act on (e.g. 'what', 'hmm', 'and?').",
             ),
         ],
     )

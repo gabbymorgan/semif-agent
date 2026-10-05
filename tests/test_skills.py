@@ -625,7 +625,12 @@ def test_navigate_leaf_picks_among_existing_skills_only(tmp_path):
 
             self.request = request
             ids = [o.id for o in request.options]
-            return DecisionResult(request=request, option_ids=ids, probabilities=[1.0] * len(ids))
+            if "non_action" in ids:
+                # the top-level actionability guard: this input is a request
+                probs = [1.0 if o == "action" else 0.0 for o in ids]
+            else:
+                probs = [1.0] * len(ids)
+            return DecisionResult(request=request, option_ids=ids, probabilities=probs)
 
     engine = Recording()
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
@@ -876,6 +881,70 @@ def test_navigate_actionability_keeps_a_statement_in_response(tmp_path):
     assert any(
         e["kind"] == "actionability" and e["non_action"] is True for e in trace.read()
     )
+
+
+def test_navigate_actionability_gate_precedes_category_selection(tmp_path):
+    """The actionability guard runs at the top: a non-request never reaches the
+    category softmax, so it cannot be routed into a real category even when the
+    softmax would have picked one."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = build_tree(build_skills({"skills": {}}))
+    tree["simplex"] = [
+        Skill(
+            name="next_message",
+            category="simplex",
+            description="Read the next SimpleX message.",
+        )
+    ]
+    engine = _ProbEngine(
+        {
+            "non-request input": {"non_action": 1.0},
+            # If the category softmax ran it would route to simplex, not response.
+            "top-level category": {"simplex": 1.0},
+            "canned response": {"response.greeting": 1.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("the sky is blue"), tree)
+    assert getattr(result, "category", None) == "response"
+    assert all(
+        "top-level category" not in c.question for c in engine.calls
+    ), "the category softmax must not run for non-request input"
+    phases = [r["extra"]["phase"] for r in log.read()]
+    assert "navigate:actionability" in phases
+    assert "navigate:category" not in phases
+    assert phases.index("navigate:actionability") < phases.index("navigate:response")
+
+
+def test_navigate_category_softmax_excludes_the_canned_response_tree(tmp_path):
+    """Once actionability is decided at the top, `response` is never offered in
+    the category softmax — a request cannot be routed to a canned reply — and
+    actionability is logged before category selection."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    tree = build_tree(build_skills({"skills": {}}))
+    tree["simplex"] = [
+        Skill(
+            name="next_message",
+            category="simplex",
+            description="Read the next SimpleX message.",
+        )
+    ]
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "Does the scope": {"covers": 1.0},
+        }
+    )
+    navigate(engine, log, trace, Request("read the next simplex message"), tree)
+    cat_decision = next(
+        c for c in engine.calls if "top-level category" in c.question
+    )
+    ids = [o.id for o in cat_decision.options]
+    assert "response" not in ids
+    assert "simplex" in ids and "create_category" in ids
+    phases = [r["extra"]["phase"] for r in log.read()]
+    assert phases.index("navigate:actionability") < phases.index("navigate:category")
 
 
 def test_dispatch_action_tau_controls_catchall_routing(tmp_path):

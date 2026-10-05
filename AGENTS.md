@@ -92,8 +92,8 @@ scheduler.py    no up-front gate: every input is dispatched
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 tree only), navigation = SemIf choices per level (logged;
-                the actionability guard arbitrates the response/create
-                boundary), create_category
+                the actionability guard runs first, at the top of navigation,
+                to arbitrate the response/create boundary), create_category
                 and create_skill author + register stubs via the small `llm`
                 provider (separate from codegen); SkillStore persists one folder per skill
                 (skill.py, skill.test.py, contract.json, config.json) and
@@ -304,21 +304,30 @@ CLI, unit tests (24) + integration tests (2).
   drift into create on a weak plurality (real runs scored `create_skill`
   0.585–0.803 on requests a seed skill clearly matched). The reuse-vs-create
   decision is the **intent guard** (`confirm_skill_fit`, phase
-  `navigate:intent`) at `navigation.intent_tau`. The `response` catchall and
-  `create_category` share a third guard, the **actionability guard**
+  `navigate:intent`) at `navigation.intent_tau`. The **actionability guard**
   (`confirm_non_action`, phase `navigate:actionability`) at
-  `navigation.action_tau` (default 0.5): it arbitrates that boundary whichever
-  side the softmax proposed, so the closed `response` tree is reached **only**
-  when the input is not a request. A request no skill covers (e.g.
-  "what is 255 * 12?") authors instead of getting a canned reply, while a stray
-  statement the reworded scope pushes toward create (e.g. "1+1=2") still gets
-  one. A single category description cannot draw that line — both read as math
-  to the softmax — which is why the guard exists. All three taus are separate
-  from the top-level `tau`, so tuning reuse-vs-create or actionability does not
-  move assessment/fidelity. The guards are deliberately permissive (in-scope
-  scores 0.9–1.0): a borderline over-cover routes into a plausible category and
-  the leaf guard catches it. Empty and single-skill categories skip their
-  softmax.
+  `navigation.action_tau` (default 0.5) runs at the **top** of navigation,
+  before category selection: it decides whether the input is an actionable
+  request at all, so the closed `response` tree is reached **only** for
+  non-action input (chit-chat, a statement, or a fragment too vague/incomplete
+  to act on, e.g. "what") and a request can never be canned. Non-action goes
+  straight to the `response` tree and never reaches the category softmax — a
+  vague fragment lands on the catchall `response.clarify`; a request proceeds to
+  the category softmax, which now offers only the **real** categories (the
+  canned `response` tree is never an option) plus `create_category`. Deciding
+  this first — rather than only when the softmax happens to propose
+  `response`/`create_category` — is what keeps a non-request out of a real
+  category: a single category description cannot draw that line ("1+1=2" a
+  statement and "what is 255 * 12?" a request both read as math to the
+  softmax), and the scope guard is deliberately permissive. A request no skill
+  covers (e.g. "what is 255 * 12?") authors instead of getting a canned reply,
+  while a stray statement (e.g. "1+1=2") or a vague fragment (e.g. "what") still
+  gets one. All three taus are
+  separate from the top-level `tau`, so tuning reuse-vs-create or actionability
+  does not move assessment/fidelity. The guards are deliberately permissive
+  (in-scope scores 0.9–1.0): a borderline over-cover routes into a plausible
+  category and the leaf guard catches it. Empty and single-skill categories
+  skip their softmax.
 - **No handle/ignore gate; the `response` tree is the non-request catchall**
   (Sep 2026; actionability guard Oct 2026): the top-level `_contains_request`
   handle/ignore gate is gone. Every input is scored and dispatched; input that
@@ -328,10 +337,12 @@ CLI, unit tests (24) + integration tests (2).
   catchall `response.clarify` — "Could you try being more specific?"). A
   **request** is never answered from here, even one no skill covers: the
   actionability guard (`confirm_non_action`, phase `navigate:actionability`)
-  arbitrates the `response`/`create_category` boundary and sends a request to
-  authoring (this is what keeps "what is 255 * 12?" out of the tree; the old
+  runs at the top of navigation and sends a request to authoring (this is what
+  keeps "what is 255 * 12?" out of the tree; the old
   `response.unable` canned refusal is gone — an unsupported request authors a
-  skill, it is not refused). `response` is a `CANNED_CATEGORIES` member:
+  skill, it is not refused). A fragment too vague/incomplete to act on (e.g.
+  "what") is non-action, so it lands on the catchall `response.clarify` rather
+  than authoring a redundant clarify skill. `response` is a `CANNED_CATEGORIES` member:
   `navigate` never offers `create_skill` there (the intent guard is skipped
   too), `Scheduler._dispatch_skill`/`restart_skill` refuse to author it, and the
   runner skips `assess:outcome`/repair for it — a canned line has no side effect

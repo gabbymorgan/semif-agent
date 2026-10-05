@@ -172,6 +172,28 @@ def test_navigation_routes_noise_into_the_response_tree(tmp_path):
         assert getattr(result, "category", None) == "response", f"noise left the response tree: {text!r}"
 
 
+def test_navigation_routes_vague_fragment_to_clarify(tmp_path):
+    """A fragment too vague to act on ("what") is non-action: it lands on the
+    catchall `response.clarify` rather than authoring a redundant clarify skill.
+    Regression: "what" scored action 0.513 / non_action 0.487 and authored an
+    "unclear"/"clarify_intent" category."""
+    config = load_config()
+    require_real(config)
+    _isolate_runtime(config, tmp_path)
+    scheduler, config = build_scheduler(config)
+
+    result = navigate(
+        scheduler.engine,
+        scheduler.log,
+        scheduler.trace,
+        Request("what"),
+        scheduler.tree,
+    )
+    print(f"[vague] 'what' -> {result!r}")
+    assert getattr(result, "category", None) == "response", result
+    assert getattr(result, "name", None) == "response.clarify", result
+
+
 def test_navigation_routes_uncovered_requests_to_create(tmp_path):
     """A request no skill covers must author a skill, not get a canned reply: the
     actionability guard keeps the closed `response` tree for non-request input

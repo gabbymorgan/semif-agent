@@ -40,7 +40,6 @@ from .skill import SkillRunner
 from .timers import TimerService
 from .skills import (
     CANNED_CATEGORIES,
-    RESPONSE_FALLBACK,
     ActionContext,
     CategoryRegistry,
     CreateCategory,
@@ -467,16 +466,6 @@ class Scheduler:
         if isinstance(navigation, CreateCategory):
             return self._dispatch_create_category(request, weight)
         if isinstance(navigation, CreateSkill):
-            if navigation.category in CANNED_CATEGORIES:
-                fallback = self._canned_fallback(navigation.category)
-                if fallback is not None:
-                    self.trace.append(
-                        "canned_fallback",
-                        request.id,
-                        category=navigation.category,
-                        fallback=fallback.name,
-                    )
-                    return self._run_skill(fallback, request)
             return self._dispatch_skill(request, navigation.category, weight)
         if navigation.category in CANNED_CATEGORIES:
             return self._run_skill(navigation, request)
@@ -491,14 +480,6 @@ class Scheduler:
             )
             return self._dispatch_skill(request, navigation.category, weight)
         return self._run_skill(navigation, request)
-
-    def _canned_fallback(self, category: str) -> Skill | None:
-        """The catchall canned reply for a closed category, else its first leaf."""
-        skills = self.tree.get(category, [])
-        for skill in skills:
-            if skill.name == RESPONSE_FALLBACK:
-                return skill
-        return skills[0] if skills else None
 
     def _dispatch_create_category(
         self, request: Request, weight: float = 0.0

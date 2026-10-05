@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Tune the two-stage navigation guards.
 
-Navigation is two-stage at both levels, and the guards are the create doors:
+Navigation is two-stage at both levels, and the guards are the create doors.
+Before either stage, the **actionability guard** (`confirm_non_action`) decides
+whether the input is a request at all: a non-request goes straight to the closed
+`response` tree and never reaches the category softmax, so a category-level
+measurement of a non-request is reported as `response` with no guard
+probability.
 
-- **Category**: the softmax offers every existing category WITH its description
-  plus `create_category`; `confirm_category_fit` confirms the winner's scope.
-  `navigation.category_tau` is that guard's P(covers) floor.
+- **Category**: the softmax offers every existing (real) category WITH its
+  description plus `create_category`; `confirm_category_fit` confirms the
+  winner's scope. `navigation.category_tau` is that guard's P(covers) floor.
 - **Leaf**: the softmax offers only existing skills; `confirm_skill_fit`
   compares the winner's action to the request. `navigation.intent_tau` is that
   guard's P(same) floor.
@@ -71,6 +76,7 @@ CATEGORY_EVAL: list[tuple[str, str]] = [
     ("tell me the next event in my nextcloud calendar", "calendar"),
     ("hello there", "response"),
     ("thanks!", "response"),
+    ("what", "response"),
     ("book a flight to japan", "create"),
     ("what is the weather in paris", "create"),
     ("order me a pizza", "create"),
