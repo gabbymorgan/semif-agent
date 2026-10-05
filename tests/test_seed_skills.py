@@ -34,6 +34,10 @@ def test_expected_seeds_exist():
     assert "calendar.create_event" in ids
     assert "simplex.next_message" in ids
     assert "simplex.connect_link" in ids
+    assert "time.now" in ids
+    assert "time.date" in ids
+    assert "time.set_timer" in ids
+    assert "time.set_alarm" in ids
 
 
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])
@@ -49,14 +53,18 @@ def test_seed_declares_a_real_integration(seed):
 def test_seed_contract_is_flat_and_covered_by_declaration(seed):
     code = (seed / "skill.py").read_text()
     contract = parse_contract(code)
-    assert contract, "the seed must declare a CONTRACT constant"
-    for name, description in contract.items():
-        assert name.islower() and " " not in name, name
-        assert isinstance(description, str) and description.strip()
     integration = parse_integration(code)
     assert set(integration["config_vars"]) == set(contract)
     mirror = json.loads((seed / "contract.json").read_text())
     assert mirror == contract, "contract.json must mirror the CONTRACT constant"
+    if integration["transport"] == "compute":
+        # A local compute skill acts on the machine itself and needs no
+        # configuration; an empty contract is legitimate.
+        return
+    assert contract, "an external-integration seed must declare a CONTRACT constant"
+    for name, description in contract.items():
+        assert name.islower() and " " not in name, name
+        assert isinstance(description, str) and description.strip()
 
 
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])

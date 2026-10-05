@@ -24,6 +24,7 @@ from .decisions import DecisionRequest, Option, Request
 from .engine import SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
+from .timers import TimerService
 from .trace import TraceLog
 
 
@@ -41,6 +42,7 @@ class ActionResult:
 class ActionContext:
     engine: SemIfEngine
     config: dict
+    timers: TimerService | None = None
 
 
 def _noop_act(ctx: ActionContext, request: Request) -> ActionResult:
@@ -551,6 +553,10 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "simplex": (
         "SimpleX messaging: reading incoming messages, sending messages to "
         "contacts, and showing the user's contact link."
+    ),
+    "time": (
+        "Time and date utilities: telling the current time or date, setting "
+        "countdown timers, and setting alarms."
     ),
 }
 

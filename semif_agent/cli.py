@@ -16,6 +16,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 from .dream import dream as run_dream
@@ -418,8 +420,26 @@ def _fatal_exit(scheduler: Scheduler) -> int | None:
     return 1
 
 
+def _start_timer_printer(scheduler: Scheduler) -> None:
+    """Print fired timers/alarms while the REPL is blocked on `input()`.
+
+    A background daemon thread polls the scheduler's timer service and prints
+    each fired notification, so a timer set during a session is delivered even
+    when the prompt is idle. Timers are in-process: they die with this process.
+    """
+
+    def loop() -> None:
+        while True:
+            time.sleep(0.5)
+            for fired in scheduler.timers.drain():
+                print(f"\n[timer] {fired.message}")
+
+    threading.Thread(target=loop, name="timer-printer", daemon=True).start()
+
+
 def repl(scheduler: Scheduler, config: dict) -> int:
     scheduler.defer_questions = True
+    _start_timer_printer(scheduler)
     print(try_warm(scheduler))
     print(
         "type a request, or one of: busy <text> | idle | status | skills | dream | "

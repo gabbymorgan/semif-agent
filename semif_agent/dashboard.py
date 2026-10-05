@@ -233,6 +233,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/approvals":
             self._send(200, {"approvals": self.scheduler.pending_approvals()})
             return
+        if path == "/api/timers":
+            self._send(
+                200,
+                {
+                    "pending": self.scheduler.timers.pending(),
+                    "fired": self.scheduler.timers.fired(),
+                },
+            )
+            return
         self._send_error(404, "no such endpoint")
 
     def do_POST(self):

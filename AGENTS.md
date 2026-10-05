@@ -120,6 +120,14 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 answer on request.user_input; a
                 contract variable the runner cannot satisfy pauses BEFORE
                 act (pre_act), collects it, and re-runs the full path
+timers.py       in-process timer/alarm service (TimerService) owned by the
+                scheduler and exposed on ActionContext.timers: a single
+                background thread fires scheduled timers on the host clock,
+                records a `timer_fired` trace event, and queues the
+                notification for the front end that set it (the REPL prints it,
+                the gateway routes it to the originating chat, the dashboard
+                shows pending/fired). Real local compute (`compute` transport),
+                per-process, and deliberately NOT persisted across restarts.
 engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
 codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 bodies against CODEGEN.md (real actions via stdlib transports,
@@ -594,7 +602,10 @@ CLI, unit tests (24) + integration tests (2).
   `calendar.next_event` is the read counterpart (Nextcloud CalDAV, recurring
   events expanded server-side); `simplex.next_message` (read via the forwarding
   bridge) and `simplex.connect_link` (show/create the forwarding bot's contact
-  link) are the messenger seeds; `tests/test_seed_skills.py` keeps them honest.
+  link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
+  `time.set_alarm` are the local time utilities (`compute` transport, empty
+  contract) — they read the host clock and schedule on `ctx.timers`;
+  `tests/test_seed_skills.py` keeps them honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
   `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read

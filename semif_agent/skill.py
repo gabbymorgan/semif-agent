@@ -118,7 +118,7 @@ class SkillRunner:
             merged = {**self.ctx.config}
             merged.update(skill.config or {})
             merged.update(answered)
-        return ActionContext(engine=self.ctx.engine, config=merged)
+        return ActionContext(engine=self.ctx.engine, config=merged, timers=self.ctx.timers)
 
     def _unresolved(self, skill: Skill, request: Request) -> list[str]:
         if not skill.contract:

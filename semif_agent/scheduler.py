@@ -37,6 +37,7 @@ from .log import DecisionLog
 from .provider import ProviderError
 from .queue import UrgencyQueue
 from .skill import SkillRunner
+from .timers import TimerService
 from .skills import (
     CANNED_CATEGORIES,
     RESPONSE_FALLBACK,
@@ -262,7 +263,8 @@ class Scheduler:
         merge_registry(self.tree, self.registry.read())
         merge_seed_store(self.tree, self.seed_store, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
-        self.ctx = ActionContext(engine=self.engine, config=config)
+        self.timers = TimerService(trace=self.trace)
+        self.ctx = ActionContext(engine=self.engine, config=config, timers=self.timers)
         self.runner = SkillRunner(
             self.ctx, self.log, store=self.body_store, tau=self.tau
         )
@@ -1826,6 +1828,14 @@ class Scheduler:
             lines.append(f"queue: {len(self.queue)} pending")
             for weight, request in self.queue.items():
                 lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")
+            pending_timers = self.timers.pending()
+            if pending_timers:
+                lines.append(f"timers: {len(pending_timers)} scheduled")
+                for timer in pending_timers:
+                    lines.append(
+                        f"  {timer['kind']} {timer['id']} due {timer['due_at_local'][:16]} "
+                        f"({timer['label']})"
+                    )
             return "\n".join(lines)
 
 

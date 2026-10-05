@@ -7,6 +7,7 @@ const state = {
   tree: { categories: {} },
   status: { current: null, pending: null, queue: [], tau: 0.6 },
   dream: {},
+  timers: { pending: [], fired: [] },
   selectedRunId: null,
   selectedDecisionId: null,
   phaseFilter: "",
@@ -23,16 +24,18 @@ async function getJSON(url, opts) {
 }
 
 async function refreshAll() {
-  const [trace, tree, status, dream] = await Promise.all([
+  const [trace, tree, status, dream, timers] = await Promise.all([
     getJSON("/api/trace"),
     getJSON("/api/tree"),
     getJSON("/api/status"),
     getJSON("/api/dream"),
+    getJSON("/api/timers"),
   ]);
   state.runs = trace.runs;
   state.tree = tree;
   state.status = status;
   state.dream = dream;
+  state.timers = timers;
   if (state.selectedRunId && !state.runs.some((r) => r.run_id === state.selectedRunId)) {
     state.selectedRunId = null;
     state.selectedDecisionId = null;
@@ -159,6 +162,8 @@ function eventRow(evt) {
     div.textContent = `answered: ${evt.text || ""}`;
   } else if (evt.kind === "pending_abandoned") {
     div.textContent = "pending input abandoned";
+  } else if (evt.kind === "timer_fired") {
+    div.textContent = `${evt.timer_kind} fired: ${evt.label}`;
   }
   return div;
 }
@@ -499,6 +504,9 @@ function eventNode(evt) {
     body.textContent = `answered: ${evt.text || ""}`;
   } else if (evt.kind === "pending_abandoned") {
     body.textContent = "pending input abandoned";
+  } else if (evt.kind === "timer_fired") {
+    node.classList.add("ok");
+    body.textContent = `${evt.timer_kind} fired: ${evt.label}`;
   } else {
     body.textContent = evt.summary || evt.text || "";
   }
@@ -664,6 +672,32 @@ function renderTree() {
 }
 
 /* ---------------- status / dream ---------------- */
+
+function renderTimers() {
+  const el = $("#timers");
+  el.innerHTML = "";
+  const pending = state.timers.pending || [];
+  const fired = state.timers.fired || [];
+  if (!pending.length && !fired.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "no timers (in-process; not kept across restarts)";
+    el.appendChild(empty);
+    return;
+  }
+  for (const t of pending) {
+    const row = document.createElement("div");
+    row.className = "pending-line";
+    row.textContent = `⏳ ${t.kind} ${t.label} → ${t.due_at_local.slice(0, 16).replace("T", " ")}`;
+    el.appendChild(row);
+  }
+  for (const f of fired.slice(-5).reverse()) {
+    const row = document.createElement("div");
+    row.className = "pending-line";
+    row.textContent = `⏰ ${f.message}`;
+    el.appendChild(row);
+  }
+}
 
 function renderStatus() {
   const el = $("#status");
@@ -951,6 +985,7 @@ function render() {
   renderFlow();
   renderInspector();
   renderTree();
+  renderTimers();
   renderStatus();
 }
 

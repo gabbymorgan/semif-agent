@@ -242,6 +242,11 @@ class GatewayService:
                     ),
                 )
 
+        for fired in self.scheduler.timers.drain():
+            chat = self._owner_of(fired.run_id) or origin or self.home_channel
+            if chat:
+                self._reply(chat, fired.message)
+
     # ---- scheduler requeue hook (called under the scheduler lock) ----
 
     def on_request_requeued(self, parent_id: str, child_id: str) -> None:
