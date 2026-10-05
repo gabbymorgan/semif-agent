@@ -1,5 +1,5 @@
 [Unit]
-Description=SemIf agent messenger gateway (SimpleX)
+Description=SemIf agent messenger gateway (SimpleX, LXMF)
 After=network-online.target semif-simplex.service
 Wants=network-online.target semif-simplex.service
 
@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=@REPO@
 Environment=HF_HOME=@REPO@/.runtime/hf
 Environment=PYTHONUNBUFFERED=1
-ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway
+ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway --platform all
 Restart=always
 RestartSec=5
 StandardOutput=journal

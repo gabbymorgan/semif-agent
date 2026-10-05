@@ -186,11 +186,16 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 GatewayService maps chats onto the single-slot scheduler
                 (submit_request, owner maps, pending-run ownership, queue
                 drain, authoring questions/repairs routed back to the origin
-                chat). simplex.py: SimplexAdapter — command simplex-chat daemon
-                over its JSON WebSocket API (lazy `websockets`, allowlist,
-                batching, structured `/_send`). Run with `python -m
-                semif_agent.cli gateway [--dashboard]`; config under
-                `gateway.simplex`. The gateway MUST NOT read history, show/create
+                chat); it is platform-aware and fronts one or more adapters at
+                once, keyed by platform name (source `<platform>:<chat>`, the
+                single pending-run guard shared across platforms). simplex.py:
+                SimplexAdapter — command simplex-chat daemon over its JSON
+                WebSocket API (lazy `websockets`, allowlist, batching,
+                structured `/_send`). lxmf.py: LxmfAdapter — LXMF/Reticulum
+                (lazy `lxmf`), in-process, allowlist + batching. Run with
+                `python -m semif_agent.cli gateway [--platform simplex,lxmf|all]
+                [--dashboard]`; config under `gateway.simplex` /
+                `gateway.lxmf`. The gateway MUST NOT read history, show/create
                 invite links, or compose messages — see "gateway isolation"
                 below.
 bridges/        standalone third-party API bridges (SimpleX first, plus the
@@ -217,6 +222,12 @@ simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
                 `/_show_address`/`/_address`, contact-request accept, contact
                 list + chat previews/history). Knows nothing about the
                 scheduler or either front end.
+lxmf_transport.py
+                neutral LXMF (Reticulum) transport: one in-process Reticulum
+                instance + LXMF router, persisted delivery identity, announce
+                loop, inbound normalization, outbound send queue. Lazy `RNS`/
+                `LXMF` imports keep the module stdlib-only. Knows nothing about
+                the scheduler or the gateway.
 ```
 
 ## Run / verify
@@ -409,16 +420,20 @@ CLI, unit tests (24) + integration tests (2).
   dashboard gain the ability to inspect a skill's generated code body
   (read-only view of `data/skills/<category>/<name>/` and its trace) so the
   author can audit what was generated.
-- **Messenger gateway (SimpleX first)** (Sep 2026): `python -m semif_agent.cli
-  gateway` runs a dedicated process that connects to the local `simplex-chat`
-  daemon over its JSON WebSocket API and feeds authorized DM text through the
-  normal gate/score/queue/dispatch pipeline; results, authoring questions, and
-  repair offers are sent back to the originating chat. `gateway/base.py` is the
+- **Messenger gateway (SimpleX first, then LXMF)** (Sep 2026; LXMF Oct 2026):
+  `python -m semif_agent.cli gateway` runs a dedicated process that connects to
+  one or more transports and feeds authorized DM text through the normal
+  gate/score/queue/dispatch pipeline; results, authoring questions, and repair
+  offers are sent back to the originating chat. `gateway/base.py` is the
   transport contract (`GatewayAdapter`, `InboundMessage`, `OutboundMessage`),
-  `gateway/service.py` the scheduler glue (single execution slot, owner maps,
-  pending-run ownership, queue drain), `gateway/simplex.py` the SimpleX adapter
-  (lazy `websockets`, default-deny allowlist by contactId/display name,
-  rapid-message batching, structured `/_send`). DMs only for the first cut;
+  `gateway/service.py` the platform-aware scheduler glue (single execution slot,
+  `(platform, chat)` owner maps, pending-run ownership shared across platforms,
+  queue drain), `gateway/simplex.py` the SimpleX adapter (lazy `websockets`,
+  default-deny allowlist by contactId/display name, rapid-message batching,
+  structured `/_send`), and `gateway/lxmf.py` the LXMF/Reticulum adapter (lazy
+  `lxmf`, in-process via the neutral `semif_agent/lxmf_transport.py`, allowlist
+  by LXMF address, `threading.Timer` batching). All adapters share one process
+  and one scheduler (`--platform simplex,lxmf|all`). DMs only for the first cut;
   groups/attachments/reactions are future work. See "### gateway (messenger
   intake)".
 - **Bridge services (SimpleX first)** (Sep 2026): messaging *UX* — invite links,
@@ -818,22 +833,26 @@ CLI, unit tests (24) + integration tests (2).
 
 ### gateway (messenger intake)
 
-- **Run mode.** `python -m semif_agent.cli gateway [--platform simplex]
-  [--dashboard]` builds the normal scheduler (engine lazy) and runs the
-  configured `gateway.simplex` adapter in the foreground. `--dashboard`
-  co-serves the browser UI from a daemon thread. Config lives under
-  `gateway.simplex` in `config.json`; `enabled` defaults false. On a
-  bootstrap-provisioned host `scripts/bootstrap.sh` renders and enables the
-  `semif-simplex.service` bot daemon (pinned `simplex-chat` in **bot mode**,
-  profile under `.runtime/simplex/`, port from `simplex_chat.port`) and the
-  `semif-gateway.service` agent process, so the gateway runs across
-  logout/reboot. The gateway is its own process — the REPL and the gateway are
-  independent front ends onto the same on-disk logs/registry (do not run two
-  scheduler processes over one skill store concurrently). **On connect the
-  gateway prints the bot's own SimpleX contact link once** (show-or-create via
-  the daemon it already owns, from the CLI, `_gateway_address_callback`) so a
-  human can reach it without running `scripts/simplex-address.py` — the operator
-  front end prints it; the command adapter itself gains no address surface.
+- **Run mode.** `python -m semif_agent.cli gateway [--platform simplex,lxmf|all]
+  [--dashboard]` builds the normal scheduler (engine lazy) and runs the enabled
+  adapters in the foreground. `--platform` takes a comma-separated list or
+  `all`; default is `simplex`. **All adapters share one process and one
+  scheduler** (never run two gateway processes over one skill store) — each
+  gets its own transport thread but they route through a single
+  platform-aware `GatewayService`. `--dashboard` co-serves the browser UI from
+  a daemon thread. Config lives under `gateway.<platform>` in `config.json`;
+  `enabled` defaults false. On a bootstrap-provisioned host
+  `scripts/bootstrap.sh` renders and enables the `semif-simplex.service` bot
+  daemon (pinned `simplex-chat` in **bot mode**, profile under
+  `.runtime/simplex/`, port from `simplex_chat.port`) and the
+  `semif-gateway.service` agent process (unit runs `gateway --platform all`),
+  so the gateway runs across logout/reboot. The gateway is its own process —
+  the REPL and the gateway are independent front ends onto the same on-disk
+  logs/registry. **On connect the gateway prints each bot's own address once**
+  (the SimpleX contact link via the daemon it already owns,
+  `_gateway_address_callback`; the LXMF address via `_lxmf_address_callback`) so
+  a human can reach it without running a separate script — the operator front
+  end prints it; the command adapter itself gains no address surface.
 - **Bot address / v7 relay gotcha.** The daemon must NOT run with `--headless`
   or `--relay`: in SimpleX Chat v7 `--headless` means "chat relay" (requires
   `--relay`) and yields a *relay* address, not a user contact address. Run bot
@@ -850,8 +869,9 @@ CLI, unit tests (24) + integration tests (2).
   outbound_queue)` blocks, delivering `InboundMessage`s and draining a stdlib
   `queue.Queue[OutboundMessage | None]`. Scheduler work is synchronous and can
   block on the decision engine, so the adapter bridges it off its event loop
-  (`asyncio.to_thread`) and puts replies on the queue. A second platform means
-  a new adapter subclass; the service is unchanged.
+  (`asyncio.to_thread`) and puts replies on the queue. A new platform means a
+  new adapter subclass plus a `_build_gateway_adapter` branch and a config
+  block; the platform-aware service routes it unchanged.
 - **SimpleX adapter** (`gateway/simplex.py`): connects to the local
   `simplex-chat` daemon at `gateway.simplex.ws_url` (default port 5226, pinning
   `simplex_chat.port`), XML-JSON WebSocket protocol
@@ -869,20 +889,38 @@ CLI, unit tests (24) + integration tests (2).
   attachments, reactions, and typing are out of scope for this cut. The wire
   protocol itself lives in the neutral `semif_agent/simplex_ws.py`
   (`SimplexDaemon`); this adapter adds only the allowlist and batching on top.
+- **LXMF adapter** (`gateway/lxmf.py`): the Reticulum-based command transport.
+  Unlike SimpleX there is **no external daemon** — Reticulum and the LXMF router
+  run in-process (`semif_agent/lxmf_transport.py`, `LxmfDaemon`). `lxmf` (and
+  `rns`) are **lazy-imported**; `check_requirements()` returns a `pip install
+  lxmf` hint and the gateway refuses to start without it. The bot's reachable
+  address is its LXMF delivery destination hash (32 hex chars); the identity is
+  persisted under `gateway.lxmf.storage_path` (default `.runtime/lxmf/router`)
+  so the address is stable across restarts. Default-deny allowlist matches the
+  peer's LXMF address or a best-effort display name (`allowed_users`);
+  `allow_all_users` is the dev escape hatch. Rapid messages are batched per chat
+  (`text_batch_delay`) with a `threading.Timer` (no event loop).
+  `desired_method` is `direct` (reliable link) or `opportunistic` (single
+  packet); an optional `propagation_node` enables store-and-forward. **`RNS.
+  Reticulum` and `LXMF.LXMRouter` install process signal handlers, which only
+  work on the main thread** — `run_gateway` calls `daemon.prepare()` on the main
+  thread before the transport threads start, and `run()` reuses it.
 - **Scheduler glue** (`gateway/service.py`): inbound text →
-  `Scheduler.submit_request(text, source=f"simplex:<chat_id>")`; the returned
-  request id maps to the chat (`owners`), and `Scheduler.on_request_requeued`
-  (a scheduler hook, default `None`) copies that ownership across an updated
-  request so its completion still routes home. A `needs_input` pause sets
-  `pending_owner` from the pending run's source; the same chat's next message
-  goes straight to `Scheduler.answer` (no score/navigation). A *different*
-  chat during another chat's pause is told to wait — the single-slot scheduler
-  must not silently abandon the first chat's run. A background poll calls
+  `Scheduler.submit_request(text, source=f"{platform}:{chat_id}")`; the returned
+  request id maps to the `(platform, chat)` (`owners`), and
+  `Scheduler.on_request_requeued` (a scheduler hook, default `None`) copies that
+  ownership across an updated request so its completion still routes home. A
+  `needs_input` pause sets `pending_owner` from the pending run's source; the
+  same chat's next message goes straight to `Scheduler.answer` (no
+  score/navigation). A *different* chat — **including a chat on another
+  platform** — during that pause is told to wait: the single-slot scheduler must
+  not silently abandon the first chat's run, and one service fronts all
+  adapters so the guard spans them. A background poll calls
   `Scheduler.run_queue()` (routing each `[run_id] summary` to its owner) and
   surfaces newly posted authoring questions / repair offers (`defer_questions
-  = True`; the service routes them by `run_id` → origin, falling back to
-  `home_channel`); a chat's plain reply answers the question or picks the
-  repair action (`retry`/`repair`/`ask`/`no`).
+  = True`; the service routes them by `run_id` → `(platform, chat)`, falling
+  back to that platform's `home_channel`); a chat's plain reply answers the
+  question or picks the repair action (`retry`/`repair`/`ask`/`no`).
 - **Gateway isolation (non-negotiable).** The gateway exists only to take
   commands and send replies. It MUST NOT read a contact's history, show/create
   invite links, or compose messages on the user's behalf: no `observer`, no
@@ -898,20 +936,27 @@ CLI, unit tests (24) + integration tests (2).
   `/_show_address` / `/_address` (`SimplexDaemon.request_address`, thread-safe
   via `run_coroutine_threadsafe`). It carries no policy: no allowlist, no
   scheduler, no HTTP.
-- **Tests.** `tests/test_gateway.py` (stdlib): adapter allowlist/auth,
-  structured send command, batching (real `asyncio`), and `GatewayService`
-  routing against a real `Scheduler` (lazy engine, unreachable LLM).
-  `tests/test_simplex_ws.py` covers the neutral protocol layer (parse shapes,
-  accept ids, corrId round-trips, address show/create). `tests/test_bridges.py`
+- **Tests.** `tests/test_gateway.py` (stdlib): SimpleX adapter allowlist/auth,
+  structured send command, batching (real `asyncio`), LXMF adapter
+  allowlist/auth and batching (a `threading.Timer`), cross-platform pending-run
+  guard and per-platform reply routing, and `GatewayService` routing against a
+  real `Scheduler` (lazy engine, unreachable LLM).
+  `tests/test_lxmf_transport.py` covers the neutral LXMF transport's
+  missing-dep contract, default paths, and `normalize_message` (no real `lxmf`
+  needed). `tests/test_simplex_ws.py` covers the neutral protocol layer (parse
+  shapes, accept ids, corrId round-trips, address show/create).
+  `tests/test_bridges.py`
   exercises `SimplexBridge` over a real loopback server (peek/pop, recipient
   resolution, outbound routing, token/body validation, `/address` success/503/502,
   daemon close on stop, catalog/`describe_bridges()`).
   `tests/test_seed_skills.py` hermetically tests every
   `seeds/<category>/<name>/` package, including `simplex.next_message` and
   `simplex.connect_link`. The live `websockets` transport against a real daemon
-  is a live-daemon integration concern.
-- **Deps.** `websockets` is pinned in `requirements/staging.txt` (staging
-  only); the core stays stdlib-only.
+  and the live LXMF transport against a real Reticulum network are
+  live-integration concerns.
+- **Deps.** `websockets` and `lxmf`/`rns` are pinned in
+  `requirements/staging.txt` (staging only); both are lazy-imported and the core
+  stays stdlib-only.
 
 ### bridges (third-party API services)
 

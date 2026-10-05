@@ -178,7 +178,7 @@ echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex
 echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
 echo "== runtime tree: $RUNTIME"
 
-mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$UNITS" "$USER_UNITS"
+mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$RUNTIME/lxmf" "$UNITS" "$USER_UNITS"
 
 # --- stage 0: system prereqs + linger ----------------------------------------
 PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake util-linux)
@@ -470,6 +470,19 @@ SimpleX command gateway (commands only):
     gateway rejects everyone — that is the safe default.
   - The gateway takes commands and replies. It never reads history, shows invite
     links, or composes messages: that is the forwarding bridge's job.
+
+LXMF command gateway (commands only):
+  - Runs IN-PROCESS inside the same 'semif-gateway' service (no separate daemon);
+    the transport is installed from requirements/staging.txt (lxmf + rns).
+    Enable it in config.json with gateway.lxmf.enabled = true, then restart the
+    gateway (the unit runs `gateway --platform all`, so SimpleX + LXMF share one
+    scheduler).
+  - Its LXMF address (32 hex chars) is printed on connect:
+      journalctl --user -u semif-gateway -f
+    Add that address as a contact in an LXMF client (Sideband, MeshChatX, ...)
+    and put it in gateway.lxmf.allowed_users (discover a sender from a
+    'gateway_denied' trace event). With an empty allowlist it rejects everyone —
+    the safe default.
 
 SimpleX forwarding bridge (messaging UX for skills):
   - Runs as 'semif-simplex-forward' (a second bot daemon/profile, port $SIMPLEX_FORWARD_PORT)

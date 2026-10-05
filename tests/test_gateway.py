@@ -10,6 +10,7 @@ live-daemon integration concern, not a unit test.
 
 import asyncio
 import json
+import time
 
 from semif_agent.cli import _gateway_address_callback
 from semif_agent.decisions import Request
@@ -42,10 +43,12 @@ def build_scheduler(tmp_path):
 
 def drain_outbound(service) -> list[str]:
     texts = []
-    while not service.outbound.empty():
-        item = service.outbound.get_nowait()
-        if item is not None:
-            texts.append(item.text)
+    for platform in service.platforms:
+        outbound = service.outbound[platform]
+        while not outbound.empty():
+            item = outbound.get_nowait()
+            if item is not None:
+                texts.append(item.text)
     return texts
 
 
@@ -213,9 +216,9 @@ def test_service_refuses_other_chat_during_pending(tmp_path):
 def test_service_requeue_hook_carries_ownership(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_service(scheduler)
-    service._owners["parent"] = "4"
+    service._owners["parent"] = ("simplex", "4")
     service.on_request_requeued("parent", "child")
-    assert service._owner_of("child") == "4"
+    assert service._owner_of("child") == ("simplex", "4")
 
 
 def test_service_drain_routes_queued_run_to_owner(tmp_path):
@@ -223,7 +226,7 @@ def test_service_drain_routes_queued_run_to_owner(tmp_path):
     service = build_service(scheduler)
     request = Request("queued work", source="simplex:4")
     scheduler.queue.push(request, 0.5)
-    service._owners[request.id] = "4"
+    service._owners[request.id] = ("simplex", "4")
 
     service.drain()
     outbound = drain_outbound(service)
@@ -245,7 +248,7 @@ def test_service_answered_question_routes_back(tmp_path):
             question="Which account?",
         )
     )
-    service._owners["r1"] = "4"
+    service._owners["r1"] = ("simplex", "4")
     service.surface()
     assert any("Which account?" in text for text in drain_outbound(service))
 
@@ -266,7 +269,7 @@ def test_service_surfaces_and_resolves_approval(tmp_path):
             description="Follow a package.",
         )
     )
-    service._owners["r1"] = "4"
+    service._owners["r1"] = ("simplex", "4")
     service.surface()
     assert any(
         "Approve creating new skill tracking.track_live" in text
@@ -276,3 +279,77 @@ def test_service_surfaces_and_resolves_approval(tmp_path):
     service.handle_inbound(InboundMessage(text="yes", chat_id="4", contact_id="4"))
     assert scheduler.pending_approvals() == []
     assert any("approved" in text for text in drain_outbound(service))
+
+
+# ---- LXMF adapter ----
+
+def test_lxmf_default_deny_and_allowlist():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    assert LxmfAdapter({}).is_authorized("a" * 32, "alice") is False
+    assert LxmfAdapter({"allowed_users": ["a" * 32]}).is_authorized("a" * 32, "alice") is True
+    assert LxmfAdapter({"allowed_users": ["alice"]}).is_authorized("a" * 32, "alice") is True
+    assert LxmfAdapter({"allowed_users": ["bob"]}).is_authorized("a" * 32, "alice") is False
+    assert LxmfAdapter({"allow_all_users": True}).is_authorized("a" * 32, None) is True
+
+
+def test_lxmf_batching_concatenates_rapid_messages():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    adapter = LxmfAdapter({"allow_all_users": True, "text_batch_delay": 0.05})
+    seen: list = []
+    adapter._on_inbound = seen.append
+    for text in ("one", "two"):
+        adapter._on_item(
+            {"source_hash": "ab" * 16, "content": text, "display_name": None}
+        )
+    time.sleep(0.2)
+    assert len(seen) == 1
+    assert "one" in seen[0].text and "two" in seen[0].text
+
+
+def test_lxmf_denies_unknown_sender_without_dispatch():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    adapter = LxmfAdapter({})
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item({"source_hash": "cd" * 16, "content": "hi"})
+    time.sleep(0.1)
+    assert seen == []
+
+
+# ---- service: multiple platforms ----
+
+class FakeLxmfAdapter:
+    name = "lxmf"
+
+
+def build_multi_service(scheduler):
+    return GatewayService(
+        scheduler, [FakeAdapter(), FakeLxmfAdapter()], config={}
+    )
+
+
+def test_service_refuses_other_platform_during_pending(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_multi_service(scheduler)
+    scheduler._run_skill(need_input_skill([]), Request("track it", source="simplex:4"))
+    question = scheduler.pending.question
+
+    service.handle_inbound(
+        InboundMessage(text="hello", chat_id="abc", contact_id="abc"), platform="lxmf"
+    )
+    assert scheduler.pending is not None
+    assert scheduler.pending.question == question
+    assert any("another conversation" in text for text in drain_outbound(service))
+
+
+def test_service_reply_routes_to_owning_platform(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_multi_service(scheduler)
+    service.handle_inbound(
+        InboundMessage(text="hi", chat_id="abc", contact_id="abc"), platform="lxmf"
+    )
+    assert not service.outbound["lxmf"].empty()
+    assert service.outbound["simplex"].empty()

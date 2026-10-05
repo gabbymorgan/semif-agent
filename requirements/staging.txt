@@ -16,3 +16,8 @@ pytest
 # Messaging gateway transport (SimpleX adapter). Optional: lazy-imported, the
 # gateway refuses to start without it. Not needed by the decision engine.
 websockets==15.0.1
+# LXMF (Reticulum) gateway transport. Optional: lazy-imported, the gateway
+# refuses to start without it. Runs in-process — there is no daemon binary.
+# rns pulls cryptography + pyserial transitively (resolved by pip).
+lxmf==1.2.0
+rns==1.5.7

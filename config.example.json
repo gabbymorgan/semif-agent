@@ -130,8 +130,9 @@
     }
   },
   "gateway": {
-    "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API and feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). text_batch_delay concatenates rapid-fire messages from one contact. Groups/attachments are not supported in this first cut.",
+    "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` runs one or more platforms (`--platform simplex,lxmf` or `all`) in a SINGLE process sharing one scheduler/skill store — never run two gateway processes over one store. Each platform feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). reply_prefix is prepended to every reply. text_batch_delay concatenates rapid-fire messages from one contact.",
     "simplex": {
+      "_comment": "SimpleX command adapter. Connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. Groups/attachments are not supported.",
       "enabled": true,
       "ws_url": "ws://127.0.0.1:5226",
       "allowed_users": [],
@@ -141,6 +142,22 @@
       "reply_prefix": "",
       "text_batch_delay": 0.8,
       "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+    },
+    "lxmf": {
+      "_comment": "LXMF (Reticulum) command adapter. Runs IN-PROCESS — there is no external daemon; `pip install lxmf` provides the transport (optional, lazy-imported; the gateway refuses to start with an install hint). The bot's reachable address is its LXMF delivery destination hash (32 hex chars), printed on connect. config_dir/storage_path hold Reticulum's config and the persisted identity under .runtime/lxmf/ so the address is stable across restarts (empty = the .runtime/lxmf defaults). allowed_users entries match the peer's LXMF address (32 hex chars) or a best-effort display name; default is deny-all unless allow_all_users is set. desired_method is 'direct' (reliable link) or 'opportunistic' (single packet). propagation_node is an optional LXMF propagation-node address (hex) for store-and-forward.",
+      "enabled": false,
+      "allowed_users": [],
+      "allow_all_users": false,
+      "display_name": "semif",
+      "announce_interval": 3600,
+      "stamp_cost": 8,
+      "desired_method": "direct",
+      "propagation_node": "",
+      "config_dir": "",
+      "storage_path": "",
+      "home_channel": "",
+      "reply_prefix": "",
+      "text_batch_delay": 0.8
     }
   },
   "dashboard": {"port": 8765, "host": "127.0.0.1"}

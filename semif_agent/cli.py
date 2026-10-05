@@ -589,44 +589,137 @@ def _gateway_address_callback(adapter):
     return _announce
 
 
+def _lxmf_address_callback(adapter):
+    """Return a sync `on_connected` hook that prints the bot's LXMF address once.
+
+    Unlike SimpleX there is no daemon round-trip: the router knows its delivery
+    address as soon as it is registered, so the hook just prints it once.
+    """
+    printed = False
+
+    def _announce() -> None:
+        nonlocal printed
+        if printed:
+            return
+        address = getattr(adapter.daemon, "address", "") or ""
+        if not address:
+            print("gateway lxmf: no address available", file=sys.stderr)
+            return
+        printed = True
+        print(f"gateway lxmf address: {address}")
+
+    return _announce
+
+
+def _attach_address_announcer(adapter) -> None:
+    """Wire the platform's startup address announcement onto its daemon.
+
+    A human cannot reach a gateway without its address. Print it once on
+    connect, from the operator front end (the CLI), through the transport the
+    adapter already owns — no second connection, no new transport surface.
+    """
+    if adapter.name == "simplex":
+        adapter.daemon.on_connected = _gateway_address_callback(adapter)
+    elif adapter.name == "lxmf":
+        adapter.daemon.on_connected = _lxmf_address_callback(adapter)
+
+
+def _build_gateway_adapter(platform: str, cfg: dict, trace):
+    """Construct one adapter from its config, or None for an unknown platform."""
+    if platform == "simplex":
+        from .gateway.simplex import SimplexAdapter
+
+        return SimplexAdapter(cfg, trace=trace)
+    if platform == "lxmf":
+        from .gateway.lxmf import LxmfAdapter
+
+        cfg = dict(cfg or {})
+        # Contain Reticulum's config + identity under the checkout's .runtime/.
+        cfg.setdefault("config_dir", str(REPO_ROOT / ".runtime" / "lxmf" / "reticulum"))
+        cfg.setdefault("storage_path", str(REPO_ROOT / ".runtime" / "lxmf" / "router"))
+        return LxmfAdapter(cfg, trace=trace)
+    return None
+
+
+def _resolve_platforms(requested: str, gateway_cfg: dict) -> list[str]:
+    """Turn `--platform` into a list of platform names.
+
+    `all`/`*` means every **enabled** gateway block in config; a
+    comma-separated list is taken as-is (unknown names are kept so the caller
+    can report them).
+    """
+    requested = (requested or "simplex").strip()
+    if requested in ("all", "*"):
+        return [
+            name
+            for name, block in (gateway_cfg or {}).items()
+            if isinstance(block, dict)
+            and not name.startswith("_")
+            and block.get("enabled", False)
+        ]
+    return [name.strip() for name in requested.split(",") if name.strip()]
+
+
 def run_gateway(
     scheduler: Scheduler,
     config: dict,
     platform: str = "simplex",
     serve_dashboard: bool = False,
 ) -> int:
-    """Run the messenger gateway in the foreground (SimpleX first)."""
-    cfg = (config.get("gateway", {}) or {}).get(platform, {}) or {}
-    if not cfg.get("enabled", False):
-        print(f"gateway.{platform} is not enabled in config")
+    """Run one or more messenger gateways in the foreground.
+
+    All enabled adapters share a single scheduler/process (see AGENTS.md: never
+    run two scheduler processes over one skill store), so each gets its own
+    transport thread but they route through one `GatewayService`.
+    """
+    gateway_cfg = config.get("gateway", {}) or {}
+    platforms = _resolve_platforms(platform, gateway_cfg)
+
+    adapters: dict = {}
+    for name in platforms:
+        cfg = gateway_cfg.get(name) or {}
+        if not isinstance(cfg, dict) or not cfg.get("enabled", False):
+            print(f"gateway.{name} is not enabled in config")
+            continue
+        adapter = _build_gateway_adapter(name, cfg, scheduler.trace)
+        if adapter is None:
+            print(f"unknown gateway platform {name!r}")
+            continue
+        ok, hint = adapter.check_requirements()
+        if not ok:
+            print(f"gateway {name} unavailable: {hint}")
+            continue
+        _attach_address_announcer(adapter)
+        adapters[name] = adapter
+
+    if not adapters:
+        print("no gateway platforms enabled/available")
         return 1
 
-    if platform == "simplex":
-        from .gateway.simplex import SimplexAdapter
+    # Reticulum installs process signal handlers, which only works on the main
+    # thread. Run the LXMF transport's main-thread setup (Reticulum + router)
+    # here before the per-adapter transport threads start; `run()` reuses it.
+    for name in list(adapters):
+        prepare = getattr(adapters[name].daemon, "prepare", None)
+        if callable(prepare):
+            try:
+                prepare()
+            except Exception as exc:
+                print(f"gateway {name} unavailable: {exc}", file=sys.stderr)
+                del adapters[name]
 
-        adapter = SimplexAdapter(cfg, trace=scheduler.trace)
-        # Print the bot's own contact link once, on connect, so the operator can
-        # actually reach the gateway (see _gateway_address_callback).
-        adapter.daemon.on_connected = _gateway_address_callback(adapter)
-    else:
-        print(f"unknown gateway platform {platform!r}")
-        return 1
-
-    ok, hint = adapter.check_requirements()
-    if not ok:
-        print(f"gateway {platform} unavailable: {hint}")
+    if not adapters:
+        print("no gateway platforms enabled/available")
         return 1
 
     from .gateway.service import GatewayService
 
     scheduler.defer_questions = True
-    service = GatewayService(scheduler, adapter, config=cfg)
+    service = GatewayService(scheduler, adapters, config=gateway_cfg)
     scheduler.on_request_requeued = service.on_request_requeued
     service.start()
 
     if serve_dashboard:
-        import threading
-
         from .dashboard import serve
 
         dash_cfg = config.get("dashboard", {}) or {}
@@ -640,14 +733,40 @@ def run_gateway(
             daemon=True,
         ).start()
 
-    print(f"gateway {platform} listening on {adapter.ws_url} (Ctrl-C to stop)")
+    threads: list[threading.Thread] = []
+    for name, adapter in adapters.items():
+
+        def _run(adapter=adapter, name=name) -> None:
+            try:
+                adapter.run(
+                    lambda msg, _name=name: service.handle_inbound(
+                        msg, platform=_name
+                    ),
+                    service.outbound_for(name),
+                )
+            except Exception as exc:  # a dead transport must not kill the rest
+                print(f"gateway {name} stopped: {exc}", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name=f"gateway-{name}", daemon=True)
+        thread.start()
+        threads.append(thread)
+        endpoint = getattr(adapter, "ws_url", "") or getattr(adapter, "config_dir", "")
+        print(f"gateway {name} listening ({endpoint}) (Ctrl-C to stop)")
+
     try:
-        adapter.run(service.handle_inbound, service.outbound)
+        while any(thread.is_alive() for thread in threads):
+            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
         service.stop()
-        adapter.close()
+        for adapter in adapters.values():
+            try:
+                adapter.close()
+            except Exception:
+                pass
+        for thread in threads:
+            thread.join(timeout=2.0)
     return 0
 
 
@@ -697,8 +816,12 @@ def main(argv: list[str] | None = None) -> int:
         help="replay mode: do not warm the decision engine",
     )
 
-    gw_p = sub.add_parser("gateway", help="run the messenger gateway (SimpleX)")
-    gw_p.add_argument("--platform", default="simplex", help="gateway platform (default simplex)")
+    gw_p = sub.add_parser("gateway", help="run the messenger gateway (SimpleX, LXMF)")
+    gw_p.add_argument(
+        "--platform",
+        default="simplex",
+        help="gateway platform(s): simplex, lxmf, a comma-separated list, or all (default simplex)",
+    )
     gw_p.add_argument(
         "--dashboard",
         action="store_true",
