@@ -422,7 +422,11 @@ Rules:
   action skill reports the service's real response. A generic "done" that omits
   the result is a broken output.
 - **Never an empty or placeholder output.** If there is genuinely nothing (empty
-  inbox, no matching event), say so explicitly — that is a real result.
+  inbox, no matching event), say so explicitly — that is a real result, and a
+  **successful** run: the `assess:outcome` step treats a definitive "nothing
+  found / nothing to do" result as success. Phrase it as the answer the user
+  asked for ("checked the inbox: no unread messages"), not as an absence or an
+  error, so the assessment does not read a healthy empty result as a failure.
 - **Never claim success you did not observe.** If the action failed, put the
   real failure in `action_log` and set `new_state` back to `request.text` (see
   the hard requirements).

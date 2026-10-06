@@ -27,10 +27,13 @@ from semif_agent.codegen import (
 )
 from semif_agent.decisions import Request
 from semif_agent.dream import dream
-from semif_agent.engine import EngineUnavailable
+from semif_agent.engine import EngineUnavailable, SemIfEngine
+from semif_agent.log import DecisionLog
 from semif_agent.scheduler import SkillWrite
+from semif_agent.skill import SkillRunner
 from semif_agent.skills import (
     ActionResult,
+    ActionContext,
     CategoryDraft,
     CreateCategory,
     Skill,
@@ -635,3 +638,40 @@ def test_skill_pauses_for_input_and_resumes(tmp_path):
     rows = scheduler.trace.read()
     kinds = [e["kind"] for e in rows]
     assert "needs_input" in kinds and "answered" in kinds and "assessed" in kinds
+
+
+def test_empty_result_is_assessed_as_success(tmp_path):
+    """A query skill whose correct answer is "nothing" is a successful run.
+
+    The `assess:outcome` options must treat a definitive empty/none result
+    (empty inbox, no matching event) as success; otherwise a healthy read is
+    marked failed and the repair loop offers to rewrite a working skill. This
+    exercises the real engine, since only it produces the probabilities.
+    """
+    config = load_config()
+    require_real(config)
+    engine = SemIfEngine(build_engine_config(config))
+
+    def act(ctx, request):
+        return ActionResult(
+            action_log="simplex.next_message: no unread SimpleX messages.",
+            new_state="no unread SimpleX messages",
+        )
+
+    skill = Skill(
+        name="next_message",
+        category="simplex",
+        description="Read the next unread SimpleX message.",
+        act=act,
+    )
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+    outcome = runner.run(skill, Request("What's my next simplex message?"))
+    print(f"[{outcome.success}] {outcome.summary}")
+
+    assert outcome.success is True, outcome.summary
+    phases = [row["extra"]["phase"] for row in log.read()]
+    assert "assess:outcome" in phases
+    assert "assess:requeue" not in phases, (
+        "an empty discovery must not be retried or repaired"
+    )

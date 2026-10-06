@@ -310,8 +310,18 @@ class SkillRunner:
             ),
             question="Did the skill achieve the user's goal?",
             options=[
-                Option("success", "Yes — the goal was met."),
-                Option("failure", "No — the goal was not met."),
+                Option(
+                    "success",
+                    "Yes — the skill carried out the request and produced a "
+                    "truthful result. A definitive 'nothing found' or 'nothing "
+                    "to do' result (empty inbox, no unread messages, no "
+                    "matching event) counts as success.",
+                ),
+                Option(
+                    "failure",
+                    "No — the request was not carried out, or the result is an "
+                    "error, a refusal, or an unresolved action.",
+                ),
             ],
         )
         result = self.ctx.engine.call(outcome)
