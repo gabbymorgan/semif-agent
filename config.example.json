@@ -173,7 +173,7 @@
         "enabled": true,
         "frequency": 880,
         "duration_ms": 120,
-        "volume": 0.25,
+        "volume": 0.9,
         "submit_frequency": 0,
         "submit_duration_ms": 100
       },
@@ -193,7 +193,8 @@
         "voice": "en_US-lessac-medium",
         "voice_dir": "",
         "speaker_id": 0,
-        "length_scale": 1.0
+        "length_scale": 1.0,
+        "volume": 1.0
       },
       "audio": {
         "input_device": "",

@@ -249,11 +249,12 @@ class WhisperTranscriber(Transcriber):
 class PiperSynthesizer(Synthesizer):
     """Piper TTS. `voice` is a voice name (resolved to a `.onnx`) or a path."""
 
-    def __init__(self, voice: str, speaker_id: int = 0, length_scale: float = 1.0):
+    def __init__(self, voice: str, speaker_id: int = 0, length_scale: float = 1.0,
+                 volume: float = 1.0):
         from piper import PiperVoice
 
         self._voice = PiperVoice.load(str(voice))
-        self._syn_config = _piper_syn_config(speaker_id, length_scale)
+        self._syn_config = _piper_syn_config(speaker_id, length_scale, volume)
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
         buffer = io.BytesIO()
@@ -273,7 +274,7 @@ class PiperSynthesizer(Synthesizer):
             return wav_file.readframes(wav_file.getnframes()), wav_file.getframerate()
 
 
-def _piper_syn_config(speaker_id: int, length_scale: float):
+def _piper_syn_config(speaker_id: int, length_scale: float, volume: float = 1.0):
     """A piper `SynthesisConfig` when the installed version provides one."""
     try:
         from piper import SynthesisConfig
@@ -284,6 +285,8 @@ def _piper_syn_config(speaker_id: int, length_scale: float):
         kwargs["speaker_id"] = int(speaker_id)
     if length_scale and float(length_scale) != 1.0:
         kwargs["length_scale"] = float(length_scale)
+    if volume and float(volume) != 1.0:
+        kwargs["volume"] = float(volume)
     if not kwargs:
         return None
     try:
@@ -551,6 +554,7 @@ def build_engines(cfg: dict, trace=None) -> VoiceEngines:
             tts_voice,
             speaker_id=int(tts_cfg.get("speaker_id", 0) or 0),
             length_scale=float(tts_cfg.get("length_scale", 1.0) or 1.0),
+            volume=float(tts_cfg.get("volume", 1.0) or 1.0),
         ),
         audio=SoundDeviceAudio(
             input_device=str(audio_cfg.get("input_device", "") or ""),
