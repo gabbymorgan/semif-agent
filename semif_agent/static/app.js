@@ -155,6 +155,18 @@ function eventRow(evt) {
     div.title = evt.message || "";
   } else if (evt.kind === "skill_restarted") {
     div.textContent = `restarted body write: ${evt.skill}`;
+  } else if (evt.kind === "skill_deleted") {
+    div.textContent = `deleted skill: ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_build_cancelled") {
+    div.textContent = `cancelled build: ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_regen_started") {
+    div.textContent = `regenerating skill: ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "config_cleared") {
+    div.textContent = `cleared config: ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_create_blocked") {
+    div.textContent = `new-skill creation blocked: ${evt.category}`;
+  } else if (evt.kind === "category_lock_set") {
+    div.textContent = `${evt.category} new-skill lock ${evt.new_skill ? "on" : "off"}`;
   } else if (evt.kind === "needs_input") {
     div.textContent = "needs input";
     div.title = evt.question || "";
@@ -497,6 +509,20 @@ function eventNode(evt) {
     node.appendChild(btn);
   } else if (evt.kind === "skill_restarted") {
     body.textContent = `restarted body write for ${evt.skill}`;
+  } else if (evt.kind === "skill_deleted") {
+    node.classList.add("stub");
+    body.textContent = `deleted ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_build_cancelled") {
+    node.classList.add("stub");
+    body.textContent = `cancelled build for ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_regen_started") {
+    body.textContent = `regenerating ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "config_cleared") {
+    body.textContent = `cleared config for ${evt.category}.${evt.skill}`;
+  } else if (evt.kind === "skill_create_blocked") {
+    body.textContent = `new-skill creation blocked in ${evt.category}`;
+  } else if (evt.kind === "category_lock_set") {
+    body.textContent = `${evt.category} new-skill lock ${evt.new_skill ? "on" : "off"}`;
   } else if (evt.kind === "needs_input") {
     node.classList.add("needs-input");
     body.textContent = `awaiting input: ${evt.question || ""}`;
@@ -570,6 +596,43 @@ async function restartSkill(category, name) {
   await refreshAll();
 }
 
+async function housekeepingAction(path, category, name) {
+  try {
+    const res = await getJSON(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category, skill: name }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`${path} failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
+async function toggleLock(category, locked) {
+  try {
+    const res = await getJSON("/api/lock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category, locked }),
+    });
+    flash(`[${res.status}] ${res.detail}`);
+  } catch (err) {
+    flash(`lock failed: ${err.message}`);
+  }
+  await refreshAll();
+}
+
+function actionBtn(label, title, onClick) {
+  const btn = document.createElement("button");
+  btn.className = "restart-btn";
+  btn.textContent = label;
+  btn.title = title;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
 async function answerQuestion(id, text) {
   try {
     const res = await getJSON("/api/questions", {
@@ -640,6 +703,18 @@ function renderTree() {
     const name = document.createElement("div");
     name.className = "cat-name";
     name.textContent = cat;
+    const locked = (state.tree.locks || {})[cat];
+    if (locked !== undefined) {
+      const lock = actionBtn(
+        locked ? "locked" : "open",
+        locked
+          ? "new-skill creation is locked; click to allow"
+          : "new-skill creation is allowed; click to lock",
+        () => toggleLock(cat, !locked)
+      );
+      lock.classList.add("lock-btn");
+      name.appendChild(lock);
+    }
     div.appendChild(name);
     for (const skill of skills) {
       const row = document.createElement("div");
@@ -665,6 +740,30 @@ function renderTree() {
         row.appendChild(un);
       }
       row.appendChild(skillStatusBadge(skill.status, cat, skill.name));
+      if (skill.origin !== "builtin") {
+        row.appendChild(
+          actionBtn("delete", `delete ${cat}.${skill.name}`, () =>
+            housekeepingAction("/api/delete", cat, skill.name)
+          )
+        );
+        row.appendChild(
+          actionBtn("regen", `regenerate ${cat}.${skill.name}`, () =>
+            housekeepingAction("/api/regen", cat, skill.name)
+          )
+        );
+        row.appendChild(
+          actionBtn("clear config", `clear recorded config for ${cat}.${skill.name}`, () =>
+            housekeepingAction("/api/clear-config", cat, skill.name)
+          )
+        );
+      }
+      if (skill.status === "writing") {
+        row.appendChild(
+          actionBtn("cancel", `cancel the build for ${cat}.${skill.name}`, () =>
+            housekeepingAction("/api/cancel-build", cat, skill.name)
+          )
+        );
+      }
       div.appendChild(row);
     }
     el.appendChild(div);

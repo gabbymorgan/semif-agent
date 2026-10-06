@@ -88,10 +88,15 @@ scheduler.py    no up-front gate: every input is dispatched
                 time (all front ends defer via the question queue, `answer_timeout`
                 per question); a
                 failed real run triggers a logged SemIf repair choice
-                (retry/repair_skill/ask_user/no_repair) surfaced to the user
+                (retry/repair_skill/ask_user/no_repair) surfaced to the user;
+                housekeeping meta skills (delete/clear-config/regen/cancel-build)
+                operate on the tree via `ctx.admin`; per-category new-skill locks
+                (`locks.new_skill` in the category config) gate creation, with
+                `housekeeping`/`response` hard-locked in code
 queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
-                tree only), navigation = SemIf choices per level (logged;
+                tree plus the `housekeeping` meta skills), navigation = SemIf
+                choices per level (logged;
                 the actionability guard runs first, at the top of navigation,
                 to arbitrate the response/create boundary), create_category
                 and create_skill author + register stubs via the small `llm`
@@ -108,7 +113,13 @@ skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 mirror);
                 resolve_skill_config / unresolved_variables drive the tiered
                 config merge (global -> category -> skill) + pre-act
-                contract collection
+                contract collection; Skill.origin records builtin/seed/generated;
+                DeletedSkills (data/deleted_skills.json) tombstones a deleted
+                skill so a seed does not reappear on restart; resolve_skill_ref
+                parses a free-form request for a category.skill or bare name;
+                parse_meta_command recognizes explicit housekeeping commands and
+                the meta skills resolve or ask for their target as an input
+                variable
 skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 act(ctx, request) phase that returns ActionResult (its own
                 SemIf sub-decisions ride on ActionResult.decisions and are
@@ -117,7 +128,9 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 tau; on failure `assess:requeue` complete/retry) and the run
                 summary is deterministic (no generation), built from
                 category.skill + ok/failed + action_log; the assess state carries
-                the resolved inputs (secrets redacted);
+                the resolved inputs (secrets redacted); a `DETERMINISTIC_CATEGORIES`
+                run (housekeeping) skips assessment/repair — it is an internal
+                mechanical action with a known result, not an external run;
                 a run paused for input is resumed by re-invoking act with the
                 answer on request.user_input; a
                 contract variable the runner cannot satisfy pauses BEFORE
@@ -388,6 +401,40 @@ CLI, unit tests (24) + integration tests (2).
   `creation_approval_requested` / `_approved` / `_denied` / `_timeout` /
   `_skipped`; it is a human veto, not a decision row — the SemIf create doors
   still make and log the routing decision.
+- **Housekeeping meta skills + per-category new-skill locks** (Oct 2026): a
+  built-in `housekeeping` category of four meta skills that act on the agent's
+  own tree through `ctx.admin` (the scheduler): `delete_skill` (confirm, then
+  remove the leaf, registry entry, and folder; durable via a
+  `data/deleted_skills.json` tombstone so a deleted seed does not reappear),
+  `clear_config` (empty the skill's recorded config), `regen_skill` (ask
+  **"What needs to be fixed?"** then rewrite the body through the corrective
+  path with `reason_kind="manual"`), and `cancel_build` (confirm, then discard a
+  queued/in-flight write and delete the half-built leaf). The target skill is an
+  **input variable**: the skill resolves it from the request if named
+  ("delete skill calendar.foo") and otherwise **asks** for it ("delete skill" →
+  "Which skill?"), so the routed request never has to carry a task-like skill
+  name. Explicit command forms ("delete skill", "clear config variables for X",
+  "regen skill X", "cancel skill build") are recognized deterministically by
+  `parse_meta_command` and routed straight to the housekeeping leaf (trace
+  `meta_command`): the pinned 4B decision model reads a task-like name
+  (`calendar.create_event`) as the task itself and misroutes the generic guards,
+  so the explicit command is deterministic while natural-language phrasings
+  still go through navigation (the actionability guard's `action` option now
+  names skill-management commands). They are built-ins
+  (`Skill.origin == "builtin"`) reachable by natural language and, for operators,
+  by slash-prefixed REPL commands (`/delete`, `/clear-config`, `/regen`,
+  `/cancel-build`, `/lock`) and dashboard endpoints/buttons. Their runs are
+  deterministic internal actions: `DETERMINISTIC_CATEGORIES` skips
+  `assess:outcome`/repair, and the category is hard-locked from authoring. Every
+  category carries a **new-skill lock** in its category config
+  (`data/skills/<category>/config.json` → `{"locks": {"new_skill": bool}}`); the
+  lock is a deterministic boolean gate (`Scheduler._category_locked`) checked in
+  `_dispatch`, `_dispatch_skill`, `_author_skill`, and `restart_skill`, and
+  toggled from the config file or `Scheduler.set_category_lock` (`/lock`,
+  `/api/lock`). `housekeeping` and the closed `response` tree are hard-locked in
+  code (`HARD_LOCKED_CATEGORIES`/`CANNED_CATEGORIES`) and can never be unlocked.
+  The lock is creation-only: existing skills still run and repair/regen of an
+  existing leaf is allowed.
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which
   service/account, how to connect, where the credential comes from, what success
@@ -1182,7 +1229,10 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   Includes the dashboard API tests (`tests/test_dashboard_api.py`), which spin
   up the stdlib HTTP server on an ephemeral port with the engine never loaded;
   `tests/test_codegen.py` for prompt/parse/validate, integration
-  extraction/findings, and body store round-trips; and `tests/test_llm.py` for
+  extraction/findings, and body store round-trips; `tests/test_housekeeping.py`
+  for the housekeeping operations (name resolution, store/registry deletion,
+  tombstones, the lock gate, cancel/regen, and the meta-skill act flows); and
+  `tests/test_llm.py` for
   the `_parse_json` helper and the LLMClient provider. `tests/conftest.py``s `ScriptedEngine`
   drives scheduling mechanics (assessment is now a SemIf decision) without a
   GGUF.

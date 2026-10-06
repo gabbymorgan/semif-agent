@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from .codegen import (
@@ -40,13 +41,19 @@ from .skill import SkillRunner
 from .timers import TimerService
 from .skills import (
     CANNED_CATEGORIES,
+    DETERMINISTIC_CATEGORIES,
+    HARD_LOCKED_CATEGORIES,
+    HOUSEKEEPING_CATEGORY,
     ActionContext,
     CategoryRegistry,
     CreateCategory,
     CreateSkill,
+    DeletedSkills,
     Skill,
     SkillDraft,
     SkillStore,
+    apply_tombstones,
+    build_housekeeping_skills,
     build_skills,
     build_tree,
     confirm_skill_fit,
@@ -57,6 +64,7 @@ from .skills import (
     merge_seed_store,
     merge_skill_store,
     navigate,
+    parse_meta_command,
 )
 from .trace import TraceLog
 
@@ -101,6 +109,9 @@ class SkillWrite:
     draft: SkillDraft
     weight: float
     repair_evidence: dict | None = None
+    # Label for a corrective rewrite: "run_failure" (repair loop), "fidelity",
+    # "test", or "manual" (a user-requested regen).
+    reason_kind: str = "run_failure"
 
 
 @dataclass
@@ -255,16 +266,27 @@ class Scheduler:
             max_size=int(config.get("queue", {}).get("max_size", 100)),
             age_rate=float(config.get("queue", {}).get("age_rate", 0.0)),
         )
-        self.skills = build_skills(config)
+        self.skills = build_skills(config) + build_housekeeping_skills()
         self.tree = build_tree(self.skills)
-        self.registry = CategoryRegistry(config.get("category_registry", "data/categories.json"))
+        registry_path = config.get("category_registry", "data/categories.json")
+        self.registry = CategoryRegistry(registry_path)
         self.body_store = SkillStore(config.get("skill_bodies", "data/skills"))
         self.seed_store = SkillStore(config.get("skill_seeds", "seeds"))
+        # Deletions are durable: a tombstone suppresses a seed (or a generated
+        # body of the same name) on every future load. Derived from the registry
+        # path when not configured, so a test store is self-contained.
+        deleted_path = config.get("deleted_skills") or str(
+            Path(registry_path).parent / "deleted_skills.json"
+        )
+        self.deleted = DeletedSkills(deleted_path)
         merge_registry(self.tree, self.registry.read())
         merge_seed_store(self.tree, self.seed_store, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
+        apply_tombstones(self.tree, self.deleted)
         self.timers = TimerService(trace=self.trace)
-        self.ctx = ActionContext(engine=self.engine, config=config, timers=self.timers)
+        self.ctx = ActionContext(
+            engine=self.engine, config=config, timers=self.timers, admin=self
+        )
         self.runner = SkillRunner(
             self.ctx, self.log, store=self.body_store, tau=self.tau
         )
@@ -276,6 +298,9 @@ class Scheduler:
         self._draft_notify = threading.Condition(self._lock)
         self._draft_thread: threading.Thread | None = None
         self._writes: deque[SkillWrite] = deque()
+        # Body writes cancelled while queued or in flight: the worker discards
+        # their output instead of materializing the leaf.
+        self._cancelled: set[tuple[str, str]] = set()
         self._write_notify = threading.Condition(self._lock)
         self._write_thread: threading.Thread | None = None
         self._question_notify = threading.Condition(self._lock)
@@ -454,6 +479,25 @@ class Scheduler:
     # ---- dispatch ----
 
     def _dispatch(self, request: Request, weight: float = 0.0) -> DispatchResult:
+        # Explicit housekeeping commands are deterministic: they route straight
+        # to the meta skill, bypassing the generic guards (which misread a
+        # task-like skill name as the task). Natural-language phrasings still go
+        # through navigation below.
+        meta = parse_meta_command(request.text)
+        if meta is not None:
+            leaf = next(
+                (
+                    s
+                    for s in self.tree.get(HOUSEKEEPING_CATEGORY, [])
+                    if s.name == meta
+                ),
+                None,
+            )
+            if leaf is not None:
+                self.trace.append(
+                    "meta_command", request.id, action=meta, text=request.text
+                )
+                return self._run_skill(leaf, request)
         navigation = navigate(
             self.engine,
             self.log,
@@ -469,6 +513,12 @@ class Scheduler:
             return self._dispatch_skill(request, navigation.category, weight)
         if navigation.category in CANNED_CATEGORIES:
             return self._run_skill(navigation, request)
+        if navigation.category in HARD_LOCKED_CATEGORIES:
+            # A hard-locked built-in category can never author a leaf, so the
+            # reuse-vs-create intent guard has nothing to decide: run the
+            # navigation's pick directly (the meta skill asks for any missing
+            # target as an input variable).
+            return self._run_skill(navigation, request)
         if not confirm_skill_fit(
             self.engine, self.log, self.trace, request, navigation, self.intent_tau
         ):
@@ -478,6 +528,8 @@ class Scheduler:
                 selected_skill=f"{navigation.category}.{navigation.name}",
                 chosen="create_skill",
             )
+            if self._category_locked(navigation.category):
+                return self._blocked_create(request, navigation.category)
             return self._dispatch_skill(request, navigation.category, weight)
         return self._run_skill(navigation, request)
 
@@ -511,6 +563,8 @@ class Scheduler:
         A re-dispatched request whose skill is still unwritten must not author a
         second skill — it reports the pending write instead.
         """
+        if self._category_locked(category):
+            return self._blocked_create(request, category)
         pending = request.meta.get("awaiting_skill_body")
         if pending is not None:
             category_pending, name = pending
@@ -528,6 +582,39 @@ class Scheduler:
             summary=(
                 f"authoring a new skill for {category} in the background; "
                 "the request will re-run when it is ready"
+            ),
+        )
+
+    # ---- new-skill locks (deterministic per-category create door) ----
+
+    def _category_locked(self, category: str) -> bool:
+        """Is this category closed to new-skill creation?
+
+        A plain boolean gate, not a SemIf decision: the closed `response` tree
+        and the built-in `housekeeping` category are locked in code
+        (HARD_LOCKED_CATEGORIES); every other category is locked when its
+        category config (`data/skills/<category>/config.json`) sets
+        `locks.new_skill` true. Absent config means unlocked. The lock is
+        creation-only: existing skills still run, and repair/regen of an
+        existing leaf is allowed.
+        """
+        if category in CANNED_CATEGORIES or category in HARD_LOCKED_CATEGORIES:
+            return True
+        config = self.body_store.read_category_config(category) or {}
+        locks = config.get("locks") or {}
+        return bool(locks.get("new_skill", False))
+
+    def _blocked_create(self, request: Request, category: str) -> DispatchResult:
+        """Report that a locked category will not accept a new skill."""
+        self.trace.append(
+            "skill_create_blocked", request.id, category=category
+        )
+        return DispatchResult(
+            kind="error",
+            summary=(
+                f"cannot create a new skill in {category}: new-skill creation "
+                f"is locked (set locks.new_skill=false in "
+                f"data/skills/{category}/config.json to allow it)"
             ),
         )
 
@@ -651,7 +738,11 @@ class Scheduler:
         model the observed failure verbatim, never a paraphrase and never
         credentials.
         """
-        if not self.repair_enabled or skill.is_noop():
+        if (
+            not self.repair_enabled
+            or skill.is_noop()
+            or skill.category in DETERMINISTIC_CATEGORIES
+        ):
             return
         evidence = {
             "error": outcome.error,
@@ -1033,6 +1124,11 @@ class Scheduler:
                 return
             self.registry.register(draft.name, draft.description)
             self.tree[draft.name] = []
+            # Seed the category config so the new-skill lock is discoverable and
+            # editable from the start (default: unlocked).
+            self.body_store.write_category_config(
+                draft.name, {"locks": {"new_skill": False}}
+            )
             self.trace.append(
                 "category_created",
                 job.request.id,
@@ -1053,6 +1149,14 @@ class Scheduler:
         if not self._request_approval(job, "skill", draft.name, draft.description):
             return
         with self._lock:
+            if self._category_locked(job.category):
+                self.trace.append(
+                    "skill_create_blocked",
+                    job.request.id,
+                    category=job.category,
+                    phase="create_skill",
+                )
+                return
             existing = {s.name for s in self.tree.get(job.category, [])}
             if draft.name in existing:
                 self.trace.append(
@@ -1212,6 +1316,7 @@ class Scheduler:
         draft: SkillDraft,
         weight: float,
         repair_evidence: dict | None = None,
+        reason_kind: str = "run_failure",
     ) -> None:
         """Mark the leaf in-progress and queue the body write for the worker.
 
@@ -1230,6 +1335,8 @@ class Scheduler:
             )
             if leaf is None:
                 return
+            # A fresh write clears any stale cancellation for this name.
+            self._cancelled.discard((category, draft.name))
             leaf.writing = True
             contract = skill_contract_ref()
             self.trace.append(
@@ -1250,6 +1357,7 @@ class Scheduler:
                     draft=draft,
                     weight=weight,
                     repair_evidence=repair_evidence,
+                    reason_kind=reason_kind,
                 )
             )
             if self._write_thread is None or not self._write_thread.is_alive():
@@ -1276,7 +1384,27 @@ class Scheduler:
                 if self._fatal is not None:
                     return
                 job = self._writes.popleft()
+            if self._consume_cancelled(job):
+                continue
             self._write_skill_body(job)
+
+    def _is_cancelled(self, category: str, name: str) -> bool:
+        with self._lock:
+            return (category, name) in self._cancelled
+
+    def _consume_cancelled(self, job: SkillWrite) -> bool:
+        """Discard a queued write that was cancelled before it started."""
+        if not self._is_cancelled(job.category, job.draft.name):
+            return False
+        with self._lock:
+            self._cancelled.discard((job.category, job.draft.name))
+        self.trace.append(
+            "skill_write_cancelled",
+            job.request.id,
+            category=job.category,
+            skill=job.draft.name,
+        )
+        return True
 
     def _write_skill_body(self, job: SkillWrite) -> None:
         """Run the full authoring pipeline for one queued write (no scheduler
@@ -1287,6 +1415,8 @@ class Scheduler:
         The tree is snapshotted under the lock so the prompt build reads a
         stable view even if the main thread merges another skill meanwhile.
         """
+        if self._is_cancelled(job.category, job.draft.name):
+            return
         with self._lock:
             tree_snapshot = {category: list(skills) for category, skills in self.tree.items()}
         if job.repair_evidence is None and not job.draft.requirements:
@@ -1306,7 +1436,7 @@ class Scheduler:
                     job.draft,
                     self._read_body(job.category, job.draft.name),
                     evidence,
-                    reason_kind="run_failure",
+                    reason_kind=job.reason_kind,
                 )
             else:
                 code = generate_skill_body(
@@ -1330,6 +1460,8 @@ class Scheduler:
             return
         except (CodegenError, ValueError) as exc:
             self._fail_skill_write(job, exc)
+            return
+        if self._is_cancelled(job.category, job.draft.name):
             return
         self.body_store.write_body(job.category, job.draft.name, code)
         self.body_store.write_contract(job.category, job.draft.name, contract)
@@ -1690,6 +1822,9 @@ class Scheduler:
     def _complete_skill_write(self, job: SkillWrite, code: str) -> None:
         """Materialize the body, hot-merge it into the tree, and re-dispatch the
         original request so it is answered by the new leaf."""
+        if self._is_cancelled(job.category, job.draft.name):
+            self._discard_cancelled_write(job)
+            return
         job.draft.code = code
         try:
             skill = materialize_skill(job.draft, job.category, self.body_store)
@@ -1738,8 +1873,31 @@ class Scheduler:
         )
         self.run_queue()
 
+    def _discard_cancelled_write(self, job: SkillWrite) -> None:
+        """Clean up a write that was cancelled mid-flight.
+
+        The cancel path already removed the leaf and folder; the generation may
+        have rewritten files after that, so delete the folder again and clear
+        the in-progress flag. The cancellation marker is consumed.
+        """
+        with self._lock:
+            self._cancelled.discard((job.category, job.draft.name))
+            leaf = next(
+                (s for s in self.tree.get(job.category, []) if s.name == job.draft.name),
+                None,
+            )
+            if leaf is not None:
+                leaf.writing = False
+        try:
+            self.body_store.delete(job.category, job.draft.name)
+        except (OSError, ValueError):
+            pass
+
     def _fail_skill_write(self, job: SkillWrite, exc: Exception) -> None:
         """Clear the in-progress flag and notify; the leaf stays a restartable stub."""
+        if self._is_cancelled(job.category, job.draft.name):
+            self._discard_cancelled_write(job)
+            return
         with self._lock:
             leaf = next(
                 (s for s in self.tree.get(job.category, []) if s.name == job.draft.name),
@@ -1770,6 +1928,10 @@ class Scheduler:
                 return "error", f"no skill {category}.{name}"
             if category in CANNED_CATEGORIES:
                 return "error", f"{category} is a closed canned tree; there is no body to write"
+            if leaf.origin == "builtin":
+                return "error", f"{category}.{name} is a built-in skill; there is no body to write"
+            if self._category_locked(category):
+                return "error", f"{category} is locked to new skills"
             if leaf.writing:
                 return "error", f"skill {category}.{name} is already being written"
             if self.codegen is None:
@@ -1794,6 +1956,222 @@ class Scheduler:
         self._start_skill_write(origin, category, draft, 0.5)
         self.trace.append("skill_restarted", origin.id, category=category, skill=name)
         return "running", f"restarting body write for {category}.{name}"
+
+    # ---- housekeeping (the meta skills' operations) ----
+
+    def _cancel_pending_write(self, category: str, name: str) -> bool:
+        """Cancel any queued/in-flight body write for a leaf.
+
+        Removes a still-queued write and marks the name cancelled so an
+        in-flight generation discards its output. Returns whether a write was
+        in progress.
+        """
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name), None
+            )
+            was_writing = bool(leaf and leaf.writing)
+            self._cancelled.add((category, name))
+            self._writes = deque(
+                w
+                for w in self._writes
+                if not (w.category == category and w.draft.name == name)
+            )
+            if leaf is not None:
+                leaf.writing = False
+        return was_writing
+
+    def delete_skill(self, category: str, name: str) -> tuple[str, str]:
+        """Delete a skill: tree leaf, registry entry, folder, and tombstone.
+
+        Durable: the tombstone suppresses a seed (or a same-named generated
+        body) on every future load. Built-in skills cannot be deleted.
+        """
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name), None
+            )
+            if leaf is None:
+                return "error", f"no skill {category}.{name}"
+            if leaf.origin == "builtin" or category in CANNED_CATEGORIES:
+                return "error", (
+                    f"{category}.{name} is a built-in skill and cannot be deleted"
+                )
+            self._cancel_pending_write(category, name)
+            self.tree[category] = [
+                s for s in self.tree.get(category, []) if s.name != name
+            ]
+            self.registry.unregister_skill(category, name)
+            self.deleted.add(category, name)
+            self.trace.append("skill_deleted", "?", category=category, skill=name)
+        try:
+            self.body_store.delete(category, name)
+        except (OSError, ValueError) as exc:
+            self.trace.append(
+                "skill_delete_failed",
+                "?",
+                category=category,
+                skill=name,
+                message=str(exc),
+            )
+        return "ok", f"deleted {category}.{name}"
+
+    def clear_skill_config(self, category: str, name: str) -> tuple[str, str]:
+        """Clear a skill's recorded config so it is asked for again next fire."""
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name), None
+            )
+            if leaf is None:
+                return "error", f"no skill {category}.{name}"
+            current = self.body_store.read_config(category, name) or {}
+            cleared = sorted(set(current) | set(leaf.config or {}))
+            if not cleared:
+                return "ok", f"{category}.{name} has no recorded config"
+            self.body_store.write_config(category, name, {})
+            leaf.config = {}
+            self.trace.append(
+                "config_cleared",
+                "?",
+                category=category,
+                skill=name,
+                variables=cleared,
+            )
+        return "ok", (
+            f"cleared {len(cleared)} config variable(s) for {category}.{name}: "
+            + ", ".join(cleared)
+        )
+
+    def regen_skill(
+        self, category: str, name: str, guidance: str = ""
+    ) -> tuple[str, str]:
+        """Regenerate a skill body from the user's guidance.
+
+        A stub with no body is simply (re)written; an existing body is rewritten
+        through the corrective path with the guidance as evidence. Built-in
+        skills cannot be regenerated; a locked category may still regenerate an
+        existing leaf (the lock is creation-only).
+        """
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name), None
+            )
+            if leaf is None:
+                return "error", f"no skill {category}.{name}"
+            if category in CANNED_CATEGORIES or leaf.origin == "builtin":
+                return "error", (
+                    f"{category}.{name} is a built-in skill and cannot be regenerated"
+                )
+            if self.codegen is None:
+                return "error", "no codegen configured"
+            if leaf.writing:
+                return "error", f"skill {category}.{name} is already being written"
+            draft = self._stub_draft(category, name)
+            if leaf.description:
+                draft.description = leaf.description
+            row = next(
+                (
+                    s
+                    for s in self.registry.read().get(category, {}).get("skills", [])
+                    if s.get("name") == name
+                ),
+                {},
+            )
+            request_text = row.get("request_text")
+            origin = (
+                Request(request_text, source="regen")
+                if request_text
+                else Request(
+                    f"regenerate the body for {category}.{name}: {draft.description}",
+                    source="regen",
+                )
+            )
+        previous = self._read_body(category, name)
+        evidence = {"guidance": guidance or "(none given)"} if previous else None
+        self._start_skill_write(
+            origin,
+            category,
+            draft,
+            0.5,
+            repair_evidence=evidence,
+            reason_kind="manual",
+        )
+        self.trace.append(
+            "skill_regen_started",
+            origin.id,
+            category=category,
+            skill=name,
+            guidance=guidance or None,
+        )
+        return "running", f"regenerating body for {category}.{name}"
+
+    def cancel_skill_build(self, category: str, name: str) -> tuple[str, str]:
+        """Cancel a skill body build and delete its half-built leaf."""
+        with self._lock:
+            leaf = next(
+                (s for s in self.tree.get(category, []) if s.name == name), None
+            )
+            if leaf is None:
+                return "error", f"no skill {category}.{name}"
+            if leaf.origin == "builtin" or category in CANNED_CATEGORIES:
+                return "error", (
+                    f"{category}.{name} is a built-in skill and cannot be cancelled"
+                )
+            was_writing = self._cancel_pending_write(category, name)
+            self.tree[category] = [
+                s for s in self.tree.get(category, []) if s.name != name
+            ]
+            self.registry.unregister_skill(category, name)
+            self.deleted.add(category, name)
+            self.trace.append(
+                "skill_build_cancelled",
+                "?",
+                category=category,
+                skill=name,
+                was_writing=was_writing,
+            )
+        try:
+            self.body_store.delete(category, name)
+        except (OSError, ValueError) as exc:
+            self.trace.append(
+                "skill_delete_failed",
+                "?",
+                category=category,
+                skill=name,
+                message=str(exc),
+            )
+        detail = (
+            f"cancelled the build for {category}.{name} and deleted the leaf"
+            if was_writing
+            else f"deleted {category}.{name} (no build was in progress)"
+        )
+        return "ok", detail
+
+    def set_category_lock(self, category: str, locked: bool) -> tuple[str, str]:
+        """Toggle a category's new-skill lock in its category config."""
+        with self._lock:
+            if category in CANNED_CATEGORIES or category in HARD_LOCKED_CATEGORIES:
+                return "error", (
+                    f"{category} is a built-in category and is always locked"
+                )
+            if category not in self.tree:
+                return "error", f"no category {category}"
+            config = self.body_store.read_category_config(category) or {}
+            locks = dict(config.get("locks") or {})
+            locks["new_skill"] = bool(locked)
+            config["locks"] = locks
+            self.body_store.write_category_config(category, config)
+            self.trace.append(
+                "category_lock_set", "?", category=category, new_skill=bool(locked)
+            )
+        return "ok", (
+            f"{category} new-skill creation "
+            f"{'locked' if locked else 'unlocked'}"
+        )
+
+    def category_locks(self) -> dict[str, bool]:
+        with self._lock:
+            return {category: self._category_locked(category) for category in self.tree}
 
     def status(self) -> str:
         with self._lock:

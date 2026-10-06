@@ -1064,7 +1064,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
     guard sends dispatch to create_skill in the same category instead."""
     scheduler = _scheduler(
         tmp_path,
-        choices={"same action": "different"},
+        choices={"top-level category": "simplex", "same action": "different"},
     )
     scheduler.tree.pop("response", None)
     scheduler.tree["simplex"] = [
@@ -1083,7 +1083,9 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
 
 
 def test_dispatch_intent_match_runs_skill(tmp_path):
-    scheduler = _scheduler(tmp_path, choices={"same action": "same"})
+    scheduler = _scheduler(
+        tmp_path, choices={"top-level category": "simplex", "same action": "same"}
+    )
 
     def act(ctx, request):
         return ActionResult(action_log="read the next message", new_state="read")

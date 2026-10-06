@@ -32,10 +32,34 @@ def build_scheduler(tmp_path, engine=None):
         engine=engine,
         llm=llm,
         log=log,
-        config={"skills": {}, "skill_seeds": str(tmp_path / "seeds")},
+        config={
+            "skills": {},
+            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "category_registry": str(tmp_path / "categories.json"),
+            "deleted_skills": str(tmp_path / "deleted_skills.json"),
+        },
         trace=trace,
     )
     return scheduler
+
+
+def _generated_skill(scheduler, category, name):
+    def act(ctx, request):
+        return ActionResult(action_log="ok", new_state="ok")
+
+    skill = Skill(
+        name=name,
+        category=category,
+        description="A generated skill.",
+        act=act,
+        origin="generated",
+    )
+    scheduler.tree.setdefault(category, []).append(skill)
+    scheduler.body_store.write_body(
+        category, name, "def act(ctx, request):\n    return None\n"
+    )
+    return skill
 
 
 def seed_decision(log, decision_id="abc123"):
@@ -127,6 +151,115 @@ def test_restart_without_codegen_returns_error_json(tmp_path):
         status, payload = server.post("/api/restart", {"category": "tracking", "skill": "missing"})
         assert payload["status"] == "error"
         assert "no skill" in payload["detail"]
+    finally:
+        server.close()
+
+
+def test_tree_endpoint_carries_origin_and_locks(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    _generated_skill(scheduler, "tracking", "track_live")
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/tree")
+        assert status == 200
+        by_name = {s["name"]: s for s in payload["categories"]["tracking"]}
+        assert by_name["track_live"]["origin"] == "generated"
+        assert any(
+            s["origin"] == "builtin"
+            for s in payload["categories"]["housekeeping"]
+        )
+        assert payload["locks"]["housekeeping"] is True
+        assert payload["locks"]["response"] is True
+        assert payload["locks"]["tracking"] is False
+    finally:
+        server.close()
+
+
+def test_delete_endpoint_removes_skill(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    _generated_skill(scheduler, "tracking", "track_live")
+    server = Server(scheduler)
+    try:
+        status, payload = server.post(
+            "/api/delete", {"category": "tracking", "skill": "track_live"}
+        )
+        assert status == 200
+        assert payload["status"] == "ok"
+        assert all(s.name != "track_live" for s in scheduler.tree["tracking"])
+        assert not scheduler.body_store.dir("tracking", "track_live").exists()
+    finally:
+        server.close()
+
+
+def test_clear_config_endpoint(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    skill = _generated_skill(scheduler, "tracking", "track_live")
+    skill.config = {"api_key": "x"}
+    scheduler.body_store.write_config("tracking", "track_live", {"api_key": "x"})
+    server = Server(scheduler)
+    try:
+        status, payload = server.post(
+            "/api/clear-config", {"category": "tracking", "skill": "track_live"}
+        )
+        assert status == 200
+        assert payload["status"] == "ok"
+        assert scheduler.body_store.read_config("tracking", "track_live") == {}
+    finally:
+        server.close()
+
+
+def test_cancel_build_endpoint(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    skill = _generated_skill(scheduler, "tracking", "track_live")
+    skill.writing = True
+    server = Server(scheduler)
+    try:
+        status, payload = server.post(
+            "/api/cancel-build", {"category": "tracking", "skill": "track_live"}
+        )
+        assert status == 200
+        assert payload["status"] == "ok"
+        assert all(s.name != "track_live" for s in scheduler.tree["tracking"])
+    finally:
+        server.close()
+
+
+def test_regen_endpoint_without_codegen_errors(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    _generated_skill(scheduler, "tracking", "track_live")
+    server = Server(scheduler)
+    try:
+        status, payload = server.post(
+            "/api/regen", {"category": "tracking", "skill": "track_live"}
+        )
+        assert status == 200
+        assert payload["status"] == "error"
+        assert "codegen" in payload["detail"]
+    finally:
+        server.close()
+
+
+def test_lock_endpoint_roundtrip(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    scheduler.tree["tracking"] = []
+    server = Server(scheduler)
+    try:
+        status, payload = server.get("/api/locks")
+        assert status == 200
+        assert payload["locks"]["tracking"] is False
+
+        status, payload = server.post(
+            "/api/lock", {"category": "tracking", "locked": True}
+        )
+        assert payload["status"] == "ok"
+
+        status, payload = server.get("/api/tree")
+        assert payload["locks"]["tracking"] is True
+
+        status, payload = server.post(
+            "/api/lock", {"category": "housekeeping", "locked": False}
+        )
+        assert payload["status"] == "error"
     finally:
         server.close()
 

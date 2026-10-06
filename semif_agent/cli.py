@@ -38,11 +38,19 @@ from .trace import TraceLog
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_PATH_KEYS = ("skill_seeds", "skill_bodies", "category_registry", "log", "trace")
+_PATH_KEYS = (
+    "skill_seeds",
+    "skill_bodies",
+    "category_registry",
+    "deleted_skills",
+    "log",
+    "trace",
+)
 _PATH_DEFAULTS = {
     "skill_seeds": "seeds",
     "skill_bodies": "data/skills",
     "category_registry": "data/categories.json",
+    "deleted_skills": "data/deleted_skills.json",
     "log": "data/decisions.jsonl",
     "trace": "data/runs.jsonl",
 }
@@ -446,6 +454,12 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         "relabel <id> <outcome> | restart <category> <skill> | "
         "repairs | repair <offer-id> [action] | approvals | quit"
     )
+    print(
+        "housekeeping (slash-prefixed so plain requests still route by SemIf): "
+        "/delete <category> <skill> | /clear-config <category> <skill> | "
+        "/regen <category> <skill> | /cancel-build <category> <skill> | "
+        "/lock <category> on|off"
+    )
     while True:
         _answer_questions(scheduler)
         _answer_approvals(scheduler)
@@ -502,6 +516,48 @@ def repl(scheduler: Scheduler, config: dict) -> int:
                 print("usage: restart <category> <skill>")
                 continue
             status, detail = scheduler.restart_skill(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
+        if lower.startswith("/delete "):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3:
+                print("usage: /delete <category> <skill>")
+                continue
+            status, detail = scheduler.delete_skill(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
+        if lower.startswith("/clear-config "):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3:
+                print("usage: /clear-config <category> <skill>")
+                continue
+            status, detail = scheduler.clear_skill_config(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
+        if lower.startswith("/regen "):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3:
+                print("usage: /regen <category> <skill>")
+                continue
+            status, detail = scheduler.regen_skill(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
+        if lower.startswith("/cancel-build "):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3:
+                print("usage: /cancel-build <category> <skill>")
+                continue
+            status, detail = scheduler.cancel_skill_build(parts[1], parts[2])
+            print(f"[{status}] {detail}")
+            continue
+        if lower.startswith("/lock "):
+            parts = line.lstrip("/").split()
+            if len(parts) != 3 or parts[2].lower() not in ("on", "off"):
+                print("usage: /lock <category> on|off")
+                continue
+            status, detail = scheduler.set_category_lock(
+                parts[1], parts[2].lower() == "on"
+            )
             print(f"[{status}] {detail}")
             continue
         if lower == "idle":

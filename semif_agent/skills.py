@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -43,6 +44,10 @@ class ActionContext:
     engine: SemIfEngine
     config: dict
     timers: TimerService | None = None
+    # The scheduler, exposed to built-in meta skills (housekeeping) so they can
+    # act on the agent's own tree/registry/store. None for ordinary bodies, which
+    # must never reach into the agent.
+    admin: object | None = None
 
 
 def _noop_act(ctx: ActionContext, request: Request) -> ActionResult:
@@ -62,6 +67,11 @@ class Skill:
     integration: dict = field(default_factory=dict)
     integration_source: str = "unknown"
     category_description: str = ""
+    # Where the leaf came from: "builtin" (hardcoded), "seed" (committed starter
+    # package), or "generated" (codegen-authored). Built-ins are protected from
+    # delete/restart/regen; seeds and generated leaves are deletable (durably,
+    # via a tombstone).
+    origin: str = "generated"
 
     def is_noop(self) -> bool:
         """A stub leaf: authored (title + description) but no runnable body yet."""
@@ -173,6 +183,23 @@ class CategoryRegistry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
+    def unregister_skill(self, category: str, name: str) -> None:
+        """Remove a skill entry from its category (the category itself stays).
+
+        The category bucket is kept even when it becomes empty: removing it would
+        make the category vanish from the navigation softmax until something
+        re-registers it.
+        """
+        categories = self.read()
+        entry = categories.get(category)
+        if entry is None:
+            return
+        entry["skills"] = [
+            s for s in entry.get("skills", []) if s.get("name") != name
+        ]
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(categories, indent=2) + "\n")
+
 
 class SkillStore:
     """Persists one skill leaf as a folder of deliverables.
@@ -264,6 +291,78 @@ class SkillStore:
                     skills.append((category_dir.name, entry.name))
         return skills
 
+    def delete(self, category: str, name: str) -> bool:
+        """Remove a skill folder. Returns True when something was removed.
+
+        Path-guarded: the resolved folder must sit directly under this store's
+        root, so a crafted category/name can never escape it.
+        """
+        target = (self.path / category / name).resolve()
+        root = self.path.resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(f"refusing to delete outside the skill store: {target}")
+        if not target.is_dir():
+            return False
+        shutil.rmtree(target)
+        return True
+
+
+class DeletedSkills:
+    """A persisted set of deleted skill refs (`category.name`).
+
+    Seeds reload from the committed `seeds/` tree on every startup, so deleting
+    one from the running tree would be undone on the next boot. Recording the
+    ref here suppresses it (and any generated body of the same name) at load
+    time, making deletion durable. Restoring a skill means removing its ref.
+    """
+
+    def __init__(self, path: str = "data/deleted_skills.json"):
+        self.path = Path(path)
+
+    def read(self) -> set[str]:
+        if not self.path.is_file():
+            return set()
+        try:
+            data = json.loads(self.path.read_text())
+        except ValueError:
+            return set()
+        if isinstance(data, dict):
+            data = data.get("skills", [])
+        return {str(ref) for ref in data or []}
+
+    def add(self, category: str, name: str) -> None:
+        refs = self.read()
+        refs.add(f"{category}.{name}")
+        self._write(refs)
+
+    def remove(self, category: str, name: str) -> None:
+        refs = self.read()
+        refs.discard(f"{category}.{name}")
+        self._write(refs)
+
+    def contains(self, category: str, name: str) -> bool:
+        return f"{category}.{name}" in self.read()
+
+    def _write(self, refs: set[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(sorted(refs), indent=2) + "\n")
+
+
+def apply_tombstones(tree: dict[str, list[Skill]], deleted: DeletedSkills) -> int:
+    """Drop tombstoned leaves from the tree. Returns the number removed."""
+    removed = 0
+    for ref in deleted.read():
+        category, _, name = ref.partition(".")
+        if not name:
+            continue
+        skills = tree.get(category)
+        if not skills:
+            continue
+        kept = [s for s in skills if s.name != name]
+        removed += len(skills) - len(kept)
+        tree[category] = kept
+    return removed
+
 
 def load_skill_module(category: str, name: str, base: str = "data/skills"):
     """Import a persisted skill body and return its module."""
@@ -333,6 +432,7 @@ def materialize_skill(
         contract=contract,
         integration=integration,
         integration_source=integration_source,
+        origin="generated",
     )
 
 
@@ -378,6 +478,7 @@ def merge_skill_store(
             integration=integration,
             integration_source=integration_source,
             category_description=category_description,
+            origin="generated",
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -433,6 +534,7 @@ def merge_seed_store(
             integration=integration,
             integration_source=integration_source,
             category_description=CATEGORY_DESCRIPTIONS.get(category, ""),
+            origin="seed",
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -495,6 +597,19 @@ def _canned_response(name: str, message: str):
 CANNED_CATEGORIES = frozenset({"response"})
 RESPONSE_FALLBACK = "response.clarify"
 
+# The housekeeping category holds the agent's own maintenance skills (delete a
+# skill, clear its config, regenerate it, cancel a build). It is a built-in
+# category that is **deterministically locked** from new-skill creation — the
+# lock is a code constant, not a config value, so it can never be unlocked by
+# editing a file and navigation can never author into it.
+HOUSEKEEPING_CATEGORY = "housekeeping"
+HARD_LOCKED_CATEGORIES = frozenset({HOUSEKEEPING_CATEGORY})
+
+# Categories whose runs are deterministic internal actions (a known found/not-
+# found result, no external service): no SemIf assessment and no repair loop, so
+# a "skill not found" can never offer to codegen-repair the meta skill.
+DETERMINISTIC_CATEGORIES = frozenset({HOUSEKEEPING_CATEGORY})
+
 _CANNED_RESPONSES = [
     (
         "greeting",
@@ -553,6 +668,10 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
         "Time and date utilities: telling the current time or date, setting "
         "countdown timers, and setting alarms."
     ),
+    "housekeeping": (
+        "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
+        "cancelling the agent's own skills."
+    ),
 }
 
 
@@ -576,9 +695,370 @@ def build_skills(config: dict) -> list[Skill]:
             description=description,
             act=_canned_response(f"response.{name}", message),
             category_description=CATEGORY_DESCRIPTIONS["response"],
+            origin="builtin",
         )
         for name, description, message in _CANNED_RESPONSES
     ]
+
+
+def _confirmed(request: Request) -> bool:
+    """Whether the human's answer to a confirmation prompt was affirmative."""
+    return str(request.user_input or "").strip().lower() in (
+        "y",
+        "yes",
+        "confirm",
+        "confirmed",
+        "ok",
+        "okay",
+    )
+
+
+_TARGET_QUESTION = (
+    "Which skill? Reply with its name as category.skill (or a unique skill name)."
+)
+
+# Explicit housekeeping command forms. They are routed deterministically to the
+# housekeeping skill (see parse_meta_command) because the generic SemIf guards
+# read a task-like skill name in the request as the task itself (e.g.
+# "regen skill calendar.create_event" scores as a calendar task). The skill name
+# is just a variable the skill resolves — or asks for.
+_META_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    (
+        "delete_skill",
+        re.compile(
+            r"^\s*(?:please\s+)?(?:delete|remove|drop)\s+(?:the\s+|a\s+)?skill\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "clear_config",
+        re.compile(
+            r"^\s*(?:please\s+)?(?:clear|reset|erase|wipe)\s+(?:the\s+|a\s+)?"
+            r"(?:skill'?s?\s+)?(?:config(?:uration)?|settings?|variables?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "regen_skill",
+        re.compile(
+            r"^\s*(?:please\s+)?(?:regen|regenerate|rewrite|rebuild|fix|repair)\b"
+            r".*\b(?:skill|code)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "cancel_build",
+        re.compile(
+            r"^\s*(?:please\s+)?(?:"
+            r"(?:cancel|abort|stop)\s+(?:the\s+)?skill\s+build(?:ing)?\b"
+            r"|(?:cancel|abort)\s+(?:the\s+)?build\b"
+            r"|stop\s+building\b.*\bskill\b"
+            r")",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
+def parse_meta_command(text: str) -> str | None:
+    """Recognize an explicit housekeeping command, returning its skill name.
+
+    The command forms ("delete skill [name]", "clear config variables for
+    [name]", "regen skill [name]", "cancel skill build") are routed
+    deterministically, because the generic SemIf navigation misreads a
+    task-like skill name in the request as the task itself. Anything else
+    returns None and goes through normal navigation. The target skill name, when
+    present, is left in the request for the skill to resolve as an input
+    variable.
+    """
+    stripped = (text or "").strip()
+    for name, pattern in _META_PATTERNS:
+        if pattern.match(stripped):
+            return name
+    return None
+
+
+def _resolve_target(admin, request: Request):
+    """Resolve the skill a housekeeping request targets.
+
+    The target may be named in the request ("delete skill calendar.foo") or
+    supplied as an input variable when the request is name-free ("delete
+    skill") — in which case the skill asks for it. Keeping the name out of the
+    routed request is deliberate: a skill name like `calendar.create_event`
+    reads as a task and pulls navigation to the wrong category. Returns a
+    `(category, name)` tuple, or an `ActionResult` (needs_input / not-found /
+    ambiguous) to return as-is.
+    """
+    target = request.meta.get("housekeeping_target")
+    if target:
+        return tuple(target)
+    resolved = resolve_skill_ref(admin.tree, request.text)
+    if isinstance(resolved, tuple):
+        return resolved
+    if isinstance(resolved, list):
+        names = ", ".join(f"{c}.{n}" for c, n in resolved)
+        return ActionResult(
+            action_log=(
+                f"housekeeping: several skills match ({names}); "
+                "name one as category.skill"
+            ),
+            new_state="ambiguous",
+        )
+    answer = (request.user_input or "").strip()
+    if not answer:
+        return ActionResult(
+            action_log="housekeeping: awaiting skill name",
+            new_state="awaiting target",
+            needs_input=_TARGET_QUESTION,
+        )
+    request.user_input = None
+    ref = resolve_skill_ref(admin.tree, answer)
+    if isinstance(ref, tuple):
+        request.meta["housekeeping_target"] = ref
+        return ref
+    if isinstance(ref, list):
+        names = ", ".join(f"{c}.{n}" for c, n in ref)
+        return ActionResult(
+            action_log=f"housekeeping: several skills match ({names}); be specific",
+            new_state="ambiguous",
+        )
+    return ActionResult(
+        action_log=f"housekeeping: no skill matches {answer!r}",
+        new_state="not found",
+    )
+
+
+def _delete_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
+    admin = ctx.admin
+    if admin is None:
+        return ActionResult("housekeeping.delete_skill: no admin available", "error")
+    target = _resolve_target(admin, request)
+    if isinstance(target, ActionResult):
+        return target
+    category, name = target
+    ref = f"{category}.{name}"
+    if request.meta.get("housekeeping_confirm") != ref:
+        request.meta["housekeeping_confirm"] = ref
+        return ActionResult(
+            action_log=f"housekeeping.delete_skill: awaiting confirmation for {ref}",
+            new_state="awaiting confirmation",
+            needs_input=f"Delete {ref} and all its files? Reply yes to confirm.",
+        )
+    if not _confirmed(request):
+        return ActionResult(
+            action_log=f"housekeeping.delete_skill: cancelled by user for {ref}",
+            new_state="cancelled",
+        )
+    _status, detail = admin.delete_skill(category, name)
+    return ActionResult(f"housekeeping.delete_skill: {detail}", detail)
+
+
+def _clear_config_act(ctx: ActionContext, request: Request) -> ActionResult:
+    admin = ctx.admin
+    if admin is None:
+        return ActionResult("housekeeping.clear_config: no admin available", "error")
+    target = _resolve_target(admin, request)
+    if isinstance(target, ActionResult):
+        return target
+    category, name = target
+    _status, detail = admin.clear_skill_config(category, name)
+    return ActionResult(f"housekeeping.clear_config: {detail}", detail)
+
+
+def _regen_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
+    admin = ctx.admin
+    if admin is None:
+        return ActionResult("housekeeping.regen_skill: no admin available", "error")
+    target = _resolve_target(admin, request)
+    if isinstance(target, ActionResult):
+        return target
+    category, name = target
+    ref = f"{category}.{name}"
+    if request.meta.get("housekeeping_regen") != ref:
+        request.meta["housekeeping_regen"] = ref
+        return ActionResult(
+            action_log=f"housekeeping.regen_skill: awaiting guidance for {ref}",
+            new_state="awaiting guidance",
+            needs_input="What needs to be fixed?",
+        )
+    guidance = (request.user_input or "").strip()
+    _status, detail = admin.regen_skill(category, name, guidance)
+    return ActionResult(f"housekeeping.regen_skill: {detail}", detail)
+
+
+def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
+    admin = ctx.admin
+    if admin is None:
+        return ActionResult("housekeeping.cancel_build: no admin available", "error")
+    writing = [
+        (category, skill.name)
+        for category, skills in admin.tree.items()
+        for skill in skills
+        if skill.writing
+    ]
+    target = request.meta.get("housekeeping_target")
+    if target:
+        category, name = tuple(target)
+    else:
+        resolved = resolve_skill_ref(admin.tree, request.text)
+        if isinstance(resolved, list):
+            names = ", ".join(f"{c}.{n}" for c, n in resolved)
+            return ActionResult(
+                action_log=(
+                    f"housekeeping.cancel_build: several skills match ({names}); "
+                    "name one as category.skill"
+                ),
+                new_state="ambiguous",
+            )
+        if isinstance(resolved, tuple):
+            if resolved not in writing:
+                category, name = resolved
+                return ActionResult(
+                    action_log=(
+                        f"housekeeping.cancel_build: no build is in progress for "
+                        f"{category}.{name}"
+                    ),
+                    new_state="no build",
+                )
+            category, name = resolved
+        elif len(writing) == 1:
+            category, name = writing[0]
+        elif not writing:
+            return ActionResult(
+                action_log="housekeeping.cancel_build: no skill build is in progress",
+                new_state="no build",
+            )
+        else:
+            answer = (request.user_input or "").strip()
+            if not answer:
+                return ActionResult(
+                    action_log="housekeeping.cancel_build: awaiting skill name",
+                    new_state="awaiting target",
+                    needs_input="Which skill build should I cancel? Reply with its name.",
+                )
+            request.user_input = None
+            ref = resolve_skill_ref(admin.tree, answer)
+            if isinstance(ref, tuple) and ref in writing:
+                category, name = ref
+            else:
+                return ActionResult(
+                    action_log=(
+                        f"housekeeping.cancel_build: no build in progress matching "
+                        f"{answer!r}"
+                    ),
+                    new_state="no build",
+                )
+        request.meta["housekeeping_target"] = (category, name)
+    ref = f"{category}.{name}"
+    if request.meta.get("housekeeping_confirm") != ref:
+        request.meta["housekeeping_confirm"] = ref
+        return ActionResult(
+            action_log=f"housekeeping.cancel_build: awaiting confirmation for {ref}",
+            new_state="awaiting confirmation",
+            needs_input=(
+                f"Cancel the build for {ref} and delete its half-built leaf? "
+                "Reply yes to confirm."
+            ),
+        )
+    if not _confirmed(request):
+        return ActionResult(
+            action_log=f"housekeeping.cancel_build: cancelled by user for {ref}",
+            new_state="cancelled",
+        )
+    _status, detail = admin.cancel_skill_build(category, name)
+    return ActionResult(f"housekeeping.cancel_build: {detail}", detail)
+
+
+def build_housekeeping_skills() -> list[Skill]:
+    """The built-in meta skills that maintain the agent's own skill tree.
+
+    They act on the scheduler (reached through `ctx.admin`) rather than an
+    external service, so they live here beside the canned `response` tree, not
+    in the codegen/seed pipeline. Their runs are deterministic internal actions
+    (see DETERMINISTIC_CATEGORIES) and the category is deterministically locked
+    from new-skill creation (HARD_LOCKED_CATEGORIES).
+    """
+    description = CATEGORY_DESCRIPTIONS[HOUSEKEEPING_CATEGORY]
+    return [
+        Skill(
+            name="delete_skill",
+            category=HOUSEKEEPING_CATEGORY,
+            description=(
+                "Delete an existing skill: remove it from the tree, delete its "
+                "code body and files, and forget its recorded config."
+            ),
+            act=_delete_skill_act,
+            category_description=description,
+            origin="builtin",
+        ),
+        Skill(
+            name="clear_config",
+            category=HOUSEKEEPING_CATEGORY,
+            description=(
+                "Clear the saved configuration variables recorded for an "
+                "existing skill, so they are asked for again next time it runs."
+            ),
+            act=_clear_config_act,
+            category_description=description,
+            origin="builtin",
+        ),
+        Skill(
+            name="regen_skill",
+            category=HOUSEKEEPING_CATEGORY,
+            description=(
+                "Regenerate (rewrite) an existing skill's code body from "
+                "guidance about what needs to be fixed."
+            ),
+            act=_regen_skill_act,
+            category_description=description,
+            origin="builtin",
+        ),
+        Skill(
+            name="cancel_build",
+            category=HOUSEKEEPING_CATEGORY,
+            description=(
+                "Cancel a skill body that is still being generated and delete "
+                "its half-built skill leaf."
+            ),
+            act=_cancel_build_act,
+            category_description=description,
+            origin="builtin",
+        ),
+    ]
+
+
+def resolve_skill_ref(
+    tree: dict[str, list[Skill]], text: str
+) -> tuple[str, str] | list[tuple[str, str]] | None:
+    """Find the skill(s) named in a free-form request.
+
+    Matches `category.name` or a bare unique `name`, case-insensitively, on a
+    token boundary (so `time` does not match inside `sometimes`). The longest
+    match wins; a tie across different skills returns the list of candidates so
+    the caller can ask the human to be specific. Returns None when nothing
+    matches.
+    """
+    lowered = text.lower()
+    matches: list[tuple[str, str, int]] = []
+    for category, skills in tree.items():
+        for skill in skills:
+            for candidate in (f"{category}.{skill.name}", skill.name):
+                if _mentions(lowered, candidate.lower()):
+                    matches.append((category, skill.name, len(candidate)))
+    if not matches:
+        return None
+    longest = max(match[2] for match in matches)
+    top = {(category, name) for category, name, length in matches if length == longest}
+    if len(top) == 1:
+        return next(iter(top))
+    return sorted(top)
+
+
+def _mentions(haystack: str, needle: str) -> bool:
+    if not needle:
+        return False
+    pattern = r"(?<![a-z0-9_.])" + re.escape(needle) + r"(?![a-z0-9_.])"
+    return re.search(pattern, haystack) is not None
 
 
 def category_descriptions(tree: dict[str, list[Skill]]) -> dict[str, str]:
@@ -934,7 +1414,8 @@ def confirm_non_action(
                 "action",
                 "It is a request: the user asks the agent for a specific answer, a "
                 "result, or an action (including one the agent has no skill for "
-                "yet).",
+                "yet), or gives a command to manage a skill (delete, clear config, "
+                "regenerate, cancel a build).",
             ),
             Option(
                 "non_action",

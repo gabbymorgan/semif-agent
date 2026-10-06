@@ -143,13 +143,15 @@ def build_tree_payload(scheduler: Scheduler) -> dict:
                     "name": skill.name,
                     "description": skill.description,
                     "status": skill.status,
+                    "origin": skill.origin,
                     "integration": skill.integration or None,
                     "integration_source": skill.integration_source,
                 }
                 for skill in skills
             ]
             for category, skills in sorted(snapshot.items())
-        }
+        },
+        "locks": scheduler.category_locks(),
     }
 
 
@@ -232,6 +234,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/approvals":
             self._send(200, {"approvals": self.scheduler.pending_approvals()})
+            return
+        if path == "/api/locks":
+            self._send(200, {"locks": self.scheduler.category_locks()})
             return
         if path == "/api/timers":
             self._send(
@@ -328,7 +333,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
             self._send(200, {"status": status, "detail": detail})
             return
+        if path == "/api/delete":
+            self._housekeeping("delete_skill")
+            return
+        if path == "/api/clear-config":
+            self._housekeeping("clear_skill_config")
+            return
+        if path == "/api/regen":
+            self._housekeeping("regen_skill")
+            return
+        if path == "/api/cancel-build":
+            self._housekeeping("cancel_skill_build")
+            return
+        if path == "/api/lock":
+            with self.lock:
+                try:
+                    body = self._read_json()
+                    status, detail = self.scheduler.set_category_lock(
+                        str(body.get("category", "")), bool(body.get("locked"))
+                    )
+                except Exception as exc:
+                    self._send_error(500, str(exc))
+                    return
+            self._send(200, {"status": status, "detail": detail})
+            return
         self._send_error(404, "no such endpoint")
+
+    def _housekeeping(self, method: str):
+        """Run a housekeeping operation by category + skill (dashboard action)."""
+        with self.lock:
+            try:
+                body = self._read_json()
+                status, detail = getattr(self.scheduler, method)(
+                    str(body.get("category", "")), str(body.get("skill", ""))
+                )
+            except Exception as exc:
+                self._send_error(500, str(exc))
+                return
+        self._send(200, {"status": status, "detail": detail})
 
     def log_message(self, format, *args):
         pass

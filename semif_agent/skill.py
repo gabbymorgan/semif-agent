@@ -31,6 +31,7 @@ from .decisions import DecisionRequest, Option, Request
 from .log import DecisionLog
 from .skills import (
     CANNED_CATEGORIES,
+    DETERMINISTIC_CATEGORIES,
     ActionContext,
     Skill,
     SkillStore,
@@ -118,7 +119,12 @@ class SkillRunner:
             merged = {**self.ctx.config}
             merged.update(skill.config or {})
             merged.update(answered)
-        return ActionContext(engine=self.ctx.engine, config=merged, timers=self.ctx.timers)
+        return ActionContext(
+            engine=self.ctx.engine,
+            config=merged,
+            timers=self.ctx.timers,
+            admin=self.ctx.admin,
+        )
 
     def _unresolved(self, skill: Skill, request: Request) -> list[str]:
         if not skill.contract:
@@ -345,7 +351,7 @@ class SkillRunner:
         self, skill: Skill, request: Request, ctx: ActionContext, action
     ) -> RunResult:
         observed = action.new_state
-        if skill.category in CANNED_CATEGORIES:
+        if skill.category in CANNED_CATEGORIES or skill.category in DETERMINISTIC_CATEGORIES:
             summary = deterministic_summary(
                 skill.category, skill.name, True, action.action_log, observed
             )

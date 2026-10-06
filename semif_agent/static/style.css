@@ -381,6 +381,13 @@ pre.json {
   color: var(--accent);
 }
 
+.lock-btn {
+  margin-left: 6px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .stat-grid .stat { background: var(--panel-2); border-radius: 4px; padding: 4px 6px; }
 .stat-grid .stat .v { font-weight: 700; }
