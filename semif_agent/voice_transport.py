@@ -303,6 +303,28 @@ def _remove_dc(pcm16: bytes) -> bytes:
     return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
 
 
+def _tone_pcm(frequency: float, duration_ms: int, sample_rate: int, volume: float) -> bytes:
+    """Generate a short sine beep as 16-bit mono PCM (stdlib only).
+
+    A 10 ms fade in/out avoids clicks. Used for the wake-word cue; it needs no
+    audio asset and no numpy, so it works on the stdlib-only path too.
+    """
+    import math
+    import struct
+
+    count = int(sample_rate * max(0, duration_ms) / 1000)
+    if count <= 0 or frequency <= 0:
+        return b""
+    amplitude = int(max(0.0, min(1.0, volume)) * 32767)
+    fade = max(1, int(sample_rate * 0.01))  # 10 ms
+    frames = bytearray()
+    for index in range(count):
+        envelope = min(1.0, index / fade, (count - index) / fade)
+        value = int(amplitude * envelope * math.sin(2 * math.pi * frequency * index / sample_rate))
+        frames += struct.pack("<h", value)
+    return bytes(frames)
+
+
 def _device_arg(value):
     """Coerce a config device value to a PortAudio argument.
 
@@ -571,9 +593,17 @@ class VoiceDaemon:
         self.max_utterance_s = float(vad_cfg.get("max_utterance_s", 30) or 30)
         self.follow_up_window = float(cfg.get("follow_up_window_s", 5.0) or 0.0)
         self.max_speak_chars = int(cfg.get("max_speak_chars", 600) or 0)
+        cue = cfg.get("cue", {}) or {}
+        self.cue_enabled = bool(cue.get("enabled", True))
+        self.cue_frequency = float(cue.get("frequency", 880) or 0)
+        self.cue_duration_ms = int(cue.get("duration_ms", 120) or 0)
+        self.cue_volume = float(cue.get("volume", 0.25) or 0)
+        self.cue_submit_frequency = float(cue.get("submit_frequency", 0) or 0)
+        self.cue_submit_duration_ms = int(cue.get("submit_duration_ms", 100) or 0)
 
         self._engines = engines
         self._engines_lock = threading.Lock()
+        self._audio_lock = threading.Lock()  # serialize cue/speak playback
         self._on_utterance: UtteranceHandler | None = None
         self._stop = threading.Event()
         self._speaking = threading.Event()
@@ -660,6 +690,7 @@ class VoiceDaemon:
                     engines.wake.reset()
                 except Exception:
                     pass
+                self._cue(self.cue_frequency, self.cue_duration_ms)
             self._follow_until = 0.0
             utterance = self._collect(engines, pcm)
             if not utterance:
@@ -674,6 +705,7 @@ class VoiceDaemon:
                 self._event("voice_stt_empty", samples=len(utterance) // BYTES_PER_SAMPLE)
                 continue
             self._event("voice_transcribed", chars=len(text))
+            self._cue(self.cue_submit_frequency, self.cue_submit_duration_ms)
             if self._on_utterance is not None:
                 self._on_utterance(text)
 
@@ -712,6 +744,24 @@ class VoiceDaemon:
 
     # ---- speaking ----
 
+    def _cue(self, frequency: float, duration_ms: int) -> None:
+        """Play a short beep (wake / submit cue). Silent on failure."""
+        if not self.cue_enabled or frequency <= 0 or duration_ms <= 0:
+            return
+        engines = self._engines
+        if engines is None:
+            return
+        pcm = _tone_pcm(frequency, duration_ms, self.sample_rate, self.cue_volume)
+        if not pcm:
+            return
+        with self._audio_lock:
+            try:
+                engines.audio.open_output(self.sample_rate)
+                engines.audio.write(pcm, self.sample_rate)
+                self._event("voice_cue", frequency=frequency, duration_ms=duration_ms)
+            except Exception as exc:
+                self._event("voice_cue_failed", message=str(exc)[:200])
+
     def speak(self, text: str) -> None:
         """Synthesize and play `text`; called from the outbound pump thread."""
         text = (text or "").strip()
@@ -725,8 +775,9 @@ class VoiceDaemon:
         try:
             pcm, sample_rate = engines.tts.synthesize(text)
             if pcm:
-                engines.audio.open_output(sample_rate)
-                engines.audio.write(pcm, sample_rate)
+                with self._audio_lock:
+                    engines.audio.open_output(sample_rate)
+                    engines.audio.write(pcm, sample_rate)
             self._event("voice_spoke", chars=len(text))
         except Exception as exc:
             self._event("voice_speak_failed", message=str(exc)[:300])

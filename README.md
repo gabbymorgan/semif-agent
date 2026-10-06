@@ -661,7 +661,10 @@ python -m semif_agent.cli gateway --platform voice
   and the Piper voice into `.runtime/voice/tts`; the faster-whisper model lands
   in the `.runtime/hf` cache.
 - **Behavior.** Half-duplex — capture is discarded while a reply is speaking, so
-  the agent never transcribes itself (no barge-in yet). After a reply, the next
+  the agent never transcribes itself (no barge-in yet). A short beep plays when
+  the wake word fires (`gateway.voice.cue`), so you know you're being heard; set
+  `cue.submit_frequency > 0` for a second beep once the utterance is
+  transcribed. After a reply, the next
   utterance is accepted **without** the wake word for `follow_up_window_s`, so
   answering a question is conversational. `max_speak_chars` truncates long
   replies before speaking. There is no allowlist: the mic is local, so physical

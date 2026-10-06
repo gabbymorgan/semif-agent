@@ -265,6 +265,35 @@ def test_resolve_platforms_includes_enabled_voice():
     assert platforms == ["voice"]
 
 
+# ---- wake cue (beep) -------------------------------------------------------
+
+
+def test_tone_pcm_length():
+    from semif_agent.voice_transport import _tone_pcm
+
+    pcm = _tone_pcm(880, 100, 16000, 0.25)
+    assert len(pcm) == 1600 * 2  # 100 ms @ 16 kHz, int16
+    assert _tone_pcm(0, 100, 16000, 0.25) == b""
+
+
+def test_wake_plays_cue():
+    daemon, engines = make_daemon([b"WAKE", b"speech", b"SIL", b"SIL"])
+    daemon.run(lambda text: None)
+    # exactly one cue played on wake, at the processing rate
+    assert len(engines.audio.writes) == 1
+    pcm, rate = engines.audio.writes[0]
+    assert rate == 16000
+    assert len(pcm) == int(16000 * 120 / 1000) * 2
+
+
+def test_cue_disabled_suppresses_beep():
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"], config={"cue": {"enabled": False}}
+    )
+    daemon.run(lambda text: None)
+    assert engines.audio.writes == []
+
+
 # ---- resampling (numpy is a voice-stack dep; skip without it) --------------
 
 

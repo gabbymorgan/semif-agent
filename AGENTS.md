@@ -959,7 +959,9 @@ CLI, unit tests (24) + integration tests (2).
   reply is speaking, so the agent never transcribes itself (no barge-in yet);
   after a reply a `follow_up_window_s` accepts the next utterance without the
   wake word, so answering a question is conversational. `max_speak_chars`
-  truncates long replies before speaking. Every heavy dep
+  truncates long replies before speaking, and a short sine `cue` beep plays on
+  wake (optionally again on transcription) so the user knows they were heard.
+  Every heavy dep
   (`sounddevice`/`openwakeword`/`faster_whisper`/`piper`/`onnxruntime`) is
   **lazy-imported**; `check_requirements()` returns an install hint and the
   gateway refuses to start without the stack. The engine interfaces are plain
