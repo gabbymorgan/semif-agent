@@ -1167,8 +1167,21 @@ def navigate(
     tree: dict[str, list[Skill]],
     category_tau: float = 0.75,
     action_tau: float = 0.5,
+    bypass_tau: float = 0.5,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
+
+    **Confident softmax winners skip their confirm guard.** When the category
+    softmax winner's probability is >= `bypass_tau` (default 0.5) the scope
+    confirm (`confirm_category_fit`) is skipped — the winner is taken as-is
+    (traced `category_scope_bypassed`); below it the guard runs and can reject
+    the winner into create. The leaf softmax winner's probability is handed to
+    dispatch (`request.meta["leaf_softmax_prob"]`) so `confirm_skill_fit` is
+    likewise skipped above the threshold (traced `intent_bypass`). The guards
+    exist to catch an unsure softmax; a winner at 0.5+ is already decisive, and
+    each skipped guard is one fewer SemIf call on the hot path. Below the
+    threshold the two-stage behavior is unchanged. The recorded data agrees:
+    every logged winner >= 0.5 also passed its guard.
 
     The **actionability guard** (`confirm_non_action`, phase
     `navigate:actionability`, keyed by `navigation.action_tau`) runs at the **top**
@@ -1258,7 +1271,16 @@ def navigate(
     log.append(top, top_result, extra={"phase": "navigate:category", "run_id": request.id})
     category = top_result.selected
     if category != "create_category":
-        if not confirm_category_fit(
+        winner_prob = float(top_result.probs.get(category, 0.0))
+        if winner_prob >= bypass_tau:
+            # Confident winner: skip the scope confirm (one fewer SemIf call).
+            trace.append(
+                "category_scope_bypassed",
+                request.id,
+                category=category,
+                prob=winner_prob,
+            )
+        elif not confirm_category_fit(
             engine, log, trace, request, category, descriptions.get(category, ""),
             category_tau,
         ):
@@ -1311,6 +1333,9 @@ def navigate(
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
+    # Hand the winner's confidence to dispatch so it can skip the intent guard
+    # when the softmax is already decisive (see `navigate` docstring).
+    request.meta["leaf_softmax_prob"] = float(leaf_result.probs.get(pick, 0.0))
     return next((s for s in skills if s.name == pick), skills[0])
 
 

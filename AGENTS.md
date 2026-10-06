@@ -544,6 +544,16 @@ CLI, unit tests (24) + integration tests (2).
 - Calibration: SemIf ships per-workload temperature scaling; adopt it before
   treating probabilities as confidence.
 - Enumerate the intake source taxonomy and per-source gating.
+- **Decision-engine latency.** A single SemIf forward pass over a small prompt
+  can take seconds on CPU, and a trivial request pays several of them
+  (actionability + category + scope + leaf + intent + assess), so routing and
+  assessment dominate end-to-end agent latency — not audio I/O (STT/TTS are
+  sub-second) and not the network. Before treating latency as a front-end
+  problem, profile the engine: confirm thread utilization, whether the cost is
+  prefill vs. per-option scoring, and whether a smaller/faster decision model or
+  a shared-state (`score_shared`) path helps. `decision extra.timing`
+  (`input_tokens`/`forward_seconds`/`total_seconds`) and the voice latency
+  breakdown (`scripts/voice-latency.py`) are the measurement hooks.
 
 ## Constraints & gotchas (learned the hard way)
 
@@ -1090,7 +1100,12 @@ CLI, unit tests (24) + integration tests (2).
   slow cleanup cannot hold the gateway poll loop for the authoring budget. Off
   by default: `gateway.humanize` (`enabled`/`timeout`/`max_tokens`/`max_chars`)
   sets the global default and a per-platform `gateway.<platform>.humanize`
-  bool/`{enabled}` overrides it. Only `kind == "result"` lines are touched
+  bool/`{enabled}` overrides it. A **skill's own recorded config**
+  (`data/skills/<category>/<name>/config.json` -> `{"humanize": bool}`) wins
+  over both, so a skill whose result is already speakable (e.g. `time.now`)
+  skips the rewrite while a mechanical one keeps it; the gateway resolves the
+  skill ref from the summary prefix (`category.name:`). Only `kind == "result"`
+  lines are touched
   (questions, repair/approval notices, and status chatter pass through); like
   `result_only`, an enabled platform unwraps the result detail before cleaning.
   `_resolve_platforms` skips the reserved `humanize` key.

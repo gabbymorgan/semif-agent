@@ -5,10 +5,11 @@
   "creation_approval": false,
   "timezone": "",
   "navigation": {
-    "_comment": "Navigation is two-stage at BOTH levels and the guards are the create doors (no threshold gate). Category: the softmax offers each existing category WITH its description (bare names carried no signal) plus create_category; confirm_category_fit then confirms the winner's scope (phase navigate:category_scope, P(covers) >= category_tau) and a rejected winner authors a new category. The `response` catchall and create_category share a boundary arbitrated by the actionability guard confirm_non_action (phase navigate:actionability, P(non_action) >= action_tau): the closed response tree is reached ONLY when the input is not a request, so a request no skill covers (e.g. \"what is 255 * 12?\") authors instead of getting a canned reply. Leaf: the softmax offers only existing skills; confirm_skill_fit then compares the winner's action to the request (phase navigate:intent, P(same) >= intent_tau) and a mismatch authors a new leaf. All three taus are separate from the top-level tau so tuning reuse-vs-create or actionability does not move run assessment/fidelity. The category check is deliberately permissive: with real descriptions in-scope requests score 0.9-1.0, so a borderline over-cover routes into a plausible category and the leaf guard catches it.",
+    "_comment": "Navigation is two-stage at BOTH levels and the guards are the create doors (no threshold gate). Category: the softmax offers each existing category WITH its description (bare names carried no signal) plus create_category; confirm_category_fit then confirms the winner's scope (phase navigate:category_scope, P(covers) >= category_tau) and a rejected winner authors a new category. The `response` catchall and create_category share a boundary arbitrated by the actionability guard confirm_non_action (phase navigate:actionability, P(non_action) >= action_tau): the closed response tree is reached ONLY when the input is not a request, so a request no skill covers (e.g. \"what is 255 * 12?\") authors instead of getting a canned reply. Leaf: the softmax offers only existing skills; confirm_skill_fit then compares the winner's action to the request (phase navigate:intent, P(same) >= intent_tau) and a mismatch authors a new leaf. All three taus are separate from the top-level tau so tuning reuse-vs-create or actionability does not move run assessment/fidelity. The category check is deliberately permissive: with real descriptions in-scope requests score 0.9-1.0, so a borderline over-cover routes into a plausible category and the leaf guard catches it. A softmax winner at or above `softmax_bypass_tau` (default 0.5) skips its confirm guard — the winner is already decisive and each skipped guard is one fewer SemIf call on the hot path (traced `category_scope_bypassed` / `intent_bypass`); below it the two-stage confirm runs unchanged.",
     "intent_tau": 0.6,
     "category_tau": 0.75,
-    "action_tau": 0.5
+    "action_tau": 0.5,
+    "softmax_bypass_tau": 0.5
   },
   "queue": {"max_size": 100},
   "engine": {
@@ -220,7 +221,7 @@
         "dc_removal": true
       },
       "vad": {
-        "silence_ms": 1000,
+        "silence_ms": 500,
         "min_speech_ms": 120,
         "max_utterance_s": 30,
         "aggressiveness": 2,

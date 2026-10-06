@@ -31,6 +31,13 @@ from .humanize import Humanizer
 
 _LEADING_RUN_ID = re.compile(r"^\[[0-9a-f]{6,}\]\s*")
 
+#: A result summary starts with the skill ref (`category.name:`), optionally
+#: preceded by a `[resumed]` marker. Used to look up a skill's own config
+#: (`data/skills/<cat>/<name>/config.json`) for a per-skill humanize override.
+_SKILL_REF = re.compile(
+    r"^(?:\[resumed\]\s*)?([A-Za-z0-9_][A-Za-z0-9_-]*\.[A-Za-z0-9_][A-Za-z0-9_-]*):\s"
+)
+
 #: The scheduler's run summary wraps the real result as
 #: `"<skill>: <ok|failed> — <detail>"`. A result-only platform (the voice
 #: gateway) speaks just `<detail>`.
@@ -64,6 +71,12 @@ Target = tuple[str, str]
 
 def _strip_run_id(text: str) -> str:
     return _LEADING_RUN_ID.sub("", text or "")
+
+
+def _skill_ref(text: str) -> str | None:
+    """The `category.name` a result summary belongs to, or None."""
+    match = _SKILL_REF.match(text or "")
+    return match.group(1) if match else None
 
 
 def _leading_run_id(text: str) -> str:
@@ -202,20 +215,47 @@ class GatewayService:
             max_chars=int(cfg.get("max_chars", 600)),
         )
 
-    def _humanize_enabled(self, platform: str) -> bool:
-        """Whether this platform cleans up its result line.
+    def _humanize_enabled(self, platform: str, skill_ref: str | None = None) -> bool:
+        """Whether this result is cleaned up.
 
-        A per-platform `humanize` bool (or `{enabled: bool}`) overrides the
-        global `gateway.humanize.enabled`. Default is off.
+        Precedence: the **skill's own config** (`data/skills/<category>/<name>/
+        config.json` -> `{"humanize": bool}`) wins; otherwise the per-platform
+        override (`gateway.<platform>.humanize`), otherwise the global default
+        (`gateway.humanize.enabled`). A missing `llm` client disables it.
         """
         if self.humanizer is None:
             return False
+        skill_override = self._skill_humanize_override(skill_ref)
+        if skill_override is not None:
+            return skill_override
         override = self._platform_cfg.get(platform, {}).get("humanize")
         if isinstance(override, bool):
             return override
         if isinstance(override, dict) and "enabled" in override:
             return bool(override["enabled"])
         return self._humanize_default
+
+    def _skill_humanize_override(self, skill_ref: str | None) -> bool | None:
+        """The skill's own `humanize` config value, or None when unset.
+
+        A skill opts in/out of result cleanup regardless of the platform default
+        via its recorded config: `data/skills/<category>/<name>/config.json` ->
+        `{"humanize": false}`. Read from the scheduler's skill store; a missing
+        store/config/key (or an unparseable ref) means no override.
+        """
+        if not skill_ref or "." not in skill_ref:
+            return None
+        store = getattr(self.scheduler, "body_store", None)
+        if store is None:
+            return None
+        category, name = skill_ref.split(".", 1)
+        try:
+            config = store.read_config(category, name) or {}
+        except Exception:
+            return None
+        if "humanize" in config:
+            return bool(config["humanize"])
+        return None
 
     def _fallback_target(self) -> Target | None:
         for platform in self.platforms:
@@ -438,7 +478,8 @@ class GatewayService:
     ) -> None:
         text = _strip_run_id(text)
         result_only = self._result_only(platform)
-        humanize = kind == "result" and self._humanize_enabled(platform)
+        skill_ref = _skill_ref(text) if kind == "result" else None
+        humanize = kind == "result" and self._humanize_enabled(platform, skill_ref)
         if result_only:
             # A spoken front end says the skill's result, not the scheduler's
             # bookkeeping: drop queue/urgency chatter.

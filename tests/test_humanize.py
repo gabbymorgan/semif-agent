@@ -142,3 +142,72 @@ def test_gateway_humanize_keeps_wrapper_when_result_only_off():
     service = build_service(llm, {"humanize": {"enabled": True}, "simplex": {}})
     service._reply("simplex", "c", "track.manual: ok — sent", kind="result")
     assert service.outbound["simplex"].get_nowait().text == "Done."
+
+
+# ---- per-skill override (the skill's own config.json) ----
+
+class FakeStore:
+    """Stands in for the scheduler's `body_store` (SkillStore)."""
+
+    def __init__(self, configs):
+        self.configs = configs  # {(category, name): {...}}
+
+    def read_config(self, category, name):
+        return self.configs.get((category, name), {})
+
+
+class FakeSchedulerWithStore(FakeScheduler):
+    def __init__(self, llm, store):
+        super().__init__(llm)
+        self.body_store = store
+
+
+def build_service_with_store(llm, config, store):
+    return GatewayService(
+        FakeSchedulerWithStore(llm, store), FakeAdapter(), config=config
+    )
+
+
+def test_gateway_skill_config_disables_humanize():
+    """A skill whose own config sets humanize:false is not cleaned up, even
+    when the platform/global default is on."""
+    llm = FakeClient(reply="should not be used")
+    store = FakeStore({("time", "now"): {"humanize": False}})
+    service = build_service_with_store(
+        llm, {"humanize": {"enabled": True}, "simplex": {}}, store
+    )
+    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    assert service.outbound["simplex"].get_nowait().text == "time.now: ok — 12:00"
+    assert llm.calls == []
+
+
+def test_gateway_skill_config_enables_humanize_over_platform():
+    """A skill's own humanize:true wins over a disabled platform/global default."""
+    llm = FakeClient(reply="It is 12:00.")
+    store = FakeStore({("time", "now"): {"humanize": True}})
+    service = build_service_with_store(
+        llm,
+        {"humanize": {"enabled": False}, "simplex": {"humanize": False}},
+        store,
+    )
+    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    assert service.outbound["simplex"].get_nowait().text == "It is 12:00."
+
+
+def test_gateway_skill_config_absent_falls_back_to_platform():
+    """No skill override -> the platform/global default applies."""
+    llm = FakeClient(reply="It is 12:00.")
+    store = FakeStore({})
+    service = build_service_with_store(
+        llm, {"humanize": {"enabled": True}, "simplex": {}}, store
+    )
+    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    assert service.outbound["simplex"].get_nowait().text == "It is 12:00."
+
+
+def test_skill_ref_parses_summary_and_resumed_marker():
+    from semif_agent.gateway.service import _skill_ref
+
+    assert _skill_ref("time.now: ok — 12:00") == "time.now"
+    assert _skill_ref("[resumed] track.manual: ok — sent") == "track.manual"
+    assert _skill_ref("queued") is None

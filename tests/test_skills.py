@@ -768,13 +768,14 @@ def test_navigate_category_options_carry_descriptions(tmp_path):
 
 def test_navigate_category_rejected_scope_authors_category(tmp_path):
     """The confirm guard is the category create door: a softmax winner whose
-    scope the guard rejects authors a new category."""
+    scope the guard rejects authors a new category. The winner is below
+    `softmax_bypass_tau`, so the guard actually runs."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = _leaf_tree()
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 1.0},
+            "top-level category": {"simplex": 0.45},
             "Does the scope": {"none": 1.0},
         }
     )
@@ -785,12 +786,12 @@ def test_navigate_category_rejected_scope_authors_category(tmp_path):
 
 
 def test_navigate_category_confirmed_scope_descends(tmp_path):
-    """A softmax winner the guard confirms is descended into (no create)."""
+    """A below-threshold softmax winner the guard confirms is descended into."""
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 1.0},
+            "top-level category": {"simplex": 0.45},
             "Does the scope": {"covers": 1.0},
             "skill performs": {"next_message": 1.0, "connect_link": 0.0},
         }
@@ -799,6 +800,26 @@ def test_navigate_category_confirmed_scope_descends(tmp_path):
     assert getattr(result, "name", None) == "next_message"
     assert not isinstance(result, CreateCategory)
     assert any(e["kind"] == "category_scope" and e["fits"] for e in trace.read())
+
+
+def test_navigate_confident_category_winner_skips_scope_confirm(tmp_path):
+    """A category softmax winner at/above `softmax_bypass_tau` is decisive: the
+    scope confirm is not called (no `navigate:category_scope` decision)."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 0.9},
+            "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+        }
+    )
+    result = navigate(engine, log, trace, Request("read a message"), _leaf_tree())
+    assert getattr(result, "name", None) == "next_message"
+    assert any(e["kind"] == "category_scope_bypassed" for e in trace.read())
+    assert not any(e["kind"] == "category_scope" for e in trace.read())
+    assert all("Does the scope" not in c.question for c in engine.calls)
+    phases = [r["extra"].get("phase") for r in log.read()]
+    assert "navigate:category_scope" not in phases
 
 
 def test_confirm_category_fit_threshold(tmp_path):
@@ -994,7 +1015,8 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
             {
                 "top-level category": {"simplex": 1.0},
                 "Does the scope": {"covers": 1.0},
-                "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+                # Below softmax_bypass_tau (0.5), so the intent guard runs.
+                "skill performs": {"next_message": 0.45, "connect_link": 0.3},
                 "same action": {"same": 0.8, "different": 0.2},
             }
         )
@@ -1103,6 +1125,52 @@ def test_dispatch_intent_match_runs_skill(tmp_path):
     result = scheduler._dispatch(request)
     assert result.kind == "ran"
     assert result.skill == "next_message"
+
+
+def test_dispatch_confident_leaf_winner_skips_intent_guard(tmp_path):
+    """A leaf softmax winner at/above `softmax_bypass_tau` skips the intent
+    confirm: the guard would reject here (same action = different), but a
+    decisive softmax runs the skill instead."""
+    engine = _ProbEngine(
+        {
+            "top-level category": {"simplex": 1.0},
+            "skill performs": {"next_message": 0.9, "connect_link": 0.1},
+            "same action": {"different": 1.0},
+        }
+    )
+    scheduler = Scheduler(
+        engine=engine,
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(tmp_path / "seeds"),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+    )
+
+    def act(ctx, request):
+        return ActionResult(action_log="read fixture", new_state="read")
+
+    scheduler.tree = {
+        "simplex": [
+            Skill(
+                name="next_message",
+                category="simplex",
+                description="Read the next SimpleX message.",
+                act=act,
+            ),
+            Skill(name="connect_link", category="simplex", description="Show the contact link."),
+        ]
+    }
+    result = scheduler._dispatch(Request("read the next simplex message"))
+    assert result.kind == "ran"
+    assert result.skill == "next_message"
+    assert any(e["kind"] == "intent_bypass" for e in scheduler.trace.read())
+    phases = [r["extra"].get("phase") for r in scheduler.log.read()]
+    assert "navigate:intent" not in phases
 
 
 

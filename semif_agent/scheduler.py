@@ -225,6 +225,10 @@ class Scheduler:
         self.intent_tau = float(nav_cfg.get("intent_tau", 0.6))
         self.category_tau = float(nav_cfg.get("category_tau", 0.75))
         self.action_tau = float(nav_cfg.get("action_tau", 0.5))
+        #: A softmax winner at or above this probability skips its confirm guard
+        #: (scope/intent) — the winner is already decisive. Below it the guard
+        #: runs and can reject into create.
+        self.bypass_tau = float(nav_cfg.get("softmax_bypass_tau", 0.5))
         self.max_reentries = max_reentries
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
@@ -416,6 +420,10 @@ class Scheduler:
     # ---- dispatch ----
 
     def _dispatch(self, request: Request) -> DispatchResult:
+        # Clear any confidence a prior dispatch left on the request (meta is
+        # copied across a requeue); navigation sets it fresh when a leaf softmax
+        # runs.
+        request.meta.pop("leaf_softmax_prob", None)
         # Explicit housekeeping commands are deterministic: they route straight
         # to the meta skill, bypassing the generic guards (which misread a
         # task-like skill name as the task). Natural-language phrasings still go
@@ -443,6 +451,7 @@ class Scheduler:
             self.tree,
             category_tau=self.category_tau,
             action_tau=self.action_tau,
+            bypass_tau=self.bypass_tau,
         )
         if isinstance(navigation, CreateCategory):
             return self._dispatch_create_category(request)
@@ -455,6 +464,17 @@ class Scheduler:
             # reuse-vs-create intent guard has nothing to decide: run the
             # navigation's pick directly (the meta skill asks for any missing
             # target as an input variable).
+            return self._run_skill(navigation, request)
+        leaf_prob = request.meta.pop("leaf_softmax_prob", None)
+        if leaf_prob is not None and leaf_prob >= self.bypass_tau:
+            # A decisive leaf softmax winner skips the intent confirm.
+            self.trace.append(
+                "intent_bypass",
+                request.id,
+                category=navigation.category,
+                skill=navigation.name,
+                prob=leaf_prob,
+            )
             return self._run_skill(navigation, request)
         if not confirm_skill_fit(
             self.engine, self.log, self.trace, request, navigation, self.intent_tau
@@ -653,7 +673,8 @@ class Scheduler:
         return DispatchResult(
             kind="ran",
             summary=(
-                f"{skill.name}: {'ok' if outcome.success else 'failed'} — "
+                f"{skill.category}.{skill.name}: "
+                f"{'ok' if outcome.success else 'failed'} — "
                 f"{outcome.action_log or outcome.summary}"
             ),
             skill=skill.name,
