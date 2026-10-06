@@ -51,6 +51,12 @@ class GatewayAdapter(ABC):
     #: short platform name used in request sources (`"simplex:<chat_id>"`)
     name: str = "gateway"
 
+    #: Spoken front ends (the voice gateway) set this so the service speaks only
+    #: the skill's result line, not the scheduler's bookkeeping (queue/urgency
+    #: status) and not the `<skill>: ok —` wrapper. A per-platform config
+    #: `result_only` overrides it. Plain chat adapters leave it False.
+    result_only: bool = False
+
     @abstractmethod
     def check_requirements(self) -> tuple[bool, str | None]:
         """Return `(ok, install_hint)`. Must never raise on a missing dep."""

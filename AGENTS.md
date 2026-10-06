@@ -961,6 +961,12 @@ CLI, unit tests (24) + integration tests (2).
   wake word, so answering a question is conversational. `max_speak_chars`
   truncates long replies before speaking, and a short sine `cue` beep plays on
   wake (optionally again on transcription) so the user knows they were heard.
+  **Result-only output**: `VoiceAdapter.result_only` (default true; per-platform
+  config `result_only` overrides) makes `GatewayService` speak just the skill's
+  result line — queue/urgency chatter is dropped and the `<skill>: ok —` wrapper
+  is stripped — so the spoken output is the answer, not the scheduler's
+  internals. Questions, repair offers, approvals, and timer notifications are
+  still spoken.
   Every heavy dep
   (`sounddevice`/`openwakeword`/`faster_whisper`/`piper`/`onnxruntime`) is
   **lazy-imported**; `check_requirements()` returns an install hint and the

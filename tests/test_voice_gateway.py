@@ -247,6 +247,12 @@ def test_adapter_ignores_empty_utterance():
     assert seen == []
 
 
+def test_adapter_is_result_only():
+    # The spoken front end speaks only the skill's result line, not the
+    # scheduler's bookkeeping (overridable via gateway.voice.result_only).
+    assert VoiceAdapter({}).result_only is True
+
+
 # ---- CLI wiring ------------------------------------------------------------
 
 

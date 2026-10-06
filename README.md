@@ -667,8 +667,12 @@ python -m semif_agent.cli gateway --platform voice
   transcribed. After a reply, the next
   utterance is accepted **without** the wake word for `follow_up_window_s`, so
   answering a question is conversational. `max_speak_chars` truncates long
-  replies before speaking. There is no allowlist: the mic is local, so physical
-  access is the authorization.
+  replies before speaking. `result_only` (default true for voice) speaks only the
+  skill's result line — queue/urgency bookkeeping is dropped and the
+  `<skill>: ok —` wrapper is stripped — so the spoken output is the answer, not
+  the scheduler's internals; set it false to speak the full scheduler output.
+  There is no allowlist: the mic is local, so physical access is the
+  authorization.
 - **Run mode.** Foreground, in the user's audio session — a headless systemd
   user service does not share the user's audio session, so voice is not rendered
   as a unit.

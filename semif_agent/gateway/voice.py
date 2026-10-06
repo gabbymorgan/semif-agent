@@ -30,6 +30,10 @@ from .base import GatewayAdapter, InboundMessage, OutboundMessage
 
 class VoiceAdapter(GatewayAdapter):
     name = "voice"
+    #: Speak the skill's result line only — the spoken front end should not read
+    #: out queue/urgency bookkeeping or the `<skill>: ok —` wrapper. Override
+    #: with `gateway.voice.result_only: false` for the full scheduler output.
+    result_only = True
 
     def __init__(self, cfg: dict | None = None, trace=None):
         cfg = cfg or {}

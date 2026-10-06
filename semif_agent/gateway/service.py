@@ -29,6 +29,11 @@ from .base import InboundMessage, OutboundMessage
 
 _LEADING_RUN_ID = re.compile(r"^\[[0-9a-f]{6,}\]\s*")
 
+#: The scheduler's run summary wraps the real result as
+#: `"<skill>: <ok|failed> — <detail>"`. A result-only platform (the voice
+#: gateway) speaks just `<detail>`.
+_RESULT_SEP = " — "
+
 _REPAIR_ACTIONS = {
     "retry": "retry",
     "repair": "repair_skill",
@@ -62,6 +67,28 @@ def _strip_run_id(text: str) -> str:
 def _leading_run_id(text: str) -> str:
     match = _LEADING_RUN_ID.match(text or "")
     return match.group(0)[1:-2] if match else ""
+
+
+def _result_detail(text: str) -> str:
+    """Unwrap the scheduler's `"<skill>: <ok|failed> — <detail>"` summary.
+
+    Returns the detail the skill actually produced. A line with no wrapper is
+    returned unchanged.
+    """
+    if _RESULT_SEP in text:
+        return text.split(_RESULT_SEP, 1)[1].strip()
+    return text
+
+
+def _reply_kind(status: str) -> str:
+    """Classify a scheduler outcome for a result-only front end."""
+    if status in ("running", "preempted", "ran"):
+        return "result"
+    if status == "needs_input":
+        return "question"
+    if status == "queued":
+        return "status"
+    return "notice"
 
 
 def _normalize_adapters(adapters) -> dict:
@@ -127,6 +154,17 @@ class GatewayService:
     def _home_channel(self, platform: str) -> str:
         return str(self._platform_cfg.get(platform, {}).get("home_channel", "") or "")
 
+    def _result_only(self, platform: str) -> bool:
+        """Whether this platform speaks only the skill result line.
+
+        The adapter declares the default (the voice adapter sets `result_only`);
+        a per-platform config `result_only` overrides it either way.
+        """
+        cfg = self._platform_cfg.get(platform, {})
+        if "result_only" in cfg:
+            return bool(cfg["result_only"])
+        return bool(getattr(self.adapters.get(platform), "result_only", False))
+
     def _fallback_target(self) -> Target | None:
         for platform in self.platforms:
             home = self._home_channel(platform)
@@ -184,29 +222,30 @@ class GatewayService:
                 status, detail = self.scheduler.answer(msg.text)
                 if self.scheduler.pending is None:
                     self._pending_owner = None
-                self._reply(*reply_to, detail)
+                self._reply(*reply_to, detail, kind=_reply_kind(status))
             elif pending is not None and self._pending_owner not in (None, reply_to):
                 self._reply(
                     *reply_to,
                     "I'm waiting for a reply in another conversation; please resend in a moment.",
+                    kind="notice",
                 )
             elif reply_to in self._question_for_chat:
                 question_id = self._question_for_chat.pop(reply_to)
                 status, detail = self.scheduler.answer_question(question_id, msg.text)
                 self._surfaced.add(question_id)
-                self._reply(*reply_to, detail)
+                self._reply(*reply_to, detail, kind="notice")
             elif reply_to in self._repair_for_chat and msg.text.strip().lower() in _REPAIR_ACTIONS:
                 offer_id = self._repair_for_chat.pop(reply_to)
                 action = _REPAIR_ACTIONS[msg.text.strip().lower()]
                 status, detail = self.scheduler.resolve_repair(offer_id, action)
                 self._surfaced.add(offer_id)
-                self._reply(*reply_to, detail)
+                self._reply(*reply_to, detail, kind="notice")
             elif reply_to in self._approval_for_chat and msg.text.strip().lower() in _APPROVAL_ACTIONS:
                 approval_id = self._approval_for_chat.pop(reply_to)
                 approved = _APPROVAL_ACTIONS[msg.text.strip().lower()]
                 status, detail = self.scheduler.answer_approval(approval_id, approved)
                 self._surfaced.add(approval_id)
-                self._reply(*reply_to, detail)
+                self._reply(*reply_to, detail, kind="notice")
             else:
                 status, detail, run_id = self.scheduler.submit_request(
                     msg.text, source=self.source_for(platform, msg.chat_id)
@@ -215,7 +254,7 @@ class GatewayService:
                     self._owners[run_id] = reply_to
                 if status == "needs_input":
                     self._pending_owner = reply_to
-                self._reply(*reply_to, detail)
+                self._reply(*reply_to, detail, kind=_reply_kind(status))
             self.drain()
             self.surface(origin=reply_to)
 
@@ -233,7 +272,7 @@ class GatewayService:
                     self._pending_owner = owner
                 target = owner or self._fallback_target()
                 if target:
-                    self._reply(*target, text)
+                    self._reply(*target, text, kind=_reply_kind(status))
 
     def surface(self, origin: Target | None = None) -> None:
         """Send any newly posted authoring questions / repair offers."""
@@ -252,6 +291,7 @@ class GatewayService:
                 self._reply(
                     *target,
                     f"(authoring {item['category']}.{item['skill']}) {item['question']}",
+                    kind="question",
                 )
 
         repairs = self.scheduler.pending_repairs()
@@ -272,6 +312,7 @@ class GatewayService:
                         f"{offer['category']}.{offer['skill']} failed: "
                         f"{offer['failure'][:200]}\nReply retry / repair / ask / no."
                     ),
+                    kind="notice",
                 )
 
         approvals = self.scheduler.pending_approvals()
@@ -297,12 +338,13 @@ class GatewayService:
                         f"Approve creating new {item['kind']} {label}: "
                         f"{item['description']}\nReply yes / no."
                     ),
+                    kind="notice",
                 )
 
         for fired in self.scheduler.timers.drain():
             target = self._resolve_target(fired.run_id, origin)
             if target:
-                self._reply(*target, fired.message)
+                self._reply(*target, fired.message, kind="notice")
 
     # ---- scheduler requeue hook (called under the scheduler lock) ----
 
@@ -333,8 +375,17 @@ class GatewayService:
 
     # ---- outbound ----
 
-    def _reply(self, platform: str, chat_id: str, text: str) -> None:
+    def _reply(
+        self, platform: str, chat_id: str, text: str, kind: str = "reply"
+    ) -> None:
         text = _strip_run_id(text)
+        if self._result_only(platform):
+            # A spoken front end says the skill's result, not the scheduler's
+            # bookkeeping: drop queue/urgency chatter and unwrap the result line.
+            if kind == "status":
+                return
+            if kind == "result":
+                text = _result_detail(text)
         prefix = str(self._platform_cfg.get(platform, {}).get("reply_prefix", "") or "")
         if prefix:
             text = f"{prefix}{text}"
