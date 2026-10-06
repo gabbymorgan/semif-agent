@@ -650,8 +650,10 @@ python -m semif_agent.cli gateway --platform voice
 - **Requirements.** The voice stack is optional and lazy-imported; install it
   with `scripts/bootstrap.sh --voice` (or
   `.runtime/venv/bin/pip install -r requirements/voice.txt`) plus the system
-  PortAudio lib (`apt install libportaudio2`). The gateway refuses to start with
-  an install hint if the stack is missing.
+  PortAudio lib and ALSA mixer tools (`apt install libportaudio2 alsa-utils`).
+  The gateway refuses to start with an install hint if the stack is missing.
+  PortAudio has no volume control — use `alsamixer`/`amixer` (then
+  `sudo alsactl store`) to unmute and set the mic/speaker levels.
 - **Models.** `gateway.voice.wake.model` is an openWakeWord model (default
   `hey_mycroft`), `stt.model` a faster-whisper size (default `base.en`), and
   `tts.voice` a Piper voice (default `en_US-lessac-medium`). Bootstrap downloads

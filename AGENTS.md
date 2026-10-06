@@ -557,7 +557,7 @@ CLI, unit tests (24) + integration tests (2).
   `--codegen-model`) override the values read from `config.json` **for that run
   only** and are never written back. `--voice` additionally installs the
   optional voice-gateway stack (`requirements/voice.txt` + system
-  `libportaudio2`) and downloads its models into `.runtime/voice/` via
+  `libportaudio2` + `alsa-utils`) and downloads its models into `.runtime/voice/` via
   `scripts/voice-models.py`. The script must be run from a checkout —
   it reads pins from that checkout's `pins.json` and never re-clones the agent
   repo (only the SemIf engine and the simplex-chat binary). Idempotent and
@@ -1028,7 +1028,7 @@ CLI, unit tests (24) + integration tests (2).
   stays stdlib-only. The voice stack is pinned separately in
   `requirements/voice.txt` (hardware-dependent: `sounddevice`, `openwakeword`,
   `faster-whisper`, `piper-tts`, `onnxruntime`, `webrtcvad-wheels`, plus the
-  system `libportaudio2`); it is lazy-imported too, and `bootstrap.sh --voice`
+  system `libportaudio2` + `alsa-utils`); it is lazy-imported too, and `bootstrap.sh --voice`
   installs it and downloads the models (openWakeWord into the venv package dir,
   the Piper voice into `.runtime/voice/tts`, faster-whisper into `.runtime/hf`).
 

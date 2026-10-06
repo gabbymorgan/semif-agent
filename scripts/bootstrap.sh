@@ -248,10 +248,18 @@ CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install -r "$REPO_ROOT/require
 # Hardware-dependent: only the host with a microphone/speaker needs it. The
 # stack is lazy-imported, so a host without it still runs every other front end.
 if [[ "$VOICE" = 1 ]]; then
-  if ! dpkg -s libportaudio2 >/dev/null 2>&1; then
-    echo "== installing system PortAudio (libportaudio2)"
+  # libportaudio2 is the I/O backend sounddevice needs; alsa-utils provides
+  # amixer/alsamixer/alsactl so the operator can unmute and set the mic/speaker
+  # levels (PortAudio itself has no volume control).
+  VOICE_SYS_PKGS=(libportaudio2 alsa-utils)
+  voice_missing=()
+  for p in "${VOICE_SYS_PKGS[@]}"; do
+    dpkg -s "$p" >/dev/null 2>&1 || voice_missing+=("$p")
+  done
+  if [[ ${#voice_missing[@]} -gt 0 ]]; then
+    echo "== installing voice system prereqs: ${voice_missing[*]}"
     sudo apt-get update
-    sudo apt-get install -y libportaudio2
+    sudo apt-get install -y "${voice_missing[@]}"
   fi
   echo "== installing voice deps into $VENV"
   "$PIP" install -r "$REPO_ROOT/requirements/voice.txt"
@@ -543,6 +551,12 @@ Voice command gateway (wake word + speech-to-text + text-to-speech):
   - Say the wake word (gateway.voice.wake.model, default 'hey_mycroft') and
     speak; the reply is spoken back. After each reply the next utterance needs
     no wake word for gateway.voice.follow_up_window_s.
+  - If the mic or speaker is silent/quiet, set the ALSA mixer (PortAudio has no
+    volume control) and persist it:
+      alsamixer                 # or: amixer -c <card> sset 'Speaker' unmute
+      sudo alsactl store
+    List devices with: $PYTHON -c "import sounddevice as sd; print(sd.query_devices())"
+    and put the input/output device indices in gateway.voice.audio.
   - Re-download / switch models any time with:
       HF_HOME="$HF_CACHE" "$PYTHON" scripts/voice-models.py --config config.json
 EOF

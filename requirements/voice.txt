@@ -7,7 +7,10 @@
 #   .runtime/venv/bin/pip install -r requirements/voice.txt
 #   .runtime/venv/bin/pip install --no-deps openwakeword==0.6.0
 #
-# System prerequisite (not pip): PortAudio, e.g. `apt-get install -y libportaudio2`.
+# System prerequisites (not pip): PortAudio + ALSA mixer tools, e.g.
+# `apt-get install -y libportaudio2 alsa-utils`. PortAudio is the I/O backend;
+# alsa-utils provides amixer/alsamixer/alsactl to unmute and set mic/speaker
+# levels (PortAudio itself has no volume control).
 #
 # The audio pipeline is 16 kHz mono int16:
 #   sounddevice   mic capture + speaker playback (raw PortAudio streams)
