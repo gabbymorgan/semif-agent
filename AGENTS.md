@@ -210,7 +210,12 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 speech-to-text + text-to-speech) over the neutral
                 `semif_agent/voice_transport.py`; no remote peer and no
                 allowlist (physical mic access is the authorization), a single
-                configured `chat_id`, replies spoken back. Run with
+                configured `chat_id`, replies spoken back. humanize.py:
+                Humanizer — optional LLM cleanup of a result line (generation,
+                never a decision; grounded prompt + always falls back to the
+                raw text), gated by `gateway.humanize` / a per-platform
+                `humanize` override, reusing the scheduler's `llm` client with
+                a short per-call timeout. Run with
                 `python -m semif_agent.cli gateway [--platform
                 simplex,lxmf,voice|all] [--dashboard]`; config under
                 `gateway.simplex` / `gateway.lxmf` / `gateway.voice`. The
@@ -1041,6 +1046,25 @@ CLI, unit tests (24) + integration tests (2).
   = True`; the service routes them by `run_id` → `(platform, chat)`, falling
   back to that platform's `home_channel`); a chat's plain reply answers the
   question or picks the repair action (`retry`/`repair`/`ask`/`no`).
+- **Optional result cleanup** (`gateway/humanize.py`): a gateway-only
+  presentation layer that rewrites a completed skill's result line from the
+  scheduler's deterministic `<skill>: <ok|failed> — <action_log>` into one
+  grounded, friendly sentence. It is **generation, never a decision** — the
+  success/failure verdict and routing are already settled by SemIf and the
+  runner, and the rewrite is never fed back into assessment, tracing, or the
+  decision log (the runner and REPL keep the raw deterministic summary). The
+  prompt forbids adding/inferring/dropping facts, and `Humanizer.humanize`
+  always falls back to the original text on any error, timeout, empty/refusal
+  reply, or runaway length, so a cleanup failure never swallows a real result.
+  It reuses the scheduler's `llm` client (endpoint/model/sampler configured
+  once) with a short per-call `timeout` (a new optional `chat()` argument) so a
+  slow cleanup cannot hold the gateway poll loop for the authoring budget. Off
+  by default: `gateway.humanize` (`enabled`/`timeout`/`max_tokens`/`max_chars`)
+  sets the global default and a per-platform `gateway.<platform>.humanize`
+  bool/`{enabled}` overrides it. Only `kind == "result"` lines are touched
+  (questions, repair/approval notices, and status chatter pass through); like
+  `result_only`, an enabled platform unwraps the result detail before cleaning.
+  `_resolve_platforms` skips the reserved `humanize` key.
 - **Gateway isolation (non-negotiable).** The gateway exists only to take
   commands and send replies. It MUST NOT read a contact's history, show/create
   invite links, or compose messages on the user's behalf: no `observer`, no
@@ -1061,6 +1085,10 @@ CLI, unit tests (24) + integration tests (2).
   allowlist/auth and batching (a `threading.Timer`), cross-platform pending-run
   guard and per-platform reply routing, and `GatewayService` routing against a
   real `Scheduler` (lazy engine, unreachable LLM).
+  `tests/test_humanize.py` covers the optional result cleanup with an injected
+  fake `llm` client (rewrite, quote/whitespace normalization, fallback on
+  error/empty/refusal/runaway, disabled passthrough, and the global +
+  per-platform gateway enable/disable wiring).
   `tests/test_lxmf_transport.py` covers the neutral LXMF transport's
   missing-dep contract, default paths, and `normalize_message` (no real `lxmf`
   needed). `tests/test_simplex_ws.py` covers the neutral protocol layer (parse

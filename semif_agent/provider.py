@@ -192,8 +192,13 @@ class OpenAICompatClient:
         top_p: float | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
+        timeout: float | None = None,
         degeneration_check: Callable[[str], str | None] | None = None,
     ) -> str:
+        # A per-call `timeout` overrides the constructor value for this request
+        # only (used by short auxiliary calls such as the gateway's result
+        # cleanup, which must not inherit the authoring client's long budget).
+        deadline = self.timeout if timeout is None else timeout
         budget = self._compute_budget(messages)
         if self.stream:
             self._print_budget(budget)
@@ -227,15 +232,17 @@ class OpenAICompatClient:
             url, data=body, headers=self._headers()
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return self._read_stream(response, budget, degeneration_check)
+            with urllib.request.urlopen(request, timeout=deadline) as response:
+                return self._read_stream(
+                    response, budget, degeneration_check, timeout=deadline
+                )
         except urllib.error.URLError as exc:
             raise self.error_class(
                 f"{self.label} endpoint unreachable at {url}: {exc}. Is your local server running?"
             ) from exc
         except TimeoutError as exc:
             raise self.error_class(
-                f"{self.label} request timed out after {self.timeout}s at {url}"
+                f"{self.label} request timed out after {deadline:.0f}s at {url}"
             ) from exc
 
     def _native_base_url(self) -> str:
@@ -399,6 +406,7 @@ class OpenAICompatClient:
         response,
         budget: TokenBudget,
         degeneration_check: Callable[[str], str | None] | None = None,
+        timeout: float | None = None,
     ) -> str:
         """Read an OpenAI-compatible SSE stream; echo tokens if `stream`.
 
@@ -426,7 +434,10 @@ class OpenAICompatClient:
         parts: list[str] = []
         sock = self._stream_socket(response)
         if sock is None:
-            return self._read_stream_blocking(response, budget, degeneration_check)
+            return self._read_stream_blocking(
+                response, budget, degeneration_check, timeout=timeout
+            )
+        deadline = self.timeout if timeout is None else timeout
         start = time.monotonic()
         last_activity = start
         warned = False
@@ -437,9 +448,9 @@ class OpenAICompatClient:
         recent_len = 0
         last_check: int | None = None
         while True:
-            if time.monotonic() - start >= self.timeout:
+            if time.monotonic() - start >= deadline:
                 raise self.error_class(
-                    f"{self.label} request exceeded {self.timeout:.0f}s total budget"
+                    f"{self.label} request exceeded {deadline:.0f}s total budget"
                 )
             ready, _, _ = select.select([sock], [], [], 1.0)
             now = time.monotonic()
@@ -499,16 +510,18 @@ class OpenAICompatClient:
         response,
         budget: TokenBudget,
         degeneration_check: Callable[[str], str | None] | None = None,
+        timeout: float | None = None,
     ) -> str:
         """Fallback reader when the response socket can't be located.
 
         A plain blocking read relies on the per-read socket timeout for
         silence, but that bounds individual reads, not the whole stream — so
-        enforce the same total wall-clock budget `self.timeout` and the token
-        budget in the loop, or a continuously-streaming runaway would never be
-        cut short.
+        enforce the same total wall-clock budget (the per-call `timeout`, else
+        `self.timeout`) and the token budget in the loop, or a
+        continuously-streaming runaway would never be cut short.
         """
         parts: list[str] = []
+        deadline = self.timeout if timeout is None else timeout
         start = time.monotonic()
         warned_fill = False
         out_chars = 0
@@ -517,9 +530,9 @@ class OpenAICompatClient:
         recent_len = 0
         last_check: int | None = None
         for raw in response:
-            if time.monotonic() - start >= self.timeout:
+            if time.monotonic() - start >= deadline:
                 raise self.error_class(
-                    f"{self.label} request exceeded {self.timeout:.0f}s total budget"
+                    f"{self.label} request exceeded {deadline:.0f}s total budget"
                 )
             continues, text, reasoning, frame_usage = self._consume_frame(
                 raw.decode("utf-8").strip()

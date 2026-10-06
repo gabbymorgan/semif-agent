@@ -718,7 +718,8 @@ def _resolve_platforms(requested: str, gateway_cfg: dict) -> list[str]:
 
     `all`/`*` means every **enabled** gateway block in config; a
     comma-separated list is taken as-is (unknown names are kept so the caller
-    can report them).
+    can report them). Non-platform keys (`_comment`, the global `humanize`
+    defaults block) are skipped.
     """
     requested = (requested or "simplex").strip()
     if requested in ("all", "*"):
@@ -727,6 +728,7 @@ def _resolve_platforms(requested: str, gateway_cfg: dict) -> list[str]:
             for name, block in (gateway_cfg or {}).items()
             if isinstance(block, dict)
             and not name.startswith("_")
+            and name != "humanize"
             and block.get("enabled", False)
         ]
     return [name.strip() for name in requested.split(",") if name.strip()]

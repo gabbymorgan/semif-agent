@@ -131,6 +131,13 @@
   },
   "gateway": {
     "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` runs one or more platforms (`--platform simplex,lxmf` or `all`) in a SINGLE process sharing one scheduler/skill store — never run two gateway processes over one store. Each platform feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). reply_prefix is prepended to every reply. text_batch_delay concatenates rapid-fire messages from one contact.",
+    "humanize": {
+      "_comment": "Optional LLM cleanup of a skill's result line for chat replies. Off by default. When enabled, a completed result is unwrapped from the scheduler's `<skill>: <ok|failed> — <detail>` bookkeeping and rewritten by the scheduler's `llm` client into one grounded, friendly sentence; it never decides success/failure and always falls back to the raw result on any error. `timeout`/`max_tokens`/`max_chars` bound the auxiliary call (a slow cleanup must not hold the gateway). A platform turns it on/off with its own `humanize` key (bool or `{enabled: ...}`), overriding this global default; `timeout`/`max_tokens`/`max_chars` are global. Only result lines are cleaned — questions, repair/approval notices, and status chatter are untouched.",
+      "enabled": false,
+      "timeout": 20.0,
+      "max_tokens": 200,
+      "max_chars": 600
+    },
     "simplex": {
       "_comment": "SimpleX command adapter. Connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. Groups/attachments are not supported.",
       "enabled": true,

@@ -26,6 +26,7 @@ import re
 import threading
 
 from .base import InboundMessage, OutboundMessage
+from .humanize import Humanizer
 
 _LEADING_RUN_ID = re.compile(r"^\[[0-9a-f]{6,}\]\s*")
 
@@ -112,6 +113,7 @@ class GatewayService:
         adapters,
         config: dict | None = None,
         poll_interval: float = 1.0,
+        humanizer: Humanizer | None = None,
     ):
         self.scheduler = scheduler
         self.adapters = _normalize_adapters(adapters)
@@ -125,6 +127,17 @@ class GatewayService:
         self._platform_cfg: dict[str, dict] = {
             platform: self._config_for(platform) for platform in self.platforms
         }
+        #: Optional LLM result cleanup (gateway-only presentation). Built from
+        #: the scheduler's `llm` client unless one is injected; a no-op unless
+        #: `gateway.humanize.enabled` (or a per-platform override) turns it on.
+        if humanizer is not None:
+            self.humanizer = humanizer
+            self._humanize_default = bool(humanizer.enabled)
+        else:
+            humanize_cfg = self.config.get("humanize")
+            humanize_cfg = humanize_cfg if isinstance(humanize_cfg, dict) else {}
+            self._humanize_default = bool(humanize_cfg.get("enabled", False))
+            self.humanizer = self._build_humanizer(humanize_cfg)
         self._owners: dict[str, Target] = {}
         self._parents: dict[str, str] = {}
         self._pending_owner: Target | None = None
@@ -164,6 +177,44 @@ class GatewayService:
         if "result_only" in cfg:
             return bool(cfg["result_only"])
         return bool(getattr(self.adapters.get(platform), "result_only", False))
+
+    # ---- optional LLM result cleanup ----
+
+    def _build_humanizer(self, cfg: dict) -> Humanizer | None:
+        """Build the result humanizer from config + the scheduler's `llm`.
+
+        Global defaults live in `gateway.humanize`; a per-platform
+        `gateway.<platform>.humanize` (bool or `{enabled, timeout, max_tokens,
+        max_chars}`) overrides the enable flag. Returns None when no `llm`
+        client is available, so a client-less scheduler degrades to no cleanup.
+        The instance is always built `enabled`; the global default is kept
+        separately so a per-platform override can turn it on or off.
+        """
+        client = getattr(self.scheduler, "llm", None)
+        if client is None:
+            return None
+        return Humanizer(
+            client,
+            enabled=True,
+            timeout=float(cfg.get("timeout", 20.0)),
+            max_tokens=int(cfg.get("max_tokens", 200)),
+            max_chars=int(cfg.get("max_chars", 600)),
+        )
+
+    def _humanize_enabled(self, platform: str) -> bool:
+        """Whether this platform cleans up its result line.
+
+        A per-platform `humanize` bool (or `{enabled: bool}`) overrides the
+        global `gateway.humanize.enabled`. Default is off.
+        """
+        if self.humanizer is None:
+            return False
+        override = self._platform_cfg.get(platform, {}).get("humanize")
+        if isinstance(override, bool):
+            return override
+        if isinstance(override, dict) and "enabled" in override:
+            return bool(override["enabled"])
+        return self._humanize_default
 
     def _fallback_target(self) -> Target | None:
         for platform in self.platforms:
@@ -379,13 +430,19 @@ class GatewayService:
         self, platform: str, chat_id: str, text: str, kind: str = "reply"
     ) -> None:
         text = _strip_run_id(text)
-        if self._result_only(platform):
+        result_only = self._result_only(platform)
+        humanize = kind == "result" and self._humanize_enabled(platform)
+        if result_only:
             # A spoken front end says the skill's result, not the scheduler's
-            # bookkeeping: drop queue/urgency chatter and unwrap the result line.
+            # bookkeeping: drop queue/urgency chatter.
             if kind == "status":
                 return
-            if kind == "result":
-                text = _result_detail(text)
+        if kind == "result" and (result_only or humanize):
+            # Unwrap `<skill>: <ok|failed> — <detail>` to the skill's own
+            # result before optionally cleaning it up.
+            text = _result_detail(text)
+            if humanize:
+                text = self.humanizer.humanize(text)
         prefix = str(self._platform_cfg.get(platform, {}).get("reply_prefix", "") or "")
         if prefix:
             text = f"{prefix}{text}"
