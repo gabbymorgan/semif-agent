@@ -530,7 +530,7 @@ python -m semif_agent.cli skills           # print the skill tree
 python -m semif_agent.cli status           # current process + queue
 python -m semif_agent.cli relabel <id> <outcome>
 python -m semif_agent.cli dashboard [--port 8765] [--host 0.0.0.0] [--replay]
-python -m semif_agent.cli gateway [--platform simplex] [--dashboard]
+python -m semif_agent.cli gateway [--platform simplex,lxmf|all] [--dashboard]
 python -m semif_agent.cli bridge [--name simplex]
 ```
 
@@ -579,14 +579,45 @@ POST /api/submit /api/answer /api/questions /api/restart /api/repair /api/relabe
 Live mode warms the engine; `--replay` reads the logs without loading SemIf
 (submit degrades to a JSON error). Binds `127.0.0.1:8765` by default.
 
-### Messenger gateway (SimpleX)
+### Messenger gateway (SimpleX + LXMF)
 
-`cli gateway` connects to the local `simplex-chat` daemon over its JSON WebSocket
-API and feeds authorized DM text through the normal gate/score/queue/dispatch
-pipeline. Results, authoring questions and repair offers go back to the
-originating chat. It is **default-deny**: put allowed contactIds or display names
-in `gateway.simplex.allowed_users`. Requires the optional `websockets` package
-(lazy import; the gateway refuses to start without it).
+`cli gateway` runs one or more command transports in a single process that
+shares one scheduler/skill store. `--platform` takes a comma-separated list or
+`all` and defaults to `simplex`:
+
+```sh
+python -m semif_agent.cli gateway [--platform simplex,lxmf|all] [--dashboard]
+```
+
+Each platform feeds authorized DM text through the normal gate/score/queue/
+dispatch pipeline. Results, authoring questions and repair offers go back to the
+originating chat. Config lives under `gateway.<platform>` in `config.json`;
+`enabled` defaults to false. Both transports are **default-deny** — put allowed
+identities in `gateway.<platform>.allowed_users` (or set `allow_all_users` for
+dev) — and **all adapters share one process** (never run two gateway processes
+over one skill store). On a provisioned host `semif-gateway.service` runs
+`gateway --platform all`, so it survives logout/reboot.
+
+**SimpleX.** Connects to the local `simplex-chat` daemon over its JSON WebSocket
+API (`gateway.simplex.ws_url`, which must match `simplex_chat.port`). Requires
+the optional `websockets` package (lazy import; the gateway refuses to start
+without it). `allowed_users` entries match a numeric contactId or a display
+name. The daemon must run in **bot mode** (`simplex-chat -p PORT
+--create-bot-display-name NAME`), not `--headless`/`--relay` — in v7 those mean
+"chat relay" and yield a relay address, not a user contact address. Add the
+bot's contact link to reach it: `scripts/simplex-address.py` shows/creates it
+(bootstrap prints it), and the gateway prints it once on connect.
+
+**LXMF (Reticulum).** Runs **in-process — there is no external daemon**;
+`pip install lxmf` provides the transport (optional, lazy import; the gateway
+refuses to start with an install hint otherwise). The bot's reachable address is
+its LXMF delivery destination hash (32 hex chars), printed once on connect; the
+identity is persisted under `gateway.lxmf.storage_path` (default
+`.runtime/lxmf/router`) so the address is stable across restarts. `allowed_users`
+matches the peer's LXMF address (32 hex) or a best-effort display name.
+`desired_method` is `direct` (reliable link) or `opportunistic` (single packet),
+and an optional `propagation_node` enables store-and-forward. Add the printed
+address as a contact in your LXMF client and DM it.
 
 > **Gateway isolation is non-negotiable.** The gateway takes commands and sends
 > replies — nothing else. It never reads history, shows or creates invite links,
