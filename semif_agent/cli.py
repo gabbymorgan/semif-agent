@@ -638,6 +638,22 @@ def _build_gateway_adapter(platform: str, cfg: dict, trace):
         cfg.setdefault("config_dir", str(REPO_ROOT / ".runtime" / "lxmf" / "reticulum"))
         cfg.setdefault("storage_path", str(REPO_ROOT / ".runtime" / "lxmf" / "router"))
         return LxmfAdapter(cfg, trace=trace)
+    if platform == "voice":
+        from .gateway.voice import VoiceAdapter
+
+        cfg = dict(cfg or {})
+        # Contain downloaded wake-word / TTS models under the checkout's
+        # .runtime/ (the faster-whisper model lands in the HF cache instead).
+        voice_dir = REPO_ROOT / ".runtime" / "voice"
+        wake_cfg = dict(cfg.get("wake") or {})
+        if not wake_cfg.get("model_dir"):
+            wake_cfg["model_dir"] = str(voice_dir / "wake")
+        cfg["wake"] = wake_cfg
+        tts_cfg = dict(cfg.get("tts") or {})
+        if not tts_cfg.get("voice_dir"):
+            tts_cfg["voice_dir"] = str(voice_dir / "tts")
+        cfg["tts"] = tts_cfg
+        return VoiceAdapter(cfg, trace=trace)
     return None
 
 

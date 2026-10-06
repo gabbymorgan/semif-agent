@@ -1,0 +1,32 @@
+# Voice gateway deps (optional, hardware-dependent).
+#
+# Only needed on a host that runs the voice front end
+# (`python -m semif_agent.cli gateway --platform voice`). Lazy-imported by
+# semif_agent/voice_transport.py, so the core stays stdlib-only on every other
+# host. Install with scripts/bootstrap.sh --voice, or:
+#   .runtime/venv/bin/pip install -r requirements/voice.txt
+#   .runtime/venv/bin/pip install --no-deps openwakeword==0.6.0
+#
+# System prerequisite (not pip): PortAudio, e.g. `apt-get install -y libportaudio2`.
+#
+# The audio pipeline is 16 kHz mono int16:
+#   sounddevice   mic capture + speaker playback (raw PortAudio streams)
+#   faster-whisper CTranslate2 Whisper speech-to-text (model from HF cache)
+#   piper-tts     local neural text-to-speech (voice .onnx under .runtime/voice/tts)
+#   onnxruntime   inference backend for openwakeword + piper
+#   webrtcvad-wheels  VAD endpointing (imports as `webrtcvad`; prebuilt wheels)
+#
+# openWakeWord is installed SEPARATELY with --no-deps: its Linux metadata
+# hard-requires tflite-runtime, which has no py3.12+ wheel. The onnxruntime
+# backend (used here) does not need it. Its own runtime deps are pinned below
+# so this file alone is enough for the rest of the stack.
+sounddevice==0.5.6
+onnxruntime==1.30.0
+faster-whisper==1.2.1
+piper-tts==1.8.0
+webrtcvad-wheels==2.0.14.post1
+# openwakeword runtime deps (installed here because openwakeword is --no-deps).
+scipy==1.18.1
+scikit-learn==1.9.1
+requests==2.34.2
+tqdm==4.70.1

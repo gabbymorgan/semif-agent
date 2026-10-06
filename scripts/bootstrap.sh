@@ -32,7 +32,7 @@
 #
 # Usage:
 #   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
-#                        [--codegen-model MODEL] [--copy-data SRC] [-h]
+#                        [--codegen-model MODEL] [--copy-data SRC] [--voice] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
@@ -42,6 +42,7 @@ CODEGEN_URL=""
 LLM_MODEL=""
 CODEGEN_MODEL=""
 COPY_DATA=""
+VOICE=0
 
 usage() {
   sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -51,6 +52,7 @@ usage() {
   echo "  --llm-model MODEL      override llm.model from config.json for this run (pulled if the local ollama lacks it)"
   echo "  --codegen-model MODEL  override codegen.model from config.json for this run"
   echo "  --copy-data SRC        rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
+  echo "  --voice                install the optional voice-gateway stack + download its models"
   echo "  -h                     this help"
   exit "${1:-0}"
 }
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --llm-model) LLM_MODEL="$2"; shift 2 ;;
     --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
+    --voice) VOICE=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
   esac
@@ -178,7 +181,7 @@ echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex
 echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
 echo "== runtime tree: $RUNTIME"
 
-mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$RUNTIME/lxmf" "$UNITS" "$USER_UNITS"
+mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$RUNTIME/lxmf" "$RUNTIME/voice" "$UNITS" "$USER_UNITS"
 
 # --- stage 0: system prereqs + linger ----------------------------------------
 PKGS=(ca-certificates curl git rsync build-essential python3-dev python3-venv pkg-config cmake util-linux)
@@ -241,6 +244,23 @@ echo "== installing engine deps into $VENV"
 CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
 "$PIP" install -e "$REPO_ROOT" --no-deps
 
+# --- stage 3b: optional voice-gateway stack (--voice) --------------------------
+# Hardware-dependent: only the host with a microphone/speaker needs it. The
+# stack is lazy-imported, so a host without it still runs every other front end.
+if [[ "$VOICE" = 1 ]]; then
+  if ! dpkg -s libportaudio2 >/dev/null 2>&1; then
+    echo "== installing system PortAudio (libportaudio2)"
+    sudo apt-get update
+    sudo apt-get install -y libportaudio2
+  fi
+  echo "== installing voice deps into $VENV"
+  "$PIP" install -r "$REPO_ROOT/requirements/voice.txt"
+  # openWakeWord's Linux metadata hard-requires tflite-runtime (no py3.12+
+  # wheel); the onnxruntime backend does not need it, so install it --no-deps
+  # (its own runtime deps are pinned in voice.txt).
+  "$PIP" install --no-deps openwakeword==0.6.0
+fi
+
 # --- stage 4: GGUF --------------------------------------------------------------
 GGUF_NAME="$(basename "$GGUF_URL")"
 GGUF="$MODELS/$GGUF_NAME"
@@ -263,6 +283,18 @@ import sys
 from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained(sys.argv[1], revision=sys.argv[2])
 PY
+
+# --- stage 5b: optional voice models (--voice) ----------------------------------
+# Downloads the openWakeWord models (into the venv) + the Piper voice (into
+# .runtime/voice/tts) and warms the faster-whisper model into the HF cache.
+# Reads gateway.voice from config.json
+# so the models match the configured names. Best-effort: a download failure
+# warns (the gateway reports the missing model at startup) rather than aborting.
+if [[ "$VOICE" = 1 ]]; then
+  echo "== downloading voice models (openWakeWord + Piper + faster-whisper)"
+  HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" --config "$CONFIG" \
+    || echo "WARN: voice model download failed; re-run scripts/voice-models.py" >&2
+fi
 
 # --- stage 6: simplex-chat daemon binary -------------------------------------------
 SIMPLEX_BIN="$TOOLDIR/simplex-chat"
@@ -498,3 +530,20 @@ LLM bridge (generation for skills):
     model (configured once) and serves a generic POST /chat; skills call it via
     the top-level llm_bridge_url (default http://127.0.0.1:5229).
 EOF
+
+if [[ "$VOICE" = 1 ]]; then
+  cat <<EOF
+
+Voice command gateway (wake word + speech-to-text + text-to-speech):
+  - The stack is installed and its models downloaded (openWakeWord into the
+    venv, the Piper voice into .runtime/voice/tts, faster-whisper into .runtime/hf).
+    Enable it in config.json with gateway.voice.enabled = true, then run it in
+    the foreground (it needs your audio session; it is NOT a systemd unit):
+      HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli gateway --platform voice
+  - Say the wake word (gateway.voice.wake.model, default 'hey_mycroft') and
+    speak; the reply is spoken back. After each reply the next utterance needs
+    no wake word for gateway.voice.follow_up_window_s.
+  - Re-download / switch models any time with:
+      HF_HOME="$HF_CACHE" "$PYTHON" scripts/voice-models.py --config config.json
+EOF
+fi

@@ -192,12 +192,17 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 SimplexAdapter — command simplex-chat daemon over its JSON
                 WebSocket API (lazy `websockets`, allowlist, batching,
                 structured `/_send`). lxmf.py: LxmfAdapter — LXMF/Reticulum
-                (lazy `lxmf`), in-process, allowlist + batching. Run with
-                `python -m semif_agent.cli gateway [--platform simplex,lxmf|all]
-                [--dashboard]`; config under `gateway.simplex` /
-                `gateway.lxmf`. The gateway MUST NOT read history, show/create
-                invite links, or compose messages — see "gateway isolation"
-                below.
+                (lazy `lxmf`), in-process, allowlist + batching. voice.py:
+                VoiceAdapter — the local microphone front end (wake word +
+                speech-to-text + text-to-speech) over the neutral
+                `semif_agent/voice_transport.py`; no remote peer and no
+                allowlist (physical mic access is the authorization), a single
+                configured `chat_id`, replies spoken back. Run with
+                `python -m semif_agent.cli gateway [--platform
+                simplex,lxmf,voice|all] [--dashboard]`; config under
+                `gateway.simplex` / `gateway.lxmf` / `gateway.voice`. The
+                gateway MUST NOT read history, show/create invite links, or
+                compose messages — see "gateway isolation" below.
 bridges/        standalone third-party API bridges (SimpleX first, plus the
                 LLM bridge). base.py:
                 BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
@@ -228,6 +233,16 @@ lxmf_transport.py
                 loop, inbound normalization, outbound send queue. Lazy `RNS`/
                 `LXMF` imports keep the module stdlib-only. Knows nothing about
                 the scheduler or the gateway.
+voice_transport.py
+                neutral voice transport: a 16 kHz mono capture loop with an
+                always-on wake word (openWakeWord), VAD endpointing
+                (webrtcvad, energy fallback), speech-to-text (faster-whisper)
+                and text-to-speech (Piper) over `sounddevice`; half-duplex
+                (capture discarded while speaking) with a follow-up window so a
+                reply can be answered without the wake word. Every heavy dep is
+                lazy-imported, keeping the module stdlib-only; the engine
+                interfaces are plain classes so tests inject fakes. Knows
+                nothing about the scheduler or the gateway.
 ```
 
 ## Run / verify
@@ -436,6 +451,24 @@ CLI, unit tests (24) + integration tests (2).
   and one scheduler (`--platform simplex,lxmf|all`). DMs only for the first cut;
   groups/attachments/reactions are future work. See "### gateway (messenger
   intake)".
+- **Voice gateway (wake word + STT + TTS)** (Oct 2026): `gateway/voice.py`
+  (`VoiceAdapter`, platform `voice`) is the local microphone front end over the
+  neutral `semif_agent/voice_transport.py`: an always-on openWakeWord wake word,
+  `webrtcvad` endpointing, faster-whisper speech-to-text, and Piper
+  text-to-speech over `sounddevice`. It is a normal `GatewayAdapter`, so the
+  single-session routing, `needs_input` questions, repairs, and approvals all
+  work through `GatewayService` unchanged — a spoken command is just text from
+  `voice:<chat_id>`, and every reply is spoken. No remote peer and no allowlist
+  (physical mic access is the authorization). Half-duplex: capture is discarded
+  while a reply is speaking (no barge-in yet); after each reply a
+  `follow_up_window_s` accepts the next utterance without the wake word. The
+  whole voice stack is optional and lazy-imported (`requirements/voice.txt`,
+  pinned separately from the engine set since it is hardware-dependent); the
+  gateway refuses to start with an install hint. `bootstrap.sh --voice`
+  installs the deps and downloads its models (the openWakeWord models land in
+  the venv under `.runtime/venv`, the Piper voice under `.runtime/voice/tts`,
+  the faster-whisper model in the `.runtime/hf` cache). See
+  "### gateway (messenger intake)".
 - **Bridge services (SimpleX first)** (Sep 2026): messaging *UX* — invite links,
   reading incoming messages, composing sends — is decoupled from the command
   gateway. `semif_agent.bridges` is a folder of standalone third-party API
@@ -522,7 +555,10 @@ CLI, unit tests (24) + integration tests (2).
   `config.example.json`; edit that to set `llm.model`/`codegen.model` and the
   endpoints. Flags (`--llm-url`, `--codegen-url`, `--llm-model`,
   `--codegen-model`) override the values read from `config.json` **for that run
-  only** and are never written back. The script must be run from a checkout —
+  only** and are never written back. `--voice` additionally installs the
+  optional voice-gateway stack (`requirements/voice.txt` + system
+  `libportaudio2`) and downloads its models into `.runtime/voice/` via
+  `scripts/voice-models.py`. The script must be run from a checkout —
   it reads pins from that checkout's `pins.json` and never re-clones the agent
   repo (only the SemIf engine and the simplex-chat binary). Idempotent and
   rerunnable; every stage no-ops on existing state, so it also boots an
@@ -532,7 +568,8 @@ CLI, unit tests (24) + integration tests (2).
   model, and WARNs if `llm.model`/`codegen.model` are unset.
 - **All installation artifacts live inside the checkout under a gitignored
   `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
-  `simplex/`, `systemd/`), so an end user can find and debug the whole stack in
+  `simplex/`, `systemd/`, and `voice/` for the optional voice models), so an
+  end user can find and debug the whole stack in
   one tree. Only operationally-forced artifacts live outside: the SSH key
   (`~/.ssh`) and the real systemd user dir + linger (the rendered units are
   stored in `.runtime/systemd/` and symlinked into `~/.config/systemd/user/`).
@@ -833,7 +870,7 @@ CLI, unit tests (24) + integration tests (2).
 
 ### gateway (messenger intake)
 
-- **Run mode.** `python -m semif_agent.cli gateway [--platform simplex,lxmf|all]
+- **Run mode.** `python -m semif_agent.cli gateway [--platform simplex,lxmf,voice|all]
   [--dashboard]` builds the normal scheduler (engine lazy) and runs the enabled
   adapters in the foreground. `--platform` takes a comma-separated list or
   `all`; default is `simplex`. **All adapters share one process and one
@@ -841,7 +878,9 @@ CLI, unit tests (24) + integration tests (2).
   gets its own transport thread but they route through a single
   platform-aware `GatewayService`. `--dashboard` co-serves the browser UI from
   a daemon thread. Config lives under `gateway.<platform>` in `config.json`;
-  `enabled` defaults false. On a bootstrap-provisioned host
+  `enabled` defaults false. The voice platform is foreground-only by design (a
+  headless systemd user service does not share the user's audio session). On a
+  bootstrap-provisioned host
   `scripts/bootstrap.sh` renders and enables the `semif-simplex.service` bot
   daemon (pinned `simplex-chat` in **bot mode**, profile under
   `.runtime/simplex/`, port from `simplex_chat.port`) and the
@@ -905,6 +944,32 @@ CLI, unit tests (24) + integration tests (2).
   Reticulum` and `LXMF.LXMRouter` install process signal handlers, which only
   work on the main thread** — `run_gateway` calls `daemon.prepare()` on the main
   thread before the transport threads start, and `run()` reuses it.
+- **Voice adapter** (`gateway/voice.py`): the local microphone front end. It is
+  a policy layer over the neutral `semif_agent/voice_transport.py` (`VoiceDaemon`)
+  — openWakeWord wake word → `webrtcvad` endpointing → faster-whisper
+  speech-to-text, and Piper text-to-speech, all over `sounddevice` at 16 kHz
+  mono int16 (capture/playback run at the device's native rate and are resampled
+  to/from 16 kHz; a per-block DC removal handles mics with a constant offset).
+  There is **no external daemon and no allowlist**: the mic is local,
+  so physical access is the authorization; a single configured `chat_id`
+  identifies the session and `home_channel` defaults to it so background
+  notifications (timers, repair offers) are spoken too. `run(on_inbound,
+  outbound)` starts an outbound-pump thread (`OutboundMessage` → `speak`) and
+  blocks in the mic loop. **Half-duplex**: capture frames are discarded while a
+  reply is speaking, so the agent never transcribes itself (no barge-in yet);
+  after a reply a `follow_up_window_s` accepts the next utterance without the
+  wake word, so answering a question is conversational. `max_speak_chars`
+  truncates long replies before speaking. Every heavy dep
+  (`sounddevice`/`openwakeword`/`faster_whisper`/`piper`/`onnxruntime`) is
+  **lazy-imported**; `check_requirements()` returns an install hint and the
+  gateway refuses to start without the stack. The engine interfaces are plain
+  classes (`WakeWordDetector`/`VadGate`/`Transcriber`/`Synthesizer`/`AudioIO`),
+  so tests inject fakes and drive the loop with no hardware. It runs best in the
+  user's audio session (foreground `gateway --platform voice`), not a headless
+  systemd user service; `bootstrap.sh --voice` installs the deps and downloads
+  the models (openWakeWord into the venv's package dir under `.runtime/venv`,
+  the Piper voice into `.runtime/voice/tts`, the faster-whisper model into the
+  `.runtime/hf` cache).
 - **Scheduler glue** (`gateway/service.py`): inbound text →
   `Scheduler.submit_request(text, source=f"{platform}:{chat_id}")`; the returned
   request id maps to the `(platform, chat)` (`owners`), and
@@ -951,12 +1016,21 @@ CLI, unit tests (24) + integration tests (2).
   daemon close on stop, catalog/`describe_bridges()`).
   `tests/test_seed_skills.py` hermetically tests every
   `seeds/<category>/<name>/` package, including `simplex.next_message` and
-  `simplex.connect_link`. The live `websockets` transport against a real daemon
-  and the live LXMF transport against a real Reticulum network are
-  live-integration concerns.
+  `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
+  with injected fake engines (wake gating, endpointing, half-duplex,
+  follow-up window, `speak` truncation/failure, adapter + CLI wiring) — no
+  hardware, network, or heavy packages. The live `websockets` transport against
+  a real daemon, the live LXMF transport against a real Reticulum network, and
+  the live voice pipeline against a real microphone are live-integration
+  concerns.
 - **Deps.** `websockets` and `lxmf`/`rns` are pinned in
   `requirements/staging.txt` (staging only); both are lazy-imported and the core
-  stays stdlib-only.
+  stays stdlib-only. The voice stack is pinned separately in
+  `requirements/voice.txt` (hardware-dependent: `sounddevice`, `openwakeword`,
+  `faster-whisper`, `piper-tts`, `onnxruntime`, `webrtcvad-wheels`, plus the
+  system `libportaudio2`); it is lazy-imported too, and `bootstrap.sh --voice`
+  installs it and downloads the models (openWakeWord into the venv package dir,
+  the Piper voice into `.runtime/voice/tts`, faster-whisper into `.runtime/hf`).
 
 ### bridges (third-party API services)
 
