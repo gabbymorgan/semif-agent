@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from semif_agent.decisions import Request
-from semif_agent.llm import LLMClient, LLMError
+from semif_agent.llm import LLMClient, LLMError, SemIfLLMClient
 from semif_agent.skills import (
     CategoryDraft,
     SkillDraft,
@@ -207,3 +207,76 @@ def test_unreachable_endpoint_raises_llm_error():
     client = LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
     with pytest.raises(LLMError):
         client.chat([{"role": "user", "content": "hi"}])
+
+
+class _FakeEngine:
+    """Duck-typed stand-in for SemIfEngine: records generate() calls."""
+
+    def __init__(self, reply: str = "", error: Exception | None = None):
+        self.reply = reply
+        self.error = error
+        self.calls: list[dict] = []
+
+    def generate(self, messages, temperature: float = 0.0, max_tokens: int = 256) -> str:
+        self.calls.append(
+            {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        )
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+def test_semif_llm_client_generates_via_engine():
+    """provider == "semif": the loaded engine model answers; a per-call
+    max_tokens override wins over the client default."""
+    engine = _FakeEngine('{"title": "track_live", "description": "Follow it."}')
+    client = SemIfLLMClient(engine, temperature=0.0, max_tokens=256)
+    out = client.chat([{"role": "user", "content": "name this"}], max_tokens=128)
+    assert out == '{"title": "track_live", "description": "Follow it."}'
+    call = engine.calls[0]
+    assert call["max_tokens"] == 128
+    assert call["temperature"] == 0.0
+    assert call["messages"] == [{"role": "user", "content": "name this"}]
+
+
+def test_semif_llm_client_accepts_http_provider_kwargs():
+    """It is a drop-in for the HTTP clients: sampler/timeout/degeneration
+    arguments are accepted and ignored, defaults apply."""
+    engine = _FakeEngine("hello")
+    out = SemIfLLMClient(engine).chat(
+        [{"role": "user", "content": "hi"}],
+        top_p=0.9,
+        presence_penalty=0.1,
+        frequency_penalty=0.0,
+        timeout=5.0,
+        degeneration_check=lambda _text: None,
+    )
+    assert out == "hello"
+    assert engine.calls[0]["max_tokens"] == 256
+    assert engine.calls[0]["temperature"] == 0.0
+
+
+def test_semif_llm_client_wraps_engine_failure_as_llm_error():
+    client = SemIfLLMClient(_FakeEngine(error=RuntimeError("boom")))
+    with pytest.raises(LLMError):
+        client.chat([{"role": "user", "content": "hi"}])
+
+
+def test_build_llm_client_selects_provider():
+    """build_llm_client maps llm.provider to the right client class; the semif
+    branch needs no model and wraps the supplied engine."""
+    from semif_agent import cli
+    from semif_agent.console import ConsoleLLMClient
+
+    engine = _FakeEngine("x")
+    assert isinstance(
+        cli.build_llm_client({"llm": {"provider": "semif"}}, engine), SemIfLLMClient
+    )
+    assert isinstance(
+        cli.build_llm_client({"llm": {"provider": "ollama", "model": "m"}}, engine),
+        LLMClient,
+    )
+    assert isinstance(
+        cli.build_llm_client({"llm": {"provider": "opencode", "model": "m"}}, engine),
+        ConsoleLLMClient,
+    )

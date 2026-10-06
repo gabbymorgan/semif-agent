@@ -95,3 +95,64 @@ class SemIfEngine:
                 },
             )
 
+    def generate(
+        self,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 256,
+    ) -> str:
+        """Drive the pinned decision model in the normal way: text generation.
+
+        SemIf scoring reads option logits directly; this instead autoregressively
+        samples from the same llama.cpp context, e.g. for skill-tree authoring.
+        Generation decodes the chat template through the backend's low-level
+        context (there is no high-level chat-completion object on the CPU
+        backend), stopping at the tokenizer's eos token. The KV cache is cleared
+        at the start, so interleaving scoring and generation on one model is safe.
+
+        It shares `self._lock` with `call`, so a generation serializes against
+        decisions on the one loaded model — short JSON replies are seconds of
+        contention, and there is only ever one copy of the GGUF.
+        """
+        with self._lock:
+            model, tokenizer, metadata = self._ensure_loaded()
+            try:
+                import numpy
+
+                engine = model.engine
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+                engine.clear()
+                logits = engine._decode(prompt_ids, 0, 0, True)
+                generated: list[int] = []
+                rng = numpy.random.default_rng()
+                for position in range(max_tokens):
+                    token = _sample_token(logits, temperature, rng)
+                    if token == tokenizer.eos_token_id:
+                        break
+                    generated.append(token)
+                    logits = engine._decode([token], len(prompt_ids) + position, 0, True)
+                return tokenizer.decode(generated).strip()
+            except EngineUnavailable:
+                raise
+            except Exception as exc:
+                raise EngineUnavailable(f"generation failed: {exc}") from exc
+
+
+def _sample_token(logits, temperature: float, rng) -> int:
+    """Pick the next token from next-position logits: greedy or temperature."""
+    import numpy
+
+    if temperature <= 0.0:
+        return int(numpy.argmax(logits))
+    scaled = numpy.asarray(logits, dtype=numpy.float64) / max(temperature, 1e-6)
+    scaled = scaled - scaled.max()
+    probabilities = numpy.exp(scaled)
+    probabilities /= probabilities.sum()
+    return int(rng.choice(probabilities.size, p=probabilities))
+

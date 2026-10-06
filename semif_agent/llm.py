@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from .provider import OpenAICompatClient, ProviderError
+from .provider import OpenAICompatClient, ProviderError, SemIfEngineClient
 
 
 class LLMError(ProviderError):
@@ -102,3 +102,17 @@ class LLMClient(OpenAICompatClient):
         if start != -1 and end != -1:
             text = text[start : end + 1]
         return json.loads(text)
+
+
+class SemIfLLMClient(SemIfEngineClient):
+    """`llm` authoring backed by the loaded SemIf engine model.
+
+    The `llm.provider = "semif"` option: the same in-process GGUF the decision
+    engine already loaded generates the title/description (and any other `llm`
+    text) instead of calling an HTTP endpoint. Same `chat(...)` surface, same
+    graceful error contract — raises `LLMError` so the scheduler traces a
+    `draft_failed` and the LLM bridge reports 502 rather than crashing.
+    """
+
+    error_class = LLMError
+    label = "semif:llm"

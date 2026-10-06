@@ -136,7 +136,7 @@ if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" ]]; then
 fi
 
 # --- read per-machine values from config.json (flags override for this run) --
-IFS=$'\x1f' read -r CFG_LLM_URL CFG_LLM_MODEL CFG_CODEGEN_URL CFG_CODEGEN_MODEL \
+IFS=$'\x1f' read -r CFG_LLM_URL CFG_LLM_MODEL CFG_LLM_PROVIDER CFG_CODEGEN_URL CFG_CODEGEN_MODEL \
   SIMPLEX_PORT SIMPLEX_DISPLAY SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY < <(
   python3 - "$CONFIG" <<'PY'
 import json, sys
@@ -148,6 +148,7 @@ def strip_v1(u):
 print("\x1f".join([
     strip_v1(cfg.get("llm", {}).get("base_url")),
     str(cfg.get("llm", {}).get("model", "") or ""),
+    str(cfg.get("llm", {}).get("provider", "ollama") or "ollama").lower(),
     strip_v1(cfg.get("codegen", {}).get("base_url")),
     str(cfg.get("codegen", {}).get("model", "") or ""),
     str(s.get("port", "")),
@@ -163,6 +164,7 @@ LLM_URL="${LLM_URL:-${CFG_LLM_URL:-http://127.0.0.1:11434}}"
 CODEGEN_URL="${CODEGEN_URL:-$CFG_CODEGEN_URL}"
 LLM_MODEL="${LLM_MODEL:-$CFG_LLM_MODEL}"
 CODEGEN_MODEL="${CODEGEN_MODEL:-$CFG_CODEGEN_MODEL}"
+LLM_PROVIDER="${LLM_PROVIDER:-${CFG_LLM_PROVIDER:-ollama}}"
 
 if [[ -z "$SIMPLEX_PORT" || -z "$SIMPLEX_FORWARD_PORT" ]]; then
   echo "config.json: simplex_chat.port and simplex_chat.forward_port are required" >&2
@@ -178,7 +180,11 @@ with_v1() { local u="${1%/}"; [[ "$u" == */v1 ]] && printf '%s' "$u" || printf '
 LLM_V1="$(with_v1 "$LLM_URL")"
 
 echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex-chat sha256 ${SIMPLEX_SHA256:0:12}…"
-echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
+if [[ "$LLM_PROVIDER" == "semif" ]]; then
+  echo "== llm semif (in-process engine model) | codegen $CODEGEN_URL"
+else
+  echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
+fi
 echo "== runtime tree: $RUNTIME"
 
 mkdir -p "$RUNTIME" "$MODELS" "$HF_CACHE" "$TOOLDIR" "$SIMPLEX_DB" "$RUNTIME/simplex-forward" "$RUNTIME/lxmf" "$RUNTIME/voice" "$UNITS" "$USER_UNITS"
@@ -430,7 +436,11 @@ echo "== verifying imports"
 
 # The small self-assessment model runs on this machine's local ollama; ensure it
 # is pulled so assess/elicitation/fidelity work without a remote dependency.
-if [[ -z "$LLM_MODEL" ]]; then
+# With llm.provider == "semif" the loaded decision engine generates the text
+# in-process, so no ollama model/endpoint is involved.
+if [[ "$LLM_PROVIDER" == "semif" ]]; then
+  echo "== llm provider semif: the loaded engine model generates text in-process (no ollama pull/probe)"
+elif [[ -z "$LLM_MODEL" ]]; then
   echo "WARN: llm.model is not set in config.json — set it (and codegen.model) before starting the agent" >&2
 else
   echo "== llm ollama ($LLM_API), model $LLM_MODEL"

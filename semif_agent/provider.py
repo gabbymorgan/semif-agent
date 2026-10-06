@@ -8,6 +8,11 @@ provider logic once; subclasses set `base_url`/`model`, their sampler
 parameters, and the error classes they raise so existing callers keep catching
 their own types.
 
+It also holds `SemIfEngineClient`, the non-HTTP sibling that generates text
+from the in-process SemIf engine model (`engine.SemIfEngine.generate`) behind
+the same ``chat(...)`` surface, so the `llm` task can be served by the loaded
+decision model instead of an HTTP endpoint.
+
 Stdlib-only and imports nothing from the agent's own modules, so `codegen.py`
 (which imports `skills.py`, which imports `llm.py`) can depend on it without a
 cycle.
@@ -633,3 +638,66 @@ class OpenAICompatClient:
         if sock is None:
             sock = getattr(response, "sock", None)
         return sock
+
+
+class SemIfEngineClient:
+    """Text generation backed by the in-process SemIf engine model.
+
+    A drop-in sibling of `OpenAICompatClient` for the small `llm` task: instead
+    of speaking HTTP to an ollama/Console endpoint it drives the already-loaded
+    decision GGUF through `engine.generate(...)`. It exposes the same
+    ``chat(messages, max_tokens=..., temperature=..., ...)`` surface every `llm`
+    caller uses, so the provider choice is invisible to callers — title/
+    description authoring, gateway result cleanup, and the LLM bridge all reuse
+    it unchanged.
+
+    The engine is duck-typed (any object with ``generate(messages, temperature,
+    max_tokens)``); this module stays free of imports from the agent's own
+    modules, so subclasses in `llm.py` set the `LLMError` contract without a
+    cycle. Sampler/`timeout`/`degeneration_check` arguments are accepted for
+    signature compatibility and ignored: the engine generation is bounded by
+    `max_tokens` and serializes on the engine's own lock.
+
+    Any engine failure (`EngineUnavailable`, a missing GGUF, a sampling error)
+    is re-raised as `error_class` so the scheduler's graceful `draft_failed`
+    path and the LLM bridge's 502 path keep their existing contracts.
+    """
+
+    error_class = ProviderError
+    label = "semif"
+
+    def __init__(
+        self,
+        engine,
+        temperature: float = 0.0,
+        max_tokens: int = 256,
+        disable_thinking: bool = True,
+    ):
+        self.engine = engine
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        # The engine's `generate` always decodes with thinking disabled; the knob
+        # is accepted so the class mirrors the other providers' constructors.
+        self.disable_thinking = disable_thinking
+
+    def chat(
+        self,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        timeout: float | None = None,
+        degeneration_check: Callable[[str], str | None] | None = None,
+    ) -> str:
+        resolved_max = self.max_tokens if max_tokens is None else max_tokens
+        resolved_temp = self.temperature if temperature is None else temperature
+        try:
+            return self.engine.generate(
+                messages, temperature=resolved_temp, max_tokens=resolved_max
+            )
+        except Exception as exc:  # EngineUnavailable and anything the engine raises
+            raise self.error_class(
+                f"{self.label} generation failed: {exc}"
+            ) from exc

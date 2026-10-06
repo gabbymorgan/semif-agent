@@ -143,7 +143,10 @@ timers.py       in-process timer/alarm service (TimerService) owned by the
                 the gateway routes it to the originating chat, the dashboard
                 shows pending/fired). Real local compute (`compute` transport),
                 per-process, and deliberately NOT persisted across restarts.
-engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
+engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import);
+                call() scores a decision, generate() autoregressively samples
+                text from the same loaded model (shares the engine lock, clears
+                the KV cache) — backs the `semif` llm provider
 codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 bodies against CODEGEN.md (real actions via stdlib transports,
                 data from the runner via ctx.config, never embedded; bodies
@@ -169,12 +172,16 @@ llm.py          small OpenAI-compatible provider (LLMClient) that authors a
                 new category/skill title + description — its own endpoint/model,
                 deliberate separate from codegen; provider logic (SSE/budget/idle)
                 is shared from provider.py; `_parse_json` is also borrowed by the
-                authoring parsers
+                authoring parsers; SemIfLLMClient serves the same `llm` task from
+                the loaded SemIf engine model (llm.provider == "semif")
 provider.py    shared OpenAI-compatible chat transport (OpenAICompatClient:
                 SSE stream, token budget, idle watchdog, degeneration hook,
                 optional `api_key` bearer auth + `extra_headers`/`user_agent`,
                 and `query_context` to skip the ollama /api/show probe)
-                subclassed by llm.LLMClient and codegen.CodegenClient
+                subclassed by llm.LLMClient and codegen.CodegenClient;
+                SemIfEngineClient is the non-HTTP sibling that generates text
+                from the in-process SemIf engine behind the same `chat(...)`
+                surface (llm.provider == "semif")
 console.py      OpenCode Console provider: OpenCodeConsoleClient + the
                 ConsoleLLMClient / ConsoleCodegenClient endpoint subclasses.
                 Hosted, authenticated OpenAI-compatible Chat Completions API
@@ -183,7 +190,8 @@ console.py      OpenCode Console provider: OpenCodeConsoleClient + the
                 urllib's default Python-urllib/<ver>), and forces
                 disable_thinking off (the gateway 400s reasoning_effort).
                 Selected via the llm/codegen `provider` key
-                ("opencode" vs "ollama").
+                ("opencode" vs "ollama"; `llm` also accepts "semif", the
+                in-process engine model).
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
@@ -675,6 +683,21 @@ CLI, unit tests (24) + integration tests (2).
   larger/slower than `llm`). Title + description for new skills come from the
   separate small `llm` provider (its own endpoint/model, shared transport in
   `provider.py`); only the runnable code body uses codegen.
+- **Local engine as the `llm` provider: `"semif"`** (`provider.SemIfEngineClient`
+  + `llm.SemIfLLMClient`). Set `llm.provider = "semif"` to generate the
+  title/description (and any other `llm` text: gateway result cleanup, the LLM
+  bridge) from the **already-loaded SemIf decision model** in-process, with no
+  ollama endpoint and no `llm.model` — the pinned GGUF is the model. `engine.
+  SemIfEngine.generate` autoregressively samples through the backend's low-level
+  llama.cpp context (chat template with `enable_thinking=False`, KV cache
+  cleared), holding the same lock as `call`, so a reply briefly serializes
+  against routing/assessment on the one loaded model. The adapter is a drop-in
+  sibling of `OpenAICompatClient` (same `chat(messages, max_tokens=...,
+  temperature=..., ...)` surface; HTTP-only args accepted and ignored) and
+  raises `LLMError` on any engine failure, so the scheduler's graceful
+  `draft_failed` path and the LLM bridge's 502 path are unchanged. Knobs:
+  `llm.semif.temperature` (0 = greedy) and `llm.semif.max_tokens`. Only the
+  `llm` task supports it (codegen still needs a real code model).
 - **Alternate hosted provider: OpenCode Console** (`console.py`). Either
   endpoint can run against the hosted, authenticated OpenAI-compatible Console
   inference API instead of local ollama: set `llm.provider` / `codegen.provider`

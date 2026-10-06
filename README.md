@@ -367,9 +367,12 @@ semif_agent/
                     create gates, intent guard, tiered config resolution
   codegen.py        OpenAI-compatible client; body/elicitation/test generation;
                     parse/validate; CONTRACT + INTEGRATION extraction; test runner
-  provider.py       shared OpenAI-compatible transport (SSE/budget/idle/watchdog)
-  engine.py         SemIfEngine -> semif_phase1.llamacpp_backend (lazy import)
-  llm.py            small OpenAI-compatible provider; authors new title + description
+  provider.py       shared OpenAI-compatible transport (SSE/budget/idle/watchdog);
+                    SemIfEngineClient generates text from the in-process engine
+  engine.py         SemIfEngine -> semif_phase1.llamacpp_backend (lazy import);
+                    call() scores, generate() samples text
+  llm.py            small provider; authors new title + description
+                    (ollama / opencode / the loaded engine via `semif`)
   log.py            decisions.jsonl rows {state, question, options, probs, ...}
   trace.py          runs.jsonl lifecycle events keyed by run_id
   dream.py          NLL / weighted CE / accuracy / ECE cost report
@@ -414,7 +417,10 @@ machines:
   newly created category/skill. Deliberately its own endpoint/model, so it can
   stay local even when `codegen` is remote; it uses the same provider transport
   (`provider.py`) and an unreachable endpoint is graceful (the request is not
-  re-dispatched), never fatal.
+  re-dispatched), never fatal. Its `provider` can be `"ollama"` (default),
+  `"opencode"` (the hosted Console API), or `"semif"` — the already-loaded
+  decision engine model generates in-process, with no endpoint and no
+  `llm.model` at all (see the `llm.semif` block in `config.json`).
 
 The **decision engine is separate** and runs via llama.cpp CPU (or Vulkan if your
 build enables it), not ollama.

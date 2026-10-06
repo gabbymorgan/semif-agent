@@ -29,7 +29,7 @@ from .console import (
 )
 from .decisions import DecisionRequest, Option
 from .engine import EngineConfig, EngineUnavailable, SemIfEngine
-from .llm import LLMClient
+from .llm import LLMClient, SemIfLLMClient
 from .log import DecisionLog
 from .scheduler import Scheduler
 from .skills import tree_summary
@@ -231,14 +231,28 @@ def build_codegen_client(config: dict) -> CodegenClient:
     )
 
 
-def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
-    engine = SemIfEngine(build_engine_config(config))
+def build_llm_client(config: dict, engine):
+    """Build the `llm` title/description client from the `llm` config block.
+
+    `provider` selects the backend: `"semif"` drives the already-loaded SemIf
+    engine model in-process (the GGUF is the model — no endpoint or `model` is
+    needed), `"opencode"` the hosted Console client, and anything else the
+    default ollama-compatible `LLMClient`. Shared by `build_scheduler` and tests
+    so both exercise the configured provider rather than assuming ollama.
+    """
     llm_cfg = config.get("llm", {}) or {}
-    llm_provider = str(llm_cfg.get("provider", "ollama") or "ollama").lower()
-    llm_cls = ConsoleLLMClient if llm_provider == "opencode" else LLMClient
-    llm_endpoint = _provider_endpoint(llm_cfg, "http://localhost:11434/v1")
-    llm = llm_cls(
-        base_url=llm_endpoint["base_url"],
+    provider = str(llm_cfg.get("provider", "ollama") or "ollama").lower()
+    if provider == "semif":
+        semif_cfg = llm_cfg.get("semif", {}) or {}
+        return SemIfLLMClient(
+            engine,
+            temperature=float(semif_cfg.get("temperature", 0.0)),
+            max_tokens=int(semif_cfg.get("max_tokens", 256)),
+        )
+    llm_cls = ConsoleLLMClient if provider == "opencode" else LLMClient
+    endpoint = _provider_endpoint(llm_cfg, "http://localhost:11434/v1")
+    return llm_cls(
+        base_url=endpoint["base_url"],
         model=_required_model(llm_cfg, "llm"),
         timeout=float(llm_cfg.get("timeout", 600.0)),
         stream=bool(llm_cfg.get("stream", False)),
@@ -250,10 +264,15 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         presence_penalty=_opt_float(llm_cfg.get("presence_penalty")),
         frequency_penalty=_opt_float(llm_cfg.get("frequency_penalty")),
         disable_thinking=bool(llm_cfg.get("disable_thinking", True)),
-        api_key=llm_endpoint["api_key"],
-        extra_headers=llm_endpoint["extra_headers"],
-        user_agent=llm_endpoint["user_agent"],
+        api_key=endpoint["api_key"],
+        extra_headers=endpoint["extra_headers"],
+        user_agent=endpoint["user_agent"],
     )
+
+
+def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
+    engine = SemIfEngine(build_engine_config(config))
+    llm = build_llm_client(config, engine)
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
     codegen_cfg = config.get("codegen", {})
