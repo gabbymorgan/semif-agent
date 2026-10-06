@@ -65,6 +65,7 @@ class VoiceAdapter(GatewayAdapter):
                 if message is None:
                     self.daemon.stop()
                     return
+                self.daemon._event("gateway_reply_dequeued", chars=len(message.text))
                 self.daemon.speak(message.text)
 
         threading.Thread(target=_pump, name="voice-outbound-pump", daemon=True).start()

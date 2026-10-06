@@ -719,6 +719,9 @@ class VoiceDaemon:
         speech_ms = self.frame_ms
         silence_ms = 0
         started = time.time()
+        #: Wall-clock of the most recent frame the VAD called speech — the
+        #: "last word spoken" boundary the latency breakdown measures from.
+        last_speech_ts = started
         while not self._stop.is_set():
             if self._speaking.is_set():
                 break  # a reply started; stop capturing so we don't transcribe it
@@ -731,6 +734,7 @@ class VoiceDaemon:
             if engines.vad.is_speech(pcm, self.sample_rate):
                 speech_ms += self.frame_ms
                 silence_ms = 0
+                last_speech_ts = time.time()
             else:
                 silence_ms += self.frame_ms
             if silence_ms >= self.vad_silence_ms:
@@ -743,6 +747,7 @@ class VoiceDaemon:
                 silence_ms=silence_ms,
             )
             return b""
+        self._event("voice_speech_end", ts=last_speech_ts, speech_ms=speech_ms)
         self._event("voice_utterance", frames=len(frames), speech_ms=speech_ms)
         return b"".join(frames)
 
@@ -776,11 +781,23 @@ class VoiceDaemon:
             text = (clipped or text[: self.max_speak_chars]) + "…"
         engines = self._ensure_engines()
         self._speaking.set()
+        self._event("voice_speak_start", chars=len(text))
         try:
+            synth_started = time.time()
             pcm, sample_rate = engines.tts.synthesize(text)
+            self._event(
+                "voice_tts_synth",
+                synth_s=round(time.time() - synth_started, 3),
+                chars=len(text),
+                audio_s=round(len(pcm) / BYTES_PER_SAMPLE / sample_rate, 3)
+                if pcm and sample_rate
+                else 0.0,
+            )
             if pcm:
                 with self._audio_lock:
                     engines.audio.open_output(sample_rate)
+                    # The instant the first reply audio is handed to the device.
+                    self._event("voice_playback_start", ts=time.time(), chars=len(text))
                     engines.audio.write(pcm, sample_rate)
             self._event("voice_spoke", chars=len(text))
         except Exception as exc:
@@ -800,6 +817,6 @@ class VoiceDaemon:
 
     # ---- tracing ----
 
-    def _event(self, kind: str, **fields) -> None:
+    def _event(self, kind: str, ts: float | None = None, **fields) -> None:
         if self.trace is not None:
-            self.trace.append(kind, "?", **fields)
+            self.trace.append(kind, "?", ts=ts, **fields)

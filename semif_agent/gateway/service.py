@@ -24,6 +24,7 @@ from __future__ import annotations
 import queue
 import re
 import threading
+import time
 
 from .base import InboundMessage, OutboundMessage
 from .humanize import Humanizer
@@ -426,6 +427,12 @@ class GatewayService:
 
     # ---- outbound ----
 
+    def _trace(self, kind: str, **fields) -> None:
+        """Best-effort trace (a test double's scheduler may have no trace log)."""
+        trace = getattr(self.scheduler, "trace", None)
+        if trace is not None:
+            trace.append(kind, "?", **fields)
+
     def _reply(
         self, platform: str, chat_id: str, text: str, kind: str = "reply"
     ) -> None:
@@ -442,7 +449,13 @@ class GatewayService:
             # result before optionally cleaning it up.
             text = _result_detail(text)
             if humanize:
+                started = time.time()
                 text = self.humanizer.humanize(text)
+                self._trace(
+                    "humanize",
+                    elapsed_s=round(time.time() - started, 3),
+                    chars=len(text),
+                )
         prefix = str(self._platform_cfg.get(platform, {}).get("reply_prefix", "") or "")
         if prefix:
             text = f"{prefix}{text}"
@@ -451,4 +464,5 @@ class GatewayService:
         target_queue = self.outbound.get(platform)
         if target_queue is None:
             return
+        self._trace("gateway_reply_queued", reply_kind=kind, chars=len(text))
         target_queue.put(OutboundMessage(chat_id=str(chat_id), text=text))

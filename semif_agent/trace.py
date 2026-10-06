@@ -19,8 +19,10 @@ class TraceLog:
     def __init__(self, path: str = "data/runs.jsonl"):
         self.path = Path(path)
 
-    def append(self, kind: str, run_id: str, **fields) -> None:
-        row = {"kind": kind, "run_id": run_id, "ts": time.time(), **fields}
+    def append(self, kind: str, run_id: str, ts: float | None = None, **fields) -> None:
+        # `ts` lets a caller record the moment an event *happened* (e.g. the last
+        # speech frame of an utterance) rather than when the row was written.
+        row = {"kind": kind, "run_id": run_id, "ts": time.time() if ts is None else ts, **fields}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as handle:
             handle.write(json.dumps(row) + "\n")

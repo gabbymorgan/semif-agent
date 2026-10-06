@@ -42,6 +42,14 @@ class DecisionLog:
         }
         if extra:
             row["extra"] = extra
+        result_extra = getattr(result, "extra", None) or {}
+        timing = {
+            key: result_extra[key]
+            for key in ("input_tokens", "forward_seconds", "total_seconds")
+            if key in result_extra
+        }
+        if timing:
+            row.setdefault("extra", {})["timing"] = timing
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as handle:
             handle.write(json.dumps(row) + "\n")
