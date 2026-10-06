@@ -37,6 +37,7 @@ from datetime import datetime, time, timedelta, timezone
 
 from semif_agent.decisions import DecisionRequest, Option
 from semif_agent.skills import ActionResult
+from semif_agent.timers import local_now
 
 INTEGRATION = {
     "service": "nextcloud_calendar",
@@ -125,9 +126,10 @@ class BridgeError(Exception):
     """A real failure talking to the local LLM bridge."""
 
 
-def _now():
-    """Current local time (aware). A test seam; the body never freezes time."""
-    return datetime.now().astimezone()
+def _now(ctx):
+    """Current time (aware) in the user's timezone: the top-level `timezone`
+    config value when set, else host local. A test seam; never freezes time."""
+    return local_now(ctx.config)
 
 
 # ---- transport ----
@@ -531,7 +533,7 @@ def act(ctx, request):
     title = fields["title"]
     description = fields["description"]
 
-    now = _now()
+    now = _now(ctx)
     parsed = _parse_when(request.text, now)
 
     if answers.get("title"):

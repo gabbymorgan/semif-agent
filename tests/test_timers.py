@@ -94,3 +94,41 @@ def test_non_positive_duration_rejected():
             raise AssertionError("expected ValueError for a non-positive duration")
     finally:
         service.stop()
+
+
+def test_resolve_timezone_falls_back_to_host_local():
+    from zoneinfo import ZoneInfo
+
+    from semif_agent.timers import resolve_timezone
+
+    assert resolve_timezone(None) is None
+    assert resolve_timezone({}) is None
+    assert resolve_timezone({"timezone": ""}) is None
+    assert resolve_timezone({"timezone": "   "}) is None
+    assert resolve_timezone({"timezone": "Not/AZone"}) is None
+    assert resolve_timezone({"timezone": "America/Chicago"}) == ZoneInfo("America/Chicago")
+
+
+def test_local_now_uses_configured_timezone():
+    from semif_agent.timers import local_now
+
+    now = local_now({"timezone": "America/Chicago"})
+    assert now.tzinfo is not None
+    assert now.utcoffset() in (timedelta(hours=-5), timedelta(hours=-6))
+    # No configured zone -> an aware host-local time, never naive.
+    assert local_now({}).tzinfo is not None
+
+
+def test_timer_due_and_fired_time_use_configured_timezone():
+    from zoneinfo import ZoneInfo
+
+    service = TimerService(timezone="America/Chicago")
+    try:
+        timer = service.set_timer(3600, "1 hour")
+        assert timer.due_datetime().tzinfo == ZoneInfo("America/Chicago")
+        # 1700000000 == 2023-11-14 22:13:20 UTC == 16:13:20 in Chicago (CST).
+        message = service._message(timer, 1700000000)
+        expected = datetime.fromtimestamp(1700000000, tz=ZoneInfo("America/Chicago")).strftime("%H:%M")
+        assert expected in message, message
+    finally:
+        service.stop()

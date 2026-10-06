@@ -1,8 +1,10 @@
 """Report the current local time.
 
-Real local compute: reads the host clock and formats it in the host's local
-timezone. No external service and no configuration — the `compute` transport is
-the codebase's home for a body that acts on the machine itself.
+Real local compute: reads the host clock and formats it in the user's
+timezone — the top-level `timezone` config value (an IANA name such as
+`America/Chicago`) when set, otherwise the host's local timezone. No external
+service; the `compute` transport is the codebase's home for a body that acts on
+the machine itself.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from semif_agent.skills import ActionResult
+from semif_agent.timers import local_now
 
 INTEGRATION = {"service": "local_clock", "transport": "compute", "config_vars": []}
 
@@ -24,7 +27,7 @@ def _offset_text(now: datetime) -> str:
 
 
 def act(ctx, request):
-    now = datetime.now().astimezone()
+    now = local_now(ctx.config)
     zone = now.tzname() or "local"
     message = (
         f"It is {now.strftime('%H:%M')} "

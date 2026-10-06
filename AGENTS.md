@@ -736,7 +736,13 @@ CLI, unit tests (24) + integration tests (2).
   bridge) and `simplex.connect_link` (show/create the forwarding bot's contact
   link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
   `time.set_alarm` are the local time utilities (`compute` transport, empty
-  contract) — they read the host clock and schedule on `ctx.timers`;
+  contract) — they read the host clock and schedule on `ctx.timers`. Local time
+  is the top-level `timezone` config value (an IANA name such as
+  `America/Chicago`; `timers.local_now`/`resolve_timezone` resolve it via
+  `zoneinfo`), falling back to the host's own timezone when it is empty or
+  unknown; `TimerService` formats due/fired times in that zone too. The calendar
+  seeds derive "now" the same way, so a request time is parsed in the user's
+  zone rather than the host's;
   `tests/test_seed_skills.py` keeps them honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns

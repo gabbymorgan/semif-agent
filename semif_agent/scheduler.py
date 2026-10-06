@@ -283,7 +283,7 @@ class Scheduler:
         merge_seed_store(self.tree, self.seed_store, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
         apply_tombstones(self.tree, self.deleted)
-        self.timers = TimerService(trace=self.trace)
+        self.timers = TimerService(trace=self.trace, timezone=config.get("timezone"))
         self.ctx = ActionContext(
             engine=self.engine, config=config, timers=self.timers, admin=self
         )

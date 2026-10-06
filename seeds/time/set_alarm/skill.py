@@ -1,8 +1,10 @@
 """Set an alarm for a specific time of day that notifies when it goes off.
 
 Real local compute: parses a wall-clock time out of the request and schedules it
-on the in-process timer service (`ctx.timers`). A time already past rolls to the
-next day. When it fires, the front end that set it notifies the user.
+on the in-process timer service (`ctx.timers`). The wall-clock time is read in
+the user's timezone — the top-level `timezone` config value when set, otherwise
+the host's local timezone. A time already past rolls to the next day. When it
+fires, the front end that set it notifies the user.
 
 If no time can be parsed the body pauses and asks for one, stashing the answer
 in `request.meta` so the single-phase `act` re-run does not ask again.
@@ -14,6 +16,7 @@ import re
 from datetime import datetime, time, timedelta
 
 from semif_agent.skills import ActionResult
+from semif_agent.timers import local_now
 
 INTEGRATION = {"service": "local_clock", "transport": "compute", "config_vars": []}
 
@@ -63,7 +66,7 @@ def act(ctx, request):
         request.meta.pop("alarm_awaiting", None)
 
     text = request.meta.get("alarm_time_text") or request.text
-    now = datetime.now().astimezone()
+    now = local_now(ctx.config)
     when = _parse_time(text, now)
     if when is None:
         request.meta["alarm_awaiting"] = True

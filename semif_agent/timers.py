@@ -19,7 +19,31 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def resolve_timezone(config) -> tzinfo | None:
+    """The tzinfo named by `config["timezone"]`, or None for host local.
+
+    An empty/absent name or an unknown zone falls back to the host's local
+    timezone (None), so a misconfigured value never breaks a run.
+    """
+    name = str((config or {}).get("timezone", "") or "").strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None
+
+
+def local_now(config=None) -> datetime:
+    """Current time, aware: the configured timezone, else the host's local zone."""
+    tz = resolve_timezone(config)
+    if tz is None:
+        return datetime.now().astimezone()
+    return datetime.now(tz)
 
 
 def format_duration(seconds: float) -> str:
@@ -51,8 +75,12 @@ class Timer:
     source: str
     due_at: float  # epoch seconds
     created_at: float = field(default_factory=time.time)
+    # tzinfo used to format the due time for the user (None = host local).
+    tz: tzinfo | None = None
 
     def due_datetime(self) -> datetime:
+        if self.tz is not None:
+            return datetime.fromtimestamp(self.due_at, tz=self.tz)
         return datetime.fromtimestamp(self.due_at).astimezone()
 
     def as_dict(self) -> dict:
@@ -102,9 +130,10 @@ class TimerService:
     `fired()` keeps a bounded history for the dashboard.
     """
 
-    def __init__(self, trace=None, history: int = 50):
+    def __init__(self, trace=None, history: int = 50, timezone: str | None = None):
         self.trace = trace
         self._history_limit = int(history)
+        self._tz = resolve_timezone({"timezone": timezone})
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
         self._heap: list[tuple[float, int, Timer]] = []
@@ -140,6 +169,7 @@ class TimerService:
             label=str(label or ""),
             source=str(source or ""),
             due_at=float(due_at),
+            tz=self._tz,
         )
         with self._cv:
             self._seq += 1
@@ -243,8 +273,13 @@ class TimerService:
             except Exception:
                 pass
 
+    def _to_local(self, ts: float) -> datetime:
+        if self._tz is not None:
+            return datetime.fromtimestamp(ts, tz=self._tz)
+        return datetime.fromtimestamp(ts).astimezone()
+
     def _message(self, timer: Timer, fired_at: float) -> str:
-        when = datetime.fromtimestamp(fired_at).astimezone().strftime("%H:%M")
+        when = self._to_local(fired_at).strftime("%H:%M")
         if timer.kind == "alarm":
             body = timer.label or "Alarm"
             return f"Alarm: {body} — it's {when}."

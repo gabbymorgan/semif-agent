@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from semif_agent.decisions import DecisionRequest, Option
 from semif_agent.skills import ActionResult
+from semif_agent.timers import local_now
 
 INTEGRATION = {
     "service": "nextcloud_calendar",
@@ -76,9 +77,10 @@ class CalDavError(Exception):
     """A real failure talking to the calendar service."""
 
 
-def _now():
-    """Current local time (aware). A test seam; the body never freezes time."""
-    return datetime.now().astimezone()
+def _now(ctx):
+    """Current time (aware) in the user's timezone: the top-level `timezone`
+    config value when set, else host local. A test seam; never freezes time."""
+    return local_now(ctx.config)
 
 
 # ---- transport ----
@@ -378,7 +380,7 @@ def act(ctx, request):
             decisions=decisions,
         )
 
-    now = _now()
+    now = _now(ctx)
     local_tz = now.tzinfo or timezone.utc
     window_start = now - timedelta(days=1)
     window_end = now + timedelta(days=LOOKAHEAD_DAYS)

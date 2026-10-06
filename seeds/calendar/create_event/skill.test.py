@@ -25,7 +25,7 @@ from semif_agent.skills import ActionContext
 import skill
 
 FIXED_NOW = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
-skill._now = lambda: FIXED_NOW
+skill._now = lambda ctx: FIXED_NOW
 
 DEFAULT_LLM_REPLY = {"title": "event", "description": ""}
 

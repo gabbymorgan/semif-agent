@@ -1,14 +1,14 @@
 """Report today's date.
 
-Real local compute: reads the host clock and formats the local calendar date.
-No external service and no configuration.
+Real local compute: reads the host clock and formats the calendar date in the
+user's timezone — the top-level `timezone` config value (an IANA name) when set,
+otherwise the host's local timezone. No external service.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from semif_agent.skills import ActionResult
+from semif_agent.timers import local_now
 
 INTEGRATION = {"service": "local_clock", "transport": "compute", "config_vars": []}
 
@@ -16,6 +16,6 @@ CONTRACT = {}
 
 
 def act(ctx, request):
-    today = datetime.now().astimezone().date()
+    today = local_now(ctx.config).date()
     message = f"Today is {today.strftime('%A, %B %d, %Y')} ({today.isoformat()})."
     return ActionResult(action_log=f"time.date: {message}", new_state=message)

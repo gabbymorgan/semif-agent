@@ -3,8 +3,9 @@
 Real local compute: parses a duration out of the request (digits or words) and
 schedules it on the in-process timer service (`ctx.timers`). When it fires, the
 front end that set it notifies the user — the REPL prints it, the gateway sends
-it back to the originating chat, the dashboard shows it. A timer lives in the
-process that set it and does not survive a restart.
+it back to the originating chat, the dashboard shows it. The due time is shown
+in the user's timezone (the top-level `timezone` config value, else host local).
+A timer lives in the process that set it and does not survive a restart.
 
 If no duration can be parsed the body pauses and asks for one, stashing the
 answer in `request.meta` so the single-phase `act` re-run does not ask again.
