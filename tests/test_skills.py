@@ -1022,7 +1022,7 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
             ]
         }
         queued: list = []
-        scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+        scheduler._queue_draft = lambda request, category, kind: queued.append(
             (category, kind)
         )
         return scheduler, queued
@@ -1071,7 +1071,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
         Skill(name="next_message", category="simplex", description="Read the next SimpleX message."),
     ]
     queued: list = []
-    scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+    scheduler._queue_draft = lambda request, category, kind: queued.append(
         (category, kind)
     )
     request = Request("send a simplex message to pepper")
@@ -1154,7 +1154,7 @@ def test_creation_approval_off_proceeds(tmp_path):
     returns immediately and posts nothing."""
     scheduler = _scheduler(tmp_path)
     job = DraftAuthor(
-        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+        request=Request("book a trip"), category=None, kind="category"
     )
     assert scheduler._request_approval(job, "category", "travel", "Trips.") is True
     assert scheduler.pending_approvals() == []
@@ -1165,7 +1165,7 @@ def test_creation_approval_approved_proceeds(tmp_path):
     scheduler.creation_approval = True
     scheduler.defer_questions = True
     job = DraftAuthor(
-        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+        request=Request("book a trip"), category=None, kind="category"
     )
     result = {}
     thread = threading.Thread(
@@ -1188,7 +1188,7 @@ def test_creation_approval_denied_aborts(tmp_path):
     scheduler.creation_approval = True
     scheduler.defer_questions = True
     job = DraftAuthor(
-        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+        request=Request("book a trip"), category="travel", kind="skill"
     )
     result = {}
     thread = threading.Thread(
@@ -1211,7 +1211,7 @@ def test_creation_approval_timeout_denies(tmp_path):
     scheduler.defer_questions = True
     scheduler.elicitation_wait = 0.1
     job = DraftAuthor(
-        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+        request=Request("book a trip"), category="travel", kind="skill"
     )
     assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is False
     assert any(
@@ -1226,7 +1226,7 @@ def test_creation_approval_without_front_end_denies(tmp_path):
     scheduler.creation_approval = True
     scheduler.defer_questions = False
     job = DraftAuthor(
-        request=Request("book a trip"), category="travel", weight=0.5, kind="skill"
+        request=Request("book a trip"), category="travel", kind="skill"
     )
     assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is False
     assert any(
@@ -1242,7 +1242,6 @@ def test_creation_approval_chain_skips_second_prompt(tmp_path):
     job = DraftAuthor(
         request=Request("book a trip"),
         category="travel",
-        weight=0.5,
         kind="skill",
         approved=True,
     )
@@ -1261,7 +1260,7 @@ def test_author_category_denied_does_not_register(tmp_path, monkeypatch):
         lambda client, request, tree: CategoryDraft(name="travel", description="Trips."),
     )
     job = DraftAuthor(
-        request=Request("book a trip"), category=None, weight=0.5, kind="category"
+        request=Request("book a trip"), category=None, kind="category"
     )
     thread = threading.Thread(target=scheduler._author_category, args=(job,))
     thread.start()
@@ -1283,7 +1282,7 @@ def test_author_skill_denied_does_not_register(tmp_path, monkeypatch):
         ),
     )
     job = DraftAuthor(
-        request=Request("book a flight"), category="travel", weight=0.5, kind="skill"
+        request=Request("book a flight"), category="travel", kind="skill"
     )
     thread = threading.Thread(target=scheduler._author_skill, args=(job,))
     thread.start()
@@ -1334,7 +1333,7 @@ def test_dispatch_skill_awaiting_body_does_not_reauthor(tmp_path):
     scheduler = _scheduler(tmp_path)
     request = Request("track my package")
     request.meta["awaiting_skill_body"] = ["tracking", "track_live"]
-    result = scheduler._dispatch_skill(request, "tracking", 0.5)
+    result = scheduler._dispatch_skill(request, "tracking")
     assert result.kind == "create_skill"
     assert "track_live" in result.summary
     assert "restart" in result.summary
@@ -1369,7 +1368,7 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
         leaf = scheduler.tree["tracking"][0]
 
         request = Request("track my drone delivery in real time")
-        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5)
+        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."))
 
         assert leaf.writing is True
         deadline = time.monotonic() + 10
@@ -1420,7 +1419,7 @@ def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
         leaf = scheduler.tree["tracking"][0]
 
         request = Request("track my drone delivery in real time")
-        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5)
+        scheduler._start_skill_write(request, "tracking", SkillDraft(name="track_live", description="Follow a package."))
 
         deadline = time.monotonic() + 10
         failed = None
@@ -1470,7 +1469,7 @@ def test_async_skill_write_fails_gracefully_on_unimported_names(tmp_path):
 
         request = Request("track my drone delivery in real time")
         scheduler._start_skill_write(
-            request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5
+            request, "tracking", SkillDraft(name="track_live", description="Follow a package.")
         )
 
         deadline = time.monotonic() + 10
@@ -1642,7 +1641,7 @@ def test_deferred_elicitation_asks_and_records(tmp_path):
         scheduler.elicitation_enabled = True
         request = Request("track my package")
         draft = SkillDraft(name="track_live", description="Follow a package.")
-        job = SkillWrite(request=request, category="tracking", draft=draft, weight=0.5)
+        job = SkillWrite(request=request, category="tracking", draft=draft)
 
         def answerer() -> None:
             deadline = time.monotonic() + 5
@@ -1680,7 +1679,7 @@ def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
 
         request = Request("track my drone delivery in real time")
         scheduler._start_skill_write(
-            request, "tracking", SkillDraft(name="track_live", description="Follow a package."), 0.5
+            request, "tracking", SkillDraft(name="track_live", description="Follow a package.")
         )
 
         deadline = time.monotonic() + 10
@@ -1751,7 +1750,6 @@ def test_post_questions_asks_one_at_a_time(tmp_path):
         request=Request("track it"),
         category="tracking",
         draft=SkillDraft(name="probe", description="Probe."),
-        weight=0.5,
     )
     result: dict = {}
     thread = threading.Thread(
@@ -1790,7 +1788,6 @@ def test_post_questions_timeout_drops_remaining(tmp_path):
         request=Request("track it"),
         category="tracking",
         draft=SkillDraft(name="probe", description="Probe."),
-        weight=0.5,
     )
     result: dict = {}
     thread = threading.Thread(
@@ -1818,7 +1815,6 @@ def test_post_questions_times_out(tmp_path):
         request=Request("track it"),
         category="tracking",
         draft=SkillDraft(name="probe", description="Probe."),
-        weight=0.5,
     )
     assert scheduler._post_questions(job, ["Q?"]) == {}
     assert scheduler.pending_questions() == []

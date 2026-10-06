@@ -83,7 +83,7 @@ def _result_detail(text: str) -> str:
 
 def _reply_kind(status: str) -> str:
     """Classify a scheduler outcome for a result-only front end."""
-    if status in ("running", "preempted", "ran"):
+    if status in ("running", "ran"):
         return "result"
     if status == "needs_input":
         return "question"

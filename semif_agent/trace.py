@@ -2,7 +2,7 @@
 scheduler.
 
 Decision rows live in `decisions.jsonl` (SemIf-compatible). Lifecycle events
-(submit, dropped, queued, preempted, assessed, requeued, ...) live here in
+(submit, dropped, queued, dequeued, assessed, requeued, ...) live here in
 `runs.jsonl`, keyed by `run_id` (the request id) so the dashboard can rebuild
 each run's flow without touching the decision-log contract. Both files are
 append-only; replays read them in order.

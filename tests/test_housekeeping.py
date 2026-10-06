@@ -346,7 +346,7 @@ def test_regen_skill_rewrites_existing_body(tmp_path, monkeypatch):
     _add_skill(scheduler, "calendar", "foo")
     captured = {}
 
-    def fake_start(request, category, draft, weight, repair_evidence=None, reason_kind="run_failure"):
+    def fake_start(request, category, draft, repair_evidence=None, reason_kind="run_failure"):
         captured.update(
             category=category,
             repair_evidence=repair_evidence,
@@ -371,7 +371,7 @@ def test_regen_skill_stub_has_no_evidence(tmp_path, monkeypatch):
     ]
     captured = {}
 
-    def fake_start(request, category, draft, weight, repair_evidence=None, reason_kind="run_failure"):
+    def fake_start(request, category, draft, repair_evidence=None, reason_kind="run_failure"):
         captured.update(repair_evidence=repair_evidence, reason_kind=reason_kind)
 
     monkeypatch.setattr(scheduler, "_start_skill_write", fake_start)
@@ -389,7 +389,6 @@ def test_cancel_skill_build_discards_and_deletes(tmp_path):
             request=Request("build foo"),
             category="calendar",
             draft=SkillDraft(name="foo", description="d"),
-            weight=0.5,
         )
     )
 
@@ -411,7 +410,6 @@ def test_consume_cancelled_discards_queued_write(tmp_path):
         request=Request("build foo"),
         category="calendar",
         draft=SkillDraft(name="foo", description="d"),
-        weight=0.5,
     )
     scheduler._cancelled.add(("calendar", "foo"))
     assert scheduler._consume_cancelled(job) is True

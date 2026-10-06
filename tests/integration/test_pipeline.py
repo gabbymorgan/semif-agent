@@ -111,7 +111,7 @@ def test_pipeline_end_to_end(tmp_path):
     for text in inputs:
         status, detail = scheduler.submit(text)
         print(f"[{status}] {detail}")
-        assert status in ("running", "preempted", "queued", "rejected")
+        assert status in ("running", "queued", "rejected")
 
     scheduler.run_queue()
 
@@ -263,7 +263,7 @@ def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
         ),
     ]
     queued: list = []
-    scheduler._queue_draft = lambda request, category, kind, weight: queued.append(
+    scheduler._queue_draft = lambda request, category, kind: queued.append(
         (category, kind)
     )
 
@@ -287,7 +287,7 @@ def test_navigate_routes_unmatched_action_to_create_skill(tmp_path):
     assert read.skill == "next_message"
 
 
-def test_busy_choice_path(tmp_path):
+def test_busy_queue_path(tmp_path):
     config = load_config()
     require_real(config)
     _isolate_runtime(config, tmp_path)
@@ -297,7 +297,7 @@ def test_busy_choice_path(tmp_path):
     scheduler.busy("driving on the freeway", skill="driving")
     status, detail = scheduler.submit("tell me if my package was delivered")
     print(f"[{status}] {detail}")
-    assert status in ("preempted", "queued")
+    assert status == "queued"
     scheduler.idle()
 
 
@@ -442,7 +442,6 @@ def test_fidelity_gate_is_a_real_semif_decision(tmp_path):
         draft=SkillDraft(
             name="track_delivery", description="Check a package's delivery status."
         ),
-        weight=0.5,
     )
     undeclared = '''\
 from semif_agent.skills import ActionResult
@@ -502,7 +501,7 @@ def test_create_skill_empty_category_does_not_wedge(tmp_path):
     for _ in range(2):
         status, detail = scheduler.submit("look up flights to japan for february")
         print(f"[{status}] {detail}")
-        assert status in ("running", "preempted", "queued", "rejected", "error")
+        assert status in ("running", "queued", "rejected", "error")
         assert scheduler.current is None, "scheduler must never stay wedged after a submit"
 
     status, detail = scheduler.submit("tell me if my package was delivered")
@@ -536,7 +535,7 @@ def test_create_simplex_send_skill(tmp_path):
 
     status, detail = scheduler.submit("send a simplex message to pepper saying hi")
     print(f"[{status}] {detail}")
-    assert status in ("running", "preempted", "queued", "rejected")
+    assert status in ("running", "queued", "rejected")
     assert "new skill for simplex" in detail, (
         "a send request must route to create_skill for simplex"
     )

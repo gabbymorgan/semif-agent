@@ -1,10 +1,11 @@
-"""The scheduler: choice, score, queue, dispatch.
+"""The scheduler: queue, dispatch.
 
-Every SemIf decision (choice, score, navigation, sub-decision) is logged.
-A high-priority input can preempt the current process, which requeues with its
-state preserved; a deferred input is scored and queued by urgency. There is no
-up-front handle/ignore gate: every input is dispatched, and inputs that are not
-tasks fall through navigation into the closed `response` tree of canned replies.
+Every SemIf decision (navigation, sub-decision) is logged. Input that arrives
+while the single execution slot is busy waits in a strict FIFO queue and is
+dispatched in arrival order; there is no urgency scoring and no preemption.
+There is no up-front handle/ignore gate: every input is dispatched, and inputs
+that are not tasks fall through navigation into the closed `response` tree of
+canned replies.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from .engine import EngineUnavailable, SemIfEngine
 from .llm import LLMClient
 from .log import DecisionLog
 from .provider import ProviderError
-from .queue import UrgencyQueue
+from .queue import RequestQueue
 from .skill import SkillRunner
 from .timers import TimerService
 from .skills import (
@@ -68,21 +69,11 @@ from .skills import (
 )
 from .trace import TraceLog
 
-CHOICE_INTERRUPT = "interrupt"
-URGENCY_OPTIONS = [
-    ("critical", "Immediate danger or critical failure."),
-    ("high", "Important but not dangerous."),
-    ("medium", "Should be handled reasonably soon."),
-    ("low", "Can wait."),
-]
-URGENCY_WEIGHTS = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
-
 
 @dataclass
 class Process:
     request: Request
     skill: str
-    weight: float
 
 
 @dataclass
@@ -107,7 +98,6 @@ class SkillWrite:
     request: Request
     category: str
     draft: SkillDraft
-    weight: float
     repair_evidence: dict | None = None
     # Label for a corrective rewrite: "run_failure" (repair loop), "fidelity",
     # "test", or "manual" (a user-requested regen).
@@ -127,7 +117,6 @@ class DraftAuthor:
 
     request: Request
     category: str | None
-    weight: float
     kind: str
     approved: bool = False
 
@@ -262,9 +251,8 @@ class Scheduler:
         self.contract_search = bool(
             (codegen_cfg.get("contract_search", {}) or {}).get("enabled", True)
         )
-        self.queue = UrgencyQueue(
+        self.queue = RequestQueue(
             max_size=int(config.get("queue", {}).get("max_size", 100)),
-            age_rate=float(config.get("queue", {}).get("age_rate", 0.0)),
         )
         self.skills = build_skills(config) + build_housekeeping_skills()
         self.tree = build_tree(self.skills)
@@ -326,38 +314,6 @@ class Scheduler:
             self._fatal = f"decision engine not available: {exc}"
             return self._fatal
 
-    # ---- decision templates (all real SemIf, all logged) ----
-
-    def _interrupt_choice(self, request: Request, current: Process) -> bool:
-        decision = DecisionRequest(
-            state=f"{request.text} [current process: {current.skill}]",
-            question="Should this be allowed to interrupt the current process?",
-            options=[
-                Option(CHOICE_INTERRUPT, "Yes, interrupt the current process."),
-                Option("defer", "No, wait until the current process finishes."),
-            ],
-        )
-        result = self.engine.call(decision)
-        self.log.append(
-            decision,
-            result,
-            extra={"phase": "choice", "current": current.skill, "run_id": request.id},
-        )
-        return result.prob(CHOICE_INTERRUPT) >= self.tau
-
-    def _priority_score(self, request: Request, current: str | None = None) -> tuple[float, str]:
-        decision = DecisionRequest(
-            state=f"{request.text} [current process: {current}]",
-            question="How urgent is this request?",
-            options=[Option(option_id, description) for option_id, description in URGENCY_OPTIONS],
-        )
-        result = self.engine.call(decision)
-        self.log.append(
-            decision, result, extra={"phase": "score", "run_id": request.id}
-        )
-        label = result.selected
-        return URGENCY_WEIGHTS[label], label
-
     # ---- intake ----
 
     def submit(self, text: str, source: str = "typed") -> tuple[str, str]:
@@ -388,50 +344,31 @@ class Scheduler:
         self.trace.append("submit", request.id, text=text, source=source)
 
         if self.current is None:
-            weight, label = self._priority_score(request)
-            self.current = Process(request=request, skill="(scheduling)", weight=weight)
+            self.current = Process(request=request, skill="(scheduling)")
             try:
-                outcome = self._dispatch(request, weight=weight)
+                outcome = self._dispatch(request)
             finally:
                 if self.pending is None:
                     self.current = None
             if outcome.kind == "needs_input":
                 return "needs_input", outcome.summary, request.id
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            return "running", f"[{label}] {outcome.summary}", request.id
+            return "running", outcome.summary, request.id
 
-        interrupt = self._interrupt_choice(request, self.current)
-        if interrupt:
-            if self.pending is not None:
-                self.trace.append("pending_abandoned", self.pending.request.id)
-                self.pending = None
-            previous = self.current
-            previous.request.resume["from_skill"] = previous.skill
-            self.queue.push(previous.request, previous.weight)
-            self.current = Process(request=request, skill="(scheduling)", weight=1.0)
-            self.trace.append("preempted", request.id, preempted=previous.skill)
-            outcome = self._dispatch(request, weight=1.0)
-            if outcome.kind == "needs_input":
-                return "preempted", f"interrupted {previous.skill}; {outcome.summary}", request.id
-            self.current = None
-            self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            return "preempted", f"interrupted {previous.skill}; {outcome.summary}", request.id
-
-        weight, label = self._priority_score(request, current=self.current.skill)
-        ok = self.queue.push(request, weight)
+        ok = self.queue.push(request)
         if not ok:
             self.trace.append("rejected", request.id, reason="queue is full")
             return "rejected", "queue is full", request.id
-        self.trace.append("queued", request.id, weight=weight, label=label)
-        return "queued", f"urgency {label} (weight {weight:.2f})", request.id
+        self.trace.append("queued", request.id)
+        return "queued", "queued", request.id
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
-        """Set a fake in-progress process so the choice/score path is exercised."""
+        """Set a fake in-progress process so the queue path is exercised."""
         with self._lock:
             if self.pending is not None:
                 self.trace.append("pending_abandoned", self.pending.request.id)
                 self.pending = None
-            self.current = Process(request=Request(text, source="busy"), skill=skill, weight=1.0)
+            self.current = Process(request=Request(text, source="busy"), skill=skill)
 
     def idle(self) -> None:
         with self._lock:
@@ -456,9 +393,9 @@ class Scheduler:
                 break
             request = self.queue.pop()
             self.trace.append("dequeued", request.id)
-            self.current = Process(request=request, skill="(scheduling)", weight=0.0)
+            self.current = Process(request=request, skill="(scheduling)")
             try:
-                outcome = self._dispatch(request, weight=0.0)
+                outcome = self._dispatch(request)
             except EngineUnavailable as exc:
                 self._mark_fatal(exc)
                 results.append(("fatal", self._fatal))
@@ -478,7 +415,7 @@ class Scheduler:
 
     # ---- dispatch ----
 
-    def _dispatch(self, request: Request, weight: float = 0.0) -> DispatchResult:
+    def _dispatch(self, request: Request) -> DispatchResult:
         # Explicit housekeeping commands are deterministic: they route straight
         # to the meta skill, bypassing the generic guards (which misread a
         # task-like skill name as the task). Natural-language phrasings still go
@@ -508,9 +445,9 @@ class Scheduler:
             action_tau=self.action_tau,
         )
         if isinstance(navigation, CreateCategory):
-            return self._dispatch_create_category(request, weight)
+            return self._dispatch_create_category(request)
         if isinstance(navigation, CreateSkill):
-            return self._dispatch_skill(request, navigation.category, weight)
+            return self._dispatch_skill(request, navigation.category)
         if navigation.category in CANNED_CATEGORIES:
             return self._run_skill(navigation, request)
         if navigation.category in HARD_LOCKED_CATEGORIES:
@@ -530,12 +467,10 @@ class Scheduler:
             )
             if self._category_locked(navigation.category):
                 return self._blocked_create(request, navigation.category)
-            return self._dispatch_skill(request, navigation.category, weight)
+            return self._dispatch_skill(request, navigation.category)
         return self._run_skill(navigation, request)
 
-    def _dispatch_create_category(
-        self, request: Request, weight: float = 0.0
-    ) -> DispatchResult:
+    def _dispatch_create_category(self, request: Request) -> DispatchResult:
         """Queue a new top-level category for the `llm` draft worker.
 
         The gate stays free: the small model authors the category in the
@@ -543,7 +478,7 @@ class Scheduler:
         inside it and hands off to the codegen body worker. On failure the
         request is not re-dispatched and the user is told.
         """
-        self._queue_draft(request, None, "category", weight)
+        self._queue_draft(request, None, "category")
         return DispatchResult(
             kind="create_category",
             summary=(
@@ -553,7 +488,7 @@ class Scheduler:
         )
 
     def _dispatch_skill(
-        self, request: Request, category: str, weight: float = 0.0
+        self, request: Request, category: str
     ) -> DispatchResult:
         """Queue a new skill leaf for the `llm` draft worker.
 
@@ -576,7 +511,7 @@ class Scheduler:
                 ),
                 skill=name,
             )
-        self._queue_draft(request, category, "skill", weight)
+        self._queue_draft(request, category, "skill")
         return DispatchResult(
             kind="create_skill",
             summary=(
@@ -685,7 +620,7 @@ class Scheduler:
                 question=outcome.needs_input,
                 pre_act=outcome.pre_act,
             )
-            self.current = Process(request=request, skill=skill.name, weight=0.5)
+            self.current = Process(request=request, skill=skill.name)
             self.trace.append(
                 "needs_input", request.id, skill=skill.name, question=outcome.needs_input
             )
@@ -708,7 +643,7 @@ class Scheduler:
         requeued = False
         if outcome.updated_request and request.reentries < self.max_reentries:
             child = _requeue(request, outcome.updated_request)
-            self.queue.push(child, 0.5)
+            self.queue.push(child)
             self.trace.append("requeued", request.id, text=outcome.updated_request)
             if self.on_request_requeued is not None:
                 self.on_request_requeued(request.id, child.id)
@@ -950,7 +885,7 @@ class Scheduler:
                 offer.status = "awaiting_user"
         if chosen == "retry":
             retry = Request(offer.request_text, source="repair_retry")
-            self.queue.push(retry, 0.5)
+            self.queue.push(retry)
             with self._lock:
                 offer.status = "done"
             self.trace.append("repair_retry", offer.run_id, skill=offer.skill)
@@ -1017,7 +952,7 @@ class Scheduler:
             offer.status = "done"
         request = Request(offer.request_text, source="repair")
         self._start_skill_write(
-            request, offer.category, draft, 0.5, repair_evidence=offer.evidence
+            request, offer.category, draft, repair_evidence=offer.evidence
         )
         self.trace.append(
             "repair_executed",
@@ -1046,7 +981,6 @@ class Scheduler:
         request: Request,
         category: str | None,
         kind: str,
-        weight: float,
         approved: bool = False,
     ) -> None:
         """Queue a category or skill draft for the `llm` worker.
@@ -1061,7 +995,6 @@ class Scheduler:
                 DraftAuthor(
                     request=request,
                     category=category,
-                    weight=weight,
                     kind=kind,
                     approved=approved,
                 )
@@ -1135,7 +1068,7 @@ class Scheduler:
                 category=draft.name,
                 description=draft.description,
             )
-        self._queue_draft(job.request, draft.name, "skill", job.weight, approved=True)
+        self._queue_draft(job.request, draft.name, "skill", approved=True)
 
     def _author_skill(self, job: DraftAuthor) -> None:
         """Author a skill leaf stub, then launch the codegen body write.
@@ -1192,7 +1125,7 @@ class Scheduler:
                 )
         if self.codegen is None:
             return
-        self._start_skill_write(job.request, job.category, draft, job.weight)
+        self._start_skill_write(job.request, job.category, draft)
 
     def _fail_draft(self, job: DraftAuthor, exc: Exception) -> None:
         """Surface a failed draft authoring; the request is not re-dispatched."""
@@ -1314,7 +1247,6 @@ class Scheduler:
         request: Request,
         category: str,
         draft: SkillDraft,
-        weight: float,
         repair_evidence: dict | None = None,
         reason_kind: str = "run_failure",
     ) -> None:
@@ -1355,7 +1287,6 @@ class Scheduler:
                     request=request,
                     category=category,
                     draft=draft,
-                    weight=weight,
                     repair_evidence=repair_evidence,
                     reason_kind=reason_kind,
                 )
@@ -1860,12 +1791,11 @@ class Scheduler:
             requeued = job.request.copy_for_requeue()
             requeued.meta["awaiting_skill_body"] = [job.category, job.draft.name]
             requeued.meta["parent_run"] = job.request.id
-            self.queue.push(requeued, job.weight)
+            self.queue.push(requeued)
             self.trace.append(
                 "skill_requeued",
                 job.request.id,
                 text=requeued.text,
-                weight=job.weight,
             )
         print(
             f"[codegen] body ready for {job.category}.{job.draft.name}; "
@@ -1953,7 +1883,7 @@ class Scheduler:
                 if request_text
                 else Request(f"write the body for {category}.{name}: {draft.description}", source="restart")
             )
-        self._start_skill_write(origin, category, draft, 0.5)
+        self._start_skill_write(origin, category, draft)
         self.trace.append("skill_restarted", origin.id, category=category, skill=name)
         return "running", f"restarting body write for {category}.{name}"
 
@@ -2092,7 +2022,6 @@ class Scheduler:
             origin,
             category,
             draft,
-            0.5,
             repair_evidence=evidence,
             reason_kind="manual",
         )
@@ -2187,8 +2116,8 @@ class Scheduler:
             if offered:
                 lines.append(f"repair offers: {len(offered)} (use `repairs`)")
             lines.append(f"queue: {len(self.queue)} pending")
-            for weight, request in self.queue.items():
-                lines.append(f"  {request.id}  w={weight:.2f}  {request.text[:60]}")
+            for request in self.queue.items():
+                lines.append(f"  {request.id}  {request.text[:60]}")
             pending_timers = self.timers.pending()
             if pending_timers:
                 lines.append(f"timers: {len(pending_timers)} scheduled")

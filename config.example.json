@@ -10,7 +10,7 @@
     "category_tau": 0.75,
     "action_tau": 0.5
   },
-  "queue": {"max_size": 100, "age_rate": 0.01},
+  "queue": {"max_size": 100},
   "engine": {
     "_comment": "Per-machine engine settings only. The pinned engine/tokenizer/GGUF refs (semif_repo, semif_ref, gguf_url, gguf_sha256, source, revision) live in the committed pins.json — bumped on update, never per-machine config. The GGUF path is derived from pins.json's engine.gguf_url under .runtime/models/; set `gguf` here only to override it with a custom path.",
     "backend": "llamacpp",

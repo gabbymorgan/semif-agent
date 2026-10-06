@@ -225,7 +225,7 @@ def test_service_drain_routes_queued_run_to_owner(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_service(scheduler)
     request = Request("queued work", source="simplex:4")
-    scheduler.queue.push(request, 0.5)
+    scheduler.queue.push(request)
     service._owners[request.id] = ("simplex", "4")
 
     service.drain()
@@ -296,15 +296,15 @@ def test_result_detail_unwraps_scheduler_summary():
     from semif_agent.gateway.service import _result_detail
 
     assert _result_detail("time.now: ok — 2026-10-06 12:00") == "2026-10-06 12:00"
-    assert _result_detail("interrupted x; time.now: ok — 12:00") == "12:00"
+    assert _result_detail("time.now: failed — boom") == "boom"
     assert _result_detail("a plain reply") == "a plain reply"
 
 
 def test_result_only_speaks_detail_and_drops_status(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_result_only_service(scheduler)
-    service._reply("voice", "c", "[high] time.now: ok — 12:00", kind="result")
-    service._reply("voice", "c", "urgency low (weight 0.20)", kind="status")
+    service._reply("voice", "c", "time.now: ok — 12:00", kind="result")
+    service._reply("voice", "c", "queued", kind="status")
     service._reply("voice", "c", "Which account?", kind="question")
     assert drain_outbound(service) == ["12:00", "Which account?"]
 
@@ -312,11 +312,11 @@ def test_result_only_speaks_detail_and_drops_status(tmp_path):
 def test_plain_adapter_keeps_full_scheduler_output(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_service(scheduler)  # FakeAdapter (simplex), not result_only
-    service._reply("simplex", "4", "[high] time.now: ok — 12:00", kind="result")
-    service._reply("simplex", "4", "urgency low (weight 0.20)", kind="status")
+    service._reply("simplex", "4", "time.now: ok — 12:00", kind="result")
+    service._reply("simplex", "4", "queued", kind="status")
     assert drain_outbound(service) == [
-        "[high] time.now: ok — 12:00",
-        "urgency low (weight 0.20)",
+        "time.now: ok — 12:00",
+        "queued",
     ]
 
 
@@ -325,9 +325,9 @@ def test_config_can_turn_result_only_off(tmp_path):
     service = build_result_only_service(
         scheduler, config={"voice": {"result_only": False}}
     )
-    service._reply("voice", "c", "[high] time.now: ok — 12:00", kind="result")
-    service._reply("voice", "c", "urgency low", kind="status")
-    assert drain_outbound(service) == ["[high] time.now: ok — 12:00", "urgency low"]
+    service._reply("voice", "c", "time.now: ok — 12:00", kind="result")
+    service._reply("voice", "c", "queued", kind="status")
+    assert drain_outbound(service) == ["time.now: ok — 12:00", "queued"]
 
 
 # ---- LXMF adapter ----

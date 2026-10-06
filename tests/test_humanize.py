@@ -98,12 +98,12 @@ def build_service(llm, config):
 def test_gateway_humanizes_only_result_lines():
     llm = FakeClient(reply="It is 12:00.")
     service = build_service(llm, {"humanize": {"enabled": True}, "simplex": {}})
-    service._reply("simplex", "c", "[high] time.now: ok — 12:00", kind="result")
-    service._reply("simplex", "c", "urgency low (weight 0.20)", kind="status")
+    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    service._reply("simplex", "c", "queued", kind="status")
     service._reply("simplex", "c", "Which account?", kind="question")
     assert [service.outbound["simplex"].get_nowait().text for _ in range(3)] == [
         "It is 12:00.",
-        "urgency low (weight 0.20)",
+        "queued",
         "Which account?",
     ]
 
@@ -111,8 +111,8 @@ def test_gateway_humanizes_only_result_lines():
 def test_gateway_humanize_off_by_default():
     llm = FakeClient(reply="should not be used")
     service = build_service(llm, {"simplex": {}})
-    service._reply("simplex", "c", "[high] time.now: ok — 12:00", kind="result")
-    assert service.outbound["simplex"].get_nowait().text == "[high] time.now: ok — 12:00"
+    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    assert service.outbound["simplex"].get_nowait().text == "time.now: ok — 12:00"
     assert llm.calls == []
 
 

@@ -17,7 +17,7 @@ A successful release of this could be defined by a single question: "Can I use t
 
 - [Why this exists (the reasoning)](#why-this-exists-the-reasoning)
 - [How it works](#how-it-works)
-  - [The scheduler: choose, score, queue, dispatch](#the-scheduler-choose-score-queue-dispatch)
+  - [The scheduler: queue and dispatch](#the-scheduler-queue-and-dispatch)
   - [The skill tree and navigation](#the-skill-tree-and-navigation)
   - [The skill run loop](#the-skill-run-loop)
   - [Authoring a new skill](#authoring-a-new-skill)
@@ -70,7 +70,7 @@ model entirely:
   does.)
 - **Simulated Agile patterns.** A skill is a real integration into the active tool chain for end user satisfaction. It takes existing mail
   protocols, SimpleX, CalDAV/WebDAV, configured local CLIs, HTTP APIs and your supplied data to produce actions that best fit your query. In the absence of a an existing skill, the skill generation process is activated. Skill generation has four major phases - definition, refinement, coding, testing (unit and integration). Each step in this process has deterministic and probabilistic handling optimized to achieve the stated goal of the user in the context of the platform's core mission.
-- **Nothing is gated out up front.** Every input is dispatched and scored.
+- **Nothing is gated out up front.** Every input is dispatched.
   Inputs that are not requests fall through navigation into the closed `response`
   category — a hardcoded tree of canned replies (`greeting`, `thanks`,
   `acknowledge`, `farewell`, `affirm`, and the catchall `clarify`). A request no
@@ -88,25 +88,23 @@ model entirely:
 
 ## How it works
 
-### The scheduler: choose, score, queue, dispatch
+### The scheduler: queue and dispatch
 
 Implemented in `semif_agent/scheduler.py` and `semif_agent/queue.py`:
 
 ```
 intake (typed input / messenger gateway / scripted)
-  └─ choice   "should this interrupt the current process?"   (SemIf)
-       ├─ yes → preempt current, requeue it with state preserved
-       └─ no  → score   "how urgent?"  critical/high/medium/low   (SemIf)
-                 └─ urgency priority queue (weight desc, then FIFO)
+  ├─ idle  → dispatch immediately
+  └─ busy  → FIFO queue (arrival order, no priority)
 ```
 
-- The **queue** is a max-heap by urgency weight, FIFO within equal weight, with
-  upward ageing so low-priority items cannot starve (`queue.py`).
+- The **queue** is a strict first-in-first-out list of pending requests with a
+  maximum depth (`queue.py`). There is no urgency scoring and no preemption.
 - A **skill run paused for input** (`needs_input`) keeps the current slot busy;
-  an answer routes straight back to the pending run, bypassing
-  choice/score/navigation.
-- A high-priority input can preempt the running process, which re-queues with its
-  state preserved.
+  an answer routes straight back to the pending run, bypassing the queue and
+  navigation.
+- The running process always finishes before the next queued request is
+  dispatched.
 - Exactly one execution slot. (Concurrency, when it comes, is SemIf's
   shared-state mode for parallel *decisions* — not parallel process execution.)
 
@@ -200,9 +198,9 @@ worker. It is **asynchronous**, so the gate stays free while either model thinks
    `codegen.test_max_attempts`.
 
 On success the body materializes to `data/skills/<category>/<name>/`, is
-hot-merged, and **the original request is re-queued** at its scored weight and
-re-runs navigation onto the new leaf. On failure the leaf stays a restartable
-stub. A whole new category runs the same chain deterministically:
+hot-merged, and **the original request is re-queued** and re-runs navigation
+onto the new leaf. On failure the leaf stays a restartable stub. A whole new
+category runs the same chain deterministically:
 `create_category` → `create_skill` → async body → re-dispatch.
 
 A rejected/simulated body is traced (`fidelity_review`), badged `unverified`,
@@ -230,8 +228,6 @@ the request, the tree, the elicitation answers, the runtime **bridge catalog**
 
 | Phase | File | State injected | Options |
 | --- | --- | --- | --- |
-| `interrupt:choice` | `scheduler.py:279` | request text + `[current process: <skill>]` | `interrupt` / `defer` |
-| `priority:score` | `scheduler.py:296` | request text (+ `[current process: …]` when busy) | critical / high / medium / low |
 | `navigate:category` | `skills.py:682` | request text | every category name (+ `create_category`) |
 | `navigate:leaf` | `skills.py:736` | request text + current category | every skill name + description (+ `create_skill`) |
 | `navigate:response` | `skills.py:634` | request text + category | canned reply names + descriptions (catchall last) |
@@ -362,8 +358,8 @@ fine-tuning loop — it is not yet the fine-tune itself.
 semif_agent/
   cli.py            argparse: run / dream / skills / status / relabel /
                     dashboard / gateway / bridge
-  scheduler.py      no up-front gate; choice -> score -> queue -> dispatch;
-                    preempt + requeue; needs_input pauses; async single-slot
+  scheduler.py      no up-front gate; FIFO queue -> dispatch;
+                    needs_input pauses; async single-slot
                     skill authoring worker; fidelity gate; repair loop
   skill.py          observe -> act -> observe -> assess; deterministic
                     summary; pre-act contract collection; resolved-input state
@@ -378,7 +374,7 @@ semif_agent/
   trace.py          runs.jsonl lifecycle events keyed by run_id
   dream.py          NLL / weighted CE / accuracy / ECE cost report
   decisions.py      DecisionRequest / Option / DecisionResult / Request dataclasses
-  queue.py          urgency max-heap (weight desc, FIFO, ageing)
+  queue.py          bounded FIFO request queue
   dashboard.py      stdlib HTTP + JSON API + static UI
   static/           dashboard frontend (html/js/css)
   simplex_ws.py     neutral SimpleX daemon protocol (shared by gateway + bridge)
@@ -504,7 +500,7 @@ Key blocks:
 | `codegen` | skill-body model endpoint, timeouts, sampler, elicitation, fidelity, repair, test, degeneration watchdog, token budget |
 | `navigation` | two-stage guards: leaf `intent_tau`, category `category_tau` |
 | `tau` | decision threshold; `max_reentries` requeue bound |
-| `queue` | `max_size`, `age_rate` |
+| `queue` | `max_size` |
 | `skill_bodies` / `skill_seeds` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
 | `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD, follow-up window |
@@ -556,7 +552,7 @@ HF_HOME="$REPO/.runtime/hf" "$REPO/.runtime/venv/bin/python" -m semif_agent.cli 
 Type a request, or one of the meta-commands:
 
 ```
-busy <text>   mark a current process (so preemption can be demonstrated)
+busy <text>   mark a current process (so the queue can be demonstrated)
 idle          clear the current process
 status        current process + queue
 skills        skill tree
@@ -599,7 +595,7 @@ shares one scheduler/skill store. `--platform` takes a comma-separated list or
 python -m semif_agent.cli gateway [--platform simplex,lxmf,voice|all] [--dashboard]
 ```
 
-Each platform feeds authorized DM text through the normal gate/score/queue/
+Each platform feeds authorized DM text through the normal queue/dispatch
 dispatch pipeline. Results, authoring questions and repair offers go back to the
 originating chat. Config lives under `gateway.<platform>` in `config.json`;
 `enabled` defaults to false. Both transports are **default-deny** — put allowed
@@ -638,7 +634,7 @@ address as a contact in your LXMF client and DM it.
 `gateway --platform voice` turns the machine's microphone into a command front
 end: an always-on **wake word** (openWakeWord), **speech-to-text**
 (faster-whisper), and **text-to-speech** (Piper), all local — no cloud. A spoken
-command is fed through the same gate/score/queue/dispatch pipeline as a typed or
+command is fed through the same queue/dispatch pipeline as a typed or
 messaged one, and every reply is spoken back. It is a normal gateway adapter, so
 `needs_input` questions, repair offers, and approvals are spoken and answered by
 voice too.
@@ -668,7 +664,7 @@ python -m semif_agent.cli gateway --platform voice
   utterance is accepted **without** the wake word for `follow_up_window_s`, so
   answering a question is conversational. `max_speak_chars` truncates long
   replies before speaking. `result_only` (default true for voice) speaks only the
-  skill's result line — queue/urgency bookkeeping is dropped and the
+  skill's result line — scheduler bookkeeping is dropped and the
   `<skill>: ok —` wrapper is stripped — so the spoken output is the answer, not
   the scheduler's internals; set it false to speak the full scheduler output.
   There is no allowlist: the mic is local, so physical access is the
@@ -804,7 +800,7 @@ works.
 
 ## Roadmap / status
 
-**Done.** Core loop, urgency queue, skill tree, real SemIf assessment, decision
+**Done.** Core loop, FIFO queue, skill tree, real SemIf assessment, decision
 logging, `dream` cost pass, REPL + JSONL CLI; live `create_category` /
 `create_skill` with the async authoring pipeline (elicitation → body → fidelity →
 contract → test → auto-run → re-dispatch); tiered config + first-fire

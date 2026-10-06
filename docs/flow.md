@@ -3,7 +3,7 @@
 How one input travels through the agent. Every diamond marked **SemIf** is a
 real decision-engine call that is logged as a training row; the LLM only ever
 *generates* (skill drafts, bodies, questions). There is no up-front
-handle/ignore gate — every input is scored and dispatched.
+handle/ignore gate — every input is dispatched.
 
 The diagram is split in two: the **main pipeline** (intake → navigation → run →
 output) and the **authoring pipeline** (what happens when navigation decides a
@@ -23,19 +23,13 @@ flowchart TD
     SUB --> BUSY{"current process?"}
 
     %% ---------- idle path ----------
-    BUSY -- "idle" --> SCORE["SemIf score<br/>phase 'score'<br/>How urgent is this?"]
-    SCORE --> DISPATCH
+    BUSY -- "idle" --> DISPATCH["Scheduler._dispatch()"]
 
     %% ---------- busy path ----------
-    BUSY -- "busy" --> INTERRUPT["SemIf choice<br/>phase 'choice'<br/>may this interrupt?"]
-    INTERRUPT -- "defer" --> SCORE2["SemIf score<br/>phase 'score'"]
-    SCORE2 --> PUSH["UrgencyQueue.push<br/>max-heap: weight desc, FIFO seq<br/>age pulls low items toward 1.0"]
+    BUSY -- "busy" --> PUSH["RequestQueue.push<br/>FIFO, bounded"]
     PUSH -- "full" --> REJECT["Output: rejected<br/>'queue is full'"]
-    PUSH -- "ok" --> QUEUED["Output: queued<br/>urgency label + weight"]
+    PUSH -- "ok" --> QUEUED["Output: queued"]
     QUEUED -. "run_queue when idle" .-> DISPATCH
-
-    INTERRUPT -- "interrupt" --> PREEMPT["Abandon pending run<br/>requeue previous at its weight<br/>trace 'preempted'"]
-    PREEMPT --> DISPATCH["Scheduler._dispatch()"]
 
     %% ---------- navigation ----------
     DISPATCH --> NAV["navigate()<br/>descend tree, one SemIf choice per level"]
@@ -73,7 +67,7 @@ flowchart TD
 
     RESOLVE --> UNRES{"contract variable<br/>unresolved?"}
     UNRES -- "yes" --> PAUSE1["Output: needs_input<br/>pre_act pause<br/>ask one variable"]
-    PAUSE1 -. "answer() bypasses gate" .-> RECORD["SemIf choice<br/>phase 'config:record'<br/>record as config vs ask each fire"]
+    PAUSE1 -. "answer() bypasses queue" .-> RECORD["SemIf choice<br/>phase 'config:record'<br/>record as config vs ask each fire"]
     RECORD --> RESOLVE
 
     UNRES -- "no" --> ACT["skill.act(ctx, request)<br/>REAL action via stdlib transport<br/>values from ctx.config"]
@@ -171,8 +165,8 @@ flowchart TD
 
 | Stage | Decision (SemIf) | Phase logged | Output |
 | --- | --- | --- | --- |
-| Intake, idle | urgency | `score` | weight → dispatch |
-| Intake, busy | interrupt? | `choice` | preempt or queue |
+| Intake, idle | — (no decision) | — | dispatch immediately |
+| Intake, busy | — (no decision) | — | FIFO queue (arrival order) |
 | Category | which category | `navigate:category` | category / create |
 | Category scope | does it cover? | `navigate:category_scope` | descend / create |
 | Canned | which reply | `navigate:response` | canned line |

@@ -38,7 +38,7 @@ Guessing, inventing data, or shipping a toy is always the wrong answer.
 ## What this is
 
 A local desktop CLI agent whose entire control flow is a single decision model
-(SemIf). Inputs are scored for urgency, queued, and dispatched through a
+(SemIf). Inputs are queued FIFO and dispatched through a
 skill tree. Nothing is gated out up front: every input is dispatched and inputs
 that are not requests fall through navigation into the closed `response` tree of
 canned replies (a request no skill covers authors a skill instead — the
@@ -66,10 +66,10 @@ cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard, gateway (command intake), bridge (standalone
                 third-party API bridges)
 scheduler.py    no up-front gate: every input is dispatched
-                -> choice(tau) -> score -> queue; preempt + requeue;
-                a skill run paused for input (needs_input) keeps `current`
-                busy; `answer` routes straight to the pending run, bypassing
-                gate/score/navigation; draft authoring (title+description by the
+                -> FIFO queue when busy; a skill run paused for input
+                (needs_input) keeps `current` busy; `answer` routes straight to
+                the pending run, bypassing the queue/navigation; draft authoring
+                (title+description by the
                 small `llm` provider) AND skill-body authoring (codegen) are ASYNC
                 single-slot workers: a create_category/create_skill request is
                 queued, the gate stays free, the category job chains into its
@@ -93,7 +93,7 @@ scheduler.py    no up-front gate: every input is dispatched
                 operate on the tree via `ctx.admin`; per-category new-skill locks
                 (`locks.new_skill` in the category config) gate creation, with
                 `housekeeping`/`response` hard-locked in code
-queue.py        urgency max-heap (desc weight, FIFO seq), age pulls toward 1.0
+queue.py        bounded FIFO request queue (arrival order, max depth)
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 tree plus the `housekeeping` meta skills), navigation = SemIf
                 choices per level (logged;
@@ -187,7 +187,7 @@ console.py      OpenCode Console provider: OpenCodeConsoleClient + the
 log.py          decisions.jsonl rows {state, question, options, predicted_probs,
                 selected, observed_outcome, label_source}
 trace.py        runs.jsonl lifecycle events keyed by run_id (submit/queued/
-                preempted/assessed/...); decisions reference run_id in extra
+                dequeued/assessed/...); decisions reference run_id in extra
 dream.py        NLL of observed outcome per row; weighted CE, accuracy, ECE
 decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
                 Request)
@@ -297,7 +297,7 @@ values are yours to choose.
 ## Roadmap
 
 ### v1 (done)
-Core loop, urgency queue, skill tree, skill loop with real SemIf assessment
+Core loop, FIFO queue, skill tree, skill loop with real SemIf assessment
 (decision, not generation), decision logging, `dream` cost pass, REPL + JSONL
 CLI, unit tests (24) + integration tests (2).
 
@@ -374,7 +374,7 @@ CLI, unit tests (24) + integration tests (2).
   skip their softmax.
 - **No handle/ignore gate; the `response` tree is the non-request catchall**
   (Sep 2026; actionability guard Oct 2026): the top-level `_contains_request`
-  handle/ignore gate is gone. Every input is scored and dispatched; input that
+  handle/ignore gate is gone. Every input is dispatched; input that
   is not a request falls through navigation into the closed `response` category,
   a hardcoded tree of canned replies (`response.greeting`, `response.thanks`,
   `response.acknowledge`, `response.farewell`, `response.affirm`, and the
@@ -490,7 +490,7 @@ CLI, unit tests (24) + integration tests (2).
 - **Messenger gateway (SimpleX first, then LXMF)** (Sep 2026; LXMF Oct 2026):
   `python -m semif_agent.cli gateway` runs a dedicated process that connects to
   one or more transports and feeds authorized DM text through the normal
-  gate/score/queue/dispatch pipeline; results, authoring questions, and repair
+  queue/dispatch pipeline; results, authoring questions, and repair
   offers are sent back to the originating chat. `gateway/base.py` is the
   transport contract (`GatewayAdapter`, `InboundMessage`, `OutboundMessage`),
   `gateway/service.py` the platform-aware scheduler glue (single execution slot,
@@ -797,8 +797,8 @@ CLI, unit tests (24) + integration tests (2).
      rides in the code), the error + existing files are fed back, bounded by
      `codegen.test_max_attempts`.
   On success the body is materialized (`materialize_skill`), hot-merged, the
-  leaf's `writing` flag clears, and the **original request is re-queued** at its
-  scored weight and re-runs navigation onto the new leaf (`skill_requeued`). On
+  leaf's `writing` flag clears, and the **original request is re-queued** and
+  re-runs navigation onto the new leaf (`skill_requeued`). On
   failure (`CodegenError`/`ValueError`) the user is notified, the leaf stays a
   restartable stub, and the request is NOT re-dispatched. A re-dispatched
   request whose skill is still unwritten reports the pending write instead of
@@ -1021,7 +1021,7 @@ CLI, unit tests (24) + integration tests (2).
   wake (optionally again on transcription) so the user knows they were heard.
   **Result-only output**: `VoiceAdapter.result_only` (default true; per-platform
   config `result_only` overrides) makes `GatewayService` speak just the skill's
-  result line — queue/urgency chatter is dropped and the `<skill>: ok —` wrapper
+  result line — scheduler bookkeeping is dropped and the `<skill>: ok —` wrapper
   is stripped — so the spoken output is the answer, not the scheduler's
   internals. Questions, repair offers, approvals, and timer notifications are
   still spoken.
@@ -1043,7 +1043,7 @@ CLI, unit tests (24) + integration tests (2).
   ownership across an updated request so its completion still routes home. A
   `needs_input` pause sets `pending_owner` from the pending run's source; the
   same chat's next message goes straight to `Scheduler.answer` (no
-  score/navigation). A *different* chat — **including a chat on another
+  queue/navigation). A *different* chat — **including a chat on another
   platform** — during that pause is told to wait: the single-slot scheduler must
   not silently abandon the first chat's run, and one service fronts all
   adapters so the guard spans them. A background poll calls
@@ -1248,9 +1248,9 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
 - Navigation decisions ARE logged (`navigate:category`, `navigate:leaf` in
   skills.py) and therefore count toward dream cost. This is intended per the
   design; don't silently drop them.
-- Queue ordering: urgency desc, then FIFO (`seq`). Recency is stored but is NOT
-  in the sort key (it's anti-correlated with FIFO). Ageing pulls weights toward
-  the max (1.0) so low items catch up; uniform additive boosts do nothing.
+- Queue ordering: strict FIFO (arrival order). There is no urgency score and no
+  preemption; the running process always finishes before the next queued request
+  is dispatched.
 - The decision engine is always real and every `EngineUnavailable` is **fatal**:
   `submit` records it (`("fatal", ...)`), the scheduler exposes `fatal`, and the
   CLI prints it and exits non-zero. There is no degraded/soft-error path.

@@ -65,7 +65,7 @@ function shortPhase(phase) {
   return phase.replace("navigate:", "nav:");
 }
 
-const ALL_PHASES = ["gate", "choice", "score", "navigate:category", "navigate:leaf", "act"];
+const ALL_PHASES = ["navigate:category", "navigate:leaf", "act"];
 
 function optionProbs(row) {
   return (row.options || []).map((o) => ({
@@ -130,9 +130,7 @@ function eventRow(evt) {
     div.textContent = `assessed → ${evt.success ? "ok" : "fail"}`;
     div.title = evt.summary || "";
   } else if (evt.kind === "queued") {
-    div.textContent = `queued (${evt.label})`;
-  } else if (evt.kind === "preempted") {
-    div.textContent = `preempted ${evt.preempted}`;
+    div.textContent = "queued";
   } else if (evt.kind === "skill_writing") {
     div.textContent = `writing skill ${evt.skill} — ${evt.description} (${evt.model || "codegen"})`;
     if (evt.contract_ref) {
@@ -420,9 +418,7 @@ function eventNode(evt) {
       node.appendChild(req);
     }
   } else if (evt.kind === "queued") {
-    body.textContent = `urgency ${evt.label} (weight ${Number(evt.weight || 0).toFixed(2)})`;
-  } else if (evt.kind === "preempted") {
-    body.textContent = `interrupted ${evt.preempted}, requeued with state`;
+    body.textContent = "queued";
   } else if (evt.kind === "dropped") {
     body.textContent = evt.reason || "";
   } else if (evt.kind === "skill_writing") {
@@ -825,7 +821,7 @@ function renderStatus() {
   q.className = "muted";
   q.style.marginTop = "8px";
   q.textContent = state.status.queue
-    .map((item) => `${item.id} w=${item.weight.toFixed(2)} ${item.text}`)
+    .map((item) => `${item.id} ${item.text}`)
     .join("\n") || "queue empty";
   el.appendChild(q);
 

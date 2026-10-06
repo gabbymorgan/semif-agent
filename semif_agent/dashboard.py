@@ -111,8 +111,8 @@ def build_status(scheduler: Scheduler) -> dict:
             else None
         )
         queue = [
-            {"id": request.id, "weight": weight, "text": request.text[:80]}
-            for weight, request in scheduler.queue.items()
+            {"id": request.id, "text": request.text[:80]}
+            for request in scheduler.queue.items()
         ]
         tau = scheduler.tau
         queue_max = scheduler.queue.max_size
