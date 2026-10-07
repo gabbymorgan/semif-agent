@@ -744,8 +744,8 @@ rows.
 A skill is one specific, single-purpose action reachable by category → skill
 navigation. It is three things:
 
-1. a **manifest** (navigable description — `name`, `category`, `description`,
-   plus optional `allowed_inputs`, `actions`, `cost_budget`, `decision_log_ref`);
+1. a **registry entry** (navigable description — `name` + `description`,
+   authored by the small `llm` provider and recorded in `data/categories.json`);
 2. a **code body** (a single `act`);
 3. an **`INTEGRATION` declaration** (service / transport / config_vars) and a
    flat **`CONTRACT`** (the operational values the runner must provide).

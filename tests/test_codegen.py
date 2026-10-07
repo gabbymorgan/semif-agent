@@ -146,6 +146,24 @@ def test_contract_directs_request_arguments_and_output():
     assert "No work at import time" in text
 
 
+def test_skill_contract_documents_runtime_surface():
+    """CODEGEN.md must document the ActionContext surface a body can rely on
+    (ctx.timers for scheduling) and the request.meta resume cache — both are
+    used by the authoritative seed set, so a body writer needs them."""
+    text = read_skill_contract()
+    assert "ctx.timers" in text
+    assert "request.meta" in text
+
+
+def test_skill_contract_has_no_stale_manifest_fields():
+    """The old manifest schema (allowed_inputs/actions/cost_budget/
+    decision_log_ref, a dotted leaf name) described fields the registry never
+    had; keep it out of the body contract."""
+    text = read_skill_contract()
+    for stale in ("allowed_inputs", "decision_log_ref", "cost_budget", "Manifest schema"):
+        assert stale not in text
+
+
 def test_body_directives_require_query_arguments_and_output():
     """The prompt directives (used by the first, retry, and regen prompts) must
     echo the query->arguments and real-output requirements, not just CODEGEN.md."""

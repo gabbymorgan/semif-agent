@@ -3,8 +3,8 @@
 This file is the authoritative spec for the **testing** side of a skill. It is
 fed verbatim (alongside the finished `skill.py`) to the model that produces the
 test artifact. The runnable body contract lives in `CODEGEN.md`; this file is
-deliberately separate so the body writer never embeds test data and the test
-writer never worries about body semantics.
+deliberately separate so the body writer never embeds test data and the test is
+generated from the finished body rather than the other way around.
 
 A finished skill leaf is a folder
 `data/skills/<category>/<name>/` containing (among others) two artifacts:
@@ -33,8 +33,9 @@ each value is a plain-language, semantic description of the expected values for
 that variable (what it is, what good values look like).
 
 The body declares this itself as a module-level `CONTRACT` constant (see
-`CODEGEN.md`); `contract.json` is a persisted mirror of it, provided to the test
-writer as context. The test writer does not author or change the contract.
+`CODEGEN.md`); `contract.json` is a persisted mirror of it, and the same
+contract object is handed to you as context. You do not author or change the
+contract.
 
 This contract exists for exactly two consumers:
 
@@ -99,10 +100,14 @@ A stdlib-only Python script that:
 
 The test artifact is accepted only if:
 
-1. `skill.test.py` parses as Python, imports only the stdlib and the agent
-   package, embeds its fixtures inline (no external files), is hermetic, and
-   runs to exit 0 when executed from the skill folder.
-2. The test stays compatible with the body's `CONTRACT` (the same variable
+1. `skill.test.py` parses as Python — the only static check — and runs to exit 0
+   when executed from the skill folder; on failure the captured output drives a
+   regeneration.
+2. It imports only the stdlib and the agent package, embeds its fixtures inline
+   (no external files), and is hermetic (no external network, no real services).
+   These are required of every test but are **not** statically verified, so do
+   not rely on a checker to catch a violation.
+3. The test stays compatible with the body's `CONTRACT` (the same variable
    names the body reads from `ctx.config`).
 
 Produce one artifact: `skill.test.py` (derived from `skill.py` plus its
