@@ -15,12 +15,25 @@
   "engine": {
     "_comment": "Per-machine engine settings only. The pinned engine/tokenizer/GGUF refs (semif_repo, semif_ref, gguf_url, gguf_sha256, source, revision) live in the committed pins.json — bumped on update, never per-machine config. The GGUF path is derived from pins.json's engine.gguf_url under .runtime/models/; set `gguf` here only to override it with a custom path.",
     "_gpu_comment": "gpu_layers: 0 keeps the CPU-only default, -1 offloads every layer, a positive count offloads that many. Requires a llama-cpp-python built with a GPU backend (bootstrap detects Vulkan/ROCm/CUDA). gpu_device picks the llama.cpp device index and gpu_split sets its split mode (0 = none).",
+    "_provider_comment": "provider selects the decision engine, exactly like llm.provider/codegen.provider: \"semif\" (default) is the local llama.cpp GGUF described below; \"winnow\" is a remote /v1/systemone typed-decision API configured by the `winnow` block (a different model, e.g. Winnow-12B on a ROCm host). The engine is always real: a provider that cannot be reached raises EngineUnavailable, which is fatal — there is no fallback model. The decision log and `dream` cost work unchanged either way.",
+    "provider": "semif",
     "backend": "llamacpp",
     "context_tokens": 4096,
     "threads": 8,
     "gpu_layers": 0,
     "gpu_device": null,
-    "gpu_split": 0
+    "gpu_split": 0,
+    "winnow": {
+      "_comment": "Settings for provider == \"winnow\": a remote Winnow typed-decision server (`winnow-server`, ROCm/HIP on a dedicated GPU host) exposing POST /v1/systemone (choice questions) and /v1/chat/completions (text, used by llm.provider == \"semif\"). base_url is the server root; model is required (no default). timeout bounds each request; retries is the number of transient-failure retries before the engine is declared unavailable (0 = a single attempt; an unreachable engine is fatal by contract). api_key/api_key_env add a bearer token (usually unset on a LAN); extra_headers/user_agent pass through for custom setups. The Winnow model holds the whole GPU, so it cannot be resident alongside a large codegen model — stop one before starting the other.",
+      "base_url": "http://127.0.0.1:8091",
+      "model": "",
+      "api_key": "",
+      "api_key_env": "",
+      "timeout": 120,
+      "retries": 0,
+      "user_agent": "semif-agent",
+      "extra_headers": {}
+    }
   },
   "llm": {
     "_comment": "Small OpenAI-compatible model that authors a new category/skill title + description (never the runnable body — that is `codegen` below). Deliberately its own endpoint/model, so it can be local and fast even when codegen is remote. Runs on THIS machine's local ollama; bootstrap reads base_url/model from here (a --llm-url/--llm-model flag overrides for that run only) and pulls `model` if it is missing. `model` is required (no default): set it to a model the endpoint serves. Uses the same provider machinery as codegen (real SSE stream, token budget, idle watchdog); short JSON replies. Sampler params (temperature/top_p/presence_penalty/frequency_penalty) are opt-in: an unset value is omitted from the request so the server's model default applies — set them here only when you know the right values for the model. The draft is authored asynchronously by a single-slot worker and the request re-runs when it lands; an unreachable endpoint is graceful (traced, user notified), not fatal. disable_thinking sends reasoning_effort:none so a reasoning model answers the short JSON directly instead of spending the reply budget on hidden chain-of-thought (set false only for an endpoint that rejects the parameter). provider selects the transport: \"ollama\" (default; a local OpenAI-compatible server, context auto-detected via /api/show), \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code or glm-5.3, and provide api_key or api_key_env; the ollama probe is skipped), or \"semif\" (the loaded SemIf decision GGUF generates in-process via SemIfEngine.generate — no endpoint/model/api_key is used; see the `semif` block below).",
@@ -144,7 +157,7 @@
     "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` runs one or more platforms (`--platform simplex,lxmf` or `all`) in a SINGLE process sharing one scheduler/skill store — never run two gateway processes over one store. Each platform feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). reply_prefix is prepended to every reply. text_batch_delay concatenates rapid-fire messages from one contact.",
     "humanize": {
       "_comment": "Optional LLM cleanup of a skill's result line for chat replies. Off by default. When enabled, a completed result is unwrapped from the scheduler's `<skill>: <ok|failed> — <detail>` bookkeeping and rewritten by the scheduler's `llm` client into one grounded, friendly sentence; it never decides success/failure and always falls back to the raw result on any error. `timeout`/`max_tokens`/`max_chars` bound the auxiliary call (a slow cleanup must not hold the gateway). A platform turns it on/off with its own `humanize` key (bool or `{enabled: ...}`), overriding this global default; `timeout`/`max_tokens`/`max_chars` are global. Only result lines are cleaned — questions, repair/approval notices, and status chatter are untouched.",
-      "enabled": false,
+      "enabled": true,
       "timeout": 20.0,
       "max_tokens": 200,
       "max_chars": 600

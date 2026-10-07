@@ -28,7 +28,8 @@ from .console import (
     ConsoleLLMClient,
 )
 from .decisions import DecisionRequest, Option
-from .engine import EngineConfig, EngineUnavailable, SemIfEngine
+from .engine import DecisionEngine, EngineConfig, EngineUnavailable, SemIfEngine
+from .winnow import WinnowConfig, WinnowEngine
 from .llm import LLMClient, SemIfLLMClient
 from .log import DecisionLog
 from .scheduler import Scheduler
@@ -37,6 +38,8 @@ from .trace import TraceLog
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+DEFAULT_WINNOW_URL = "http://127.0.0.1:8091"
 
 _PATH_KEYS = (
     "skill_seeds",
@@ -191,6 +194,41 @@ def build_engine_config(config: dict, pins: dict | None = None) -> EngineConfig:
     )
 
 
+def build_engine(config: dict, pins: dict | None = None) -> DecisionEngine:
+    """Build the decision engine from the `engine` config block.
+
+    `provider` selects the implementation, mirroring `llm`/`codegen`:
+
+    * ``"semif"`` (default) — the local llama.cpp GGUF (`SemIfEngine`), built
+      from the per-machine `engine` knobs + the pinned refs in pins.json.
+    * ``"winnow"`` — a remote `/v1/systemone` typed-decision API
+      (`WinnowEngine`), configured by the nested `engine.winnow` block
+      (`base_url`/`model`/`api_key`/`timeout`/`retries`).
+
+    The engine is always real: a provider that cannot be reached raises
+    `EngineUnavailable` at call time, which the scheduler treats as fatal. The
+    `winnow` model is required (no default) exactly as `llm.model`/`codegen.model`
+    are, so a misconfigured endpoint fails as an actionable config error.
+    """
+    eng = config.get("engine", {}) or {}
+    provider = str(eng.get("provider", "semif") or "semif").lower()
+    if provider == "winnow":
+        win = eng.get("winnow", {}) or {}
+        endpoint = _provider_endpoint(win, DEFAULT_WINNOW_URL)
+        return WinnowEngine(
+            WinnowConfig(
+                base_url=endpoint["base_url"],
+                model=_required_model(win, "engine.winnow"),
+                timeout=float(win.get("timeout", 120.0)),
+                retries=int(win.get("retries", 0)),
+                api_key=endpoint["api_key"],
+                extra_headers=endpoint["extra_headers"],
+                user_agent=str(win.get("user_agent") or "semif-agent"),
+            )
+        )
+    return SemIfEngine(build_engine_config(config, pins))
+
+
 def build_codegen_client(config: dict) -> CodegenClient:
     """Build the codegen client from the `codegen` config block.
 
@@ -275,7 +313,7 @@ def build_llm_client(config: dict, engine):
 
 
 def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
-    engine = SemIfEngine(build_engine_config(config))
+    engine = build_engine(config)
     llm = build_llm_client(config, engine)
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
     trace = TraceLog(config.get("trace", "data/runs.jsonl"))
@@ -374,7 +412,7 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
 
 def try_warm(scheduler: Scheduler) -> str:
     try:
-        scheduler.engine._ensure_loaded()
+        scheduler.engine.warm()
         return "decision engine loaded."
     except EngineUnavailable as exc:
         return f"decision engine unavailable: {exc}"

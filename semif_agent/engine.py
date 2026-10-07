@@ -1,17 +1,21 @@
-"""Real SemIf decision engine (no mocking).
+"""The decision-engine contract and the local SemIf implementation.
 
-Wraps the SemIf package (`semif_phase1`). The import and model load happen
+`DecisionEngine` is the pluggable contract every provider satisfies; the
+provider is selected per machine by `engine.provider` in config.json, exactly
+like `llm.provider` / `codegen.provider`. `SemIfEngine` is the default: it wraps
+the SemIf package (`semif_phase1`). The import and model load happen
 lazily so the rest of the agent is pure stdlib and testable without SemIf
 installed. The shipped llama.cpp backend scores a local GGUF; it runs on CPU by
 default, and `EngineConfig.gpu_layers` offloads to a GPU when llama-cpp-python
 was built with a GPU backend (Vulkan/ROCm/CUDA). This engine is only usable on a
 machine with SemIf and the pinned GGUF available; elsewhere calls raise
-EngineUnavailable.
+EngineUnavailable. The remote alternative lives in `semif_agent.winnow`.
 """
 
 from __future__ import annotations
 
 import threading
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +23,58 @@ from .decisions import DecisionRequest, DecisionResult
 
 
 class EngineUnavailable(RuntimeError):
-    """SemIf is not installed or the configured model is missing."""
+    """The decision engine is not installed, not reachable, or failed.
+
+    This is the one error a decision engine raises. It is fatal by contract:
+    the scheduler records it (`_mark_fatal`) and the front ends exit, because
+    the agent cannot make decisions without a real engine.
+    """
+
+
+class DecisionEngine(ABC):
+    """The pluggable decision-engine contract.
+
+    A decision engine answers a `DecisionRequest` (state + question + typed
+    options) with a `DecisionResult` (probabilities over exactly those options).
+    It is selected per machine by `engine.provider` in config.json, mirroring
+    `llm.provider` / `codegen.provider`:
+
+    * ``"semif"`` (default) — the local llama.cpp GGUF (`SemIfEngine`).
+    * ``"winnow"`` — a remote ``/v1/systemone`` typed-decision API
+      (`semif_agent.winnow.WinnowEngine`).
+
+    The engine is always real: any failure to produce a decision raises
+    `EngineUnavailable`, which the scheduler treats as fatal. `generate` is the
+    optional text-generation face of the same model (used by
+    `llm.provider == "semif"`); an engine that cannot generate text raises
+    `EngineUnavailable` there rather than inventing a reply.
+    """
+
+    label: str = "engine"
+
+    @property
+    @abstractmethod
+    def loaded(self) -> bool:
+        """Whether the underlying model is loaded/warm."""
+
+    @abstractmethod
+    def warm(self) -> None:
+        """Load/warm the model, raising `EngineUnavailable` on failure."""
+
+    @abstractmethod
+    def call(self, request: DecisionRequest) -> DecisionResult:
+        """Score one decision, raising `EngineUnavailable` on failure."""
+
+    def generate(
+        self,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 256,
+    ) -> str:
+        """Autoregressively generate text from the same model, if supported."""
+        raise EngineUnavailable(
+            f"{self.label} engine does not support text generation"
+        )
 
 
 @dataclass
@@ -93,8 +148,14 @@ def _offloading_params(original, config: EngineConfig):
     return offloading
 
 
-class SemIfEngine:
-    """One pinned SemIf model, loaded once and used for every decision."""
+class SemIfEngine(DecisionEngine):
+    """One pinned SemIf model, loaded once and used for every decision.
+
+    The default `engine.provider`: the local llama.cpp GGUF. Text generation
+    from the same model backs `llm.provider == "semif"`.
+    """
+
+    label = "semif"
 
     def __init__(self, config: EngineConfig):
         self.config = config
@@ -152,6 +213,10 @@ class SemIfEngine:
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    def warm(self) -> None:
+        """Load the model (idempotent), raising `EngineUnavailable` on failure."""
+        self._ensure_loaded()
 
     def call(self, request: DecisionRequest) -> DecisionResult:
         with self._lock:

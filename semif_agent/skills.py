@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from .decisions import DecisionRequest, Option, Request
-from .engine import SemIfEngine
+from .engine import DecisionEngine
 from .llm import LLMClient
 from .log import DecisionLog
 from .timers import TimerService
@@ -41,7 +41,7 @@ class ActionResult:
 
 @dataclass
 class ActionContext:
-    engine: SemIfEngine
+    engine: DecisionEngine
     config: dict
     timers: TimerService | None = None
     # The scheduler, exposed to built-in meta skills (housekeeping) so they can
@@ -1117,7 +1117,7 @@ def merge_registry(tree: dict[str, list[Skill]], categories: dict[str, dict]) ->
 
 
 def _navigate_canned(
-    engine: SemIfEngine,
+    engine: DecisionEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,
@@ -1160,7 +1160,7 @@ def _navigate_canned(
 
 
 def navigate(
-    engine: SemIfEngine,
+    engine: DecisionEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,
@@ -1340,7 +1340,7 @@ def navigate(
 
 
 def confirm_category_fit(
-    engine: SemIfEngine,
+    engine: DecisionEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,
@@ -1405,7 +1405,7 @@ def confirm_category_fit(
 
 
 def confirm_non_action(
-    engine: SemIfEngine,
+    engine: DecisionEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,
@@ -1468,7 +1468,7 @@ def confirm_non_action(
 
 
 def confirm_skill_fit(
-    engine: SemIfEngine,
+    engine: DecisionEngine,
     log: DecisionLog,
     trace: TraceLog,
     request: Request,

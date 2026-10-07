@@ -350,13 +350,18 @@ def test_busy_queue_path(tmp_path):
     scheduler.idle()
 
 
-def test_engine_scoring_only(tmp_path):
-    """The pinned decision model scores (makes decisions); it no longer writes
-    free text. Text authoring is the `llm` provider's job."""
+def test_engine_is_pluggable(tmp_path):
+    """The configured decision engine satisfies the `DecisionEngine` contract
+    (`call` + `warm` + `generate`), whether the local `semif` provider or a
+    remote `winnow` one. The engine is selected by `engine.provider`."""
     config = load_config()
     require_real(config)
     scheduler, config = build_scheduler(config)
-    assert not hasattr(scheduler.engine, "generate")
+    from semif_agent.engine import DecisionEngine
+
+    assert isinstance(scheduler.engine, DecisionEngine)
+    assert hasattr(scheduler.engine, "call")
+    assert hasattr(scheduler.engine, "generate")
 
 
 def test_generate_category(tmp_path):

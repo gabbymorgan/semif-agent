@@ -147,10 +147,20 @@ timers.py       in-process timer/alarm service (TimerService) owned by the
                 the gateway routes it to the originating chat, the dashboard
                 shows pending/fired). Real local compute (`compute` transport),
                 per-process, and deliberately NOT persisted across restarts.
-engine.py       SemIfEngine -> semif_phase1.llamacpp_backend (lazy import);
-                call() scores a decision, generate() autoregressively samples
-                text from the same loaded model (shares the engine lock, clears
-                the KV cache) — backs the `semif` llm provider
+engine.py       DecisionEngine (the pluggable contract: call/warm/loaded/
+                generate) + SemIfEngine, the default local provider ->
+                semif_phase1.llamacpp_backend (lazy import); call() scores a
+                decision, generate() autoregressively samples text from the
+                same loaded model (shares the engine lock, clears the KV cache)
+                — backs the `semif` llm provider. Selected per machine by
+                `engine.provider` (mirrors llm.provider/codegen.provider).
+winnow.py       WinnowEngine -> a remote Winnow `/v1/systemone` typed-decision
+                HTTP API (`engine.provider == "winnow"`): maps DecisionRequest
+                to a `choice` question (options -> criteria), validates and
+                normalizes the returned distribution over exactly those option
+                ids, and generate() via /v1/chat/completions. stdlib urllib; an
+                internal lock serializes on the single-slot server; every
+                failure raises EngineUnavailable (fatal, like the local engine)
 codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 bodies against CODEGEN.md (real actions via stdlib transports,
                 data from the runner via ctx.config, never embedded; bodies
@@ -560,6 +570,33 @@ CLI, unit tests (24) + integration tests (2).
   breakdown (`scripts/voice-latency.py`) are the measurement hooks.
 
 ## Constraints & gotchas (learned the hard way)
+
+### Decision engine (providers)
+- The decision engine is **pluggable**, selected per machine by `engine.provider`
+  in config.json — the same provider pattern as `llm`/`codegen`. `"semif"`
+  (default) is the local llama.cpp GGUF (`SemIfEngine`); `"winnow"` is a remote
+  Winnow `/v1/systemone` typed-decision API (`semif_agent.winnow.WinnowEngine`,
+  configured by the nested `engine.winnow` block). `cli.build_engine` picks the
+  class; `SemIfEngine`/`WinnowEngine` both satisfy `engine.DecisionEngine`
+  (`call`/`warm`/`loaded`/`generate`).
+- **The engine is always real and every `EngineUnavailable` is fatal**,
+  whichever provider is selected: `WinnowEngine` converts every network, HTTP,
+  and malformed/unnormalized-distribution failure into `EngineUnavailable` so
+  the scheduler's fatal path (and the codegen watchdog / LLM bridge's graceful
+  paths) behave identically to the local engine. There is no fallback model.
+- The agent's flat decision (`state` + `question` + typed `options`) maps onto
+  Winnow's `choice` question type (`options` -> `criteria` id->description,
+  `question` -> `instructions`); the returned distribution is validated against
+  exactly the requested option ids and normalized. `generate` goes through the
+  same server's `/v1/chat/completions`, so `llm.provider == "semif"` keeps
+  working when the decision engine is Winnow.
+- Swapping the decision model changes routing/assessment behaviour and the
+  decision-log distribution; that is the intended per-machine choice. The
+  decision log and `dream` cost are unchanged because `DecisionResult` is the
+  same contract.
+- Context differs by provider (the local engine's `engine.context_tokens` vs the
+  remote server's own `--ctx-size`); a state that overflows is a fatal
+  `EngineUnavailable`, the same class as the local token limit.
 
 ### Environment
 - The core is pure stdlib and runs anywhere Python does. Never pip-install heavy

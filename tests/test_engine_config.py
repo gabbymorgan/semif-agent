@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from semif_agent.cli import build_engine_config
+import pytest
+
+from semif_agent.cli import build_engine, build_engine_config
 from semif_agent.engine import (
+    DecisionEngine,
     EngineConfig,
+    SemIfEngine,
     _install_gpu_state_reset,
     _offloading_params,
 )
+from semif_agent.winnow import WinnowEngine
 
 PINS = {
     "engine": {
@@ -77,3 +82,32 @@ def test_gpu_state_reset_clears_cache_data():
     _install_gpu_state_reset(SimpleNamespace(engine=engine))
     engine.clear()
     assert calls == [("mem", True)]
+
+
+def test_build_engine_defaults_to_the_local_semif_provider():
+    engine = build_engine({"engine": {"backend": "llamacpp"}}, PINS)
+    assert isinstance(engine, SemIfEngine)
+    assert isinstance(engine, DecisionEngine)
+    assert engine.label == "semif"
+
+
+def test_build_engine_selects_the_winnow_provider():
+    engine = build_engine(
+        {
+            "engine": {
+                "provider": "winnow",
+                "winnow": {"base_url": "http://example:8091", "model": "Winnow-12B"},
+            }
+        },
+        PINS,
+    )
+    assert isinstance(engine, WinnowEngine)
+    assert isinstance(engine, DecisionEngine)
+    assert engine.label == "winnow"
+    assert engine.config.base_url == "http://example:8091"
+    assert engine.config.model == "Winnow-12B"
+
+
+def test_build_engine_winnow_requires_a_model():
+    with pytest.raises(SystemExit):
+        build_engine({"engine": {"provider": "winnow", "winnow": {}}}, PINS)

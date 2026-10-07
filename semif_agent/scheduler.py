@@ -33,7 +33,7 @@ from .codegen import (
     skill_contract_ref,
 )
 from .decisions import DecisionRequest, Option, Request
-from .engine import EngineUnavailable, SemIfEngine
+from .engine import DecisionEngine, EngineUnavailable
 from .llm import LLMClient
 from .log import DecisionLog
 from .provider import ProviderError
@@ -224,7 +224,7 @@ class SchedulerReply:
 class Scheduler:
     def __init__(
         self,
-        engine: SemIfEngine,
+        engine: DecisionEngine,
         llm: LLMClient,
         log: DecisionLog,
         config: dict,
