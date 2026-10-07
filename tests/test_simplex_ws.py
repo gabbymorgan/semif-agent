@@ -141,16 +141,64 @@ def test_contact_link_reads_both_shapes():
 def test_contact_entry_reads_v7_shape():
     assert contact_entry(
         {"contactId": 4, "displayName": None, "profile": {"displayName": "Alice"}}
-    ) == {"id": "4", "display_name": "Alice"}
+    ) == {"id": "4", "display_name": "Alice", "local_name": "Alice"}
     assert contact_entry({"contactId": 7, "localDisplayName": "bob_1"}) == {
         "id": "7",
         "display_name": "bob_1",
+        "local_name": "bob_1",
     }
     assert contact_entry({"chatId": 9, "profile": {"displayName": "Carol"}}) == {
         "id": "9",
         "display_name": "Carol",
+        "local_name": "Carol",
     }
     assert contact_entry({"profile": {"displayName": "no id"}}) is None
+
+
+def test_contact_entry_keeps_unique_local_name_and_health():
+    # Two peers share the profile name "pepper"; the daemon's local name is
+    # unique, and the connection health tells a live peer from a stale one.
+    healthy = contact_entry(
+        {
+            "contactId": 4,
+            "localDisplayName": "pepper_1",
+            "profile": {"displayName": "pepper"},
+            "contactStatus": "active",
+            "activeConn": {"connStatus": {"type": "ready"}, "authErrCounter": 0},
+        }
+    )
+    assert healthy == {
+        "id": "4",
+        "display_name": "pepper",
+        "local_name": "pepper_1",
+        "connected": True,
+        "auth_errors": 0,
+    }
+    stale = contact_entry(
+        {
+            "contactId": 3,
+            "localDisplayName": "pepper",
+            "profile": {"displayName": "pepper"},
+            "contactStatus": "active",
+            "activeConn": {"connStatus": {"type": "ready"}, "authErrCounter": 2},
+        }
+    )
+    assert stale["local_name"] == "pepper"
+    assert stale["connected"] is True
+    assert stale["auth_errors"] == 2
+
+
+def test_contact_entry_marks_a_non_ready_connection_disconnected():
+    entry = contact_entry(
+        {
+            "contactId": 4,
+            "profile": {"displayName": "Alice"},
+            "contactStatus": "active",
+            "activeConn": {"connStatus": {"type": "connecting"}},
+        }
+    )
+    assert entry["connected"] is False
+    assert "auth_errors" not in entry
 
 
 # ---- daemon: accept + round-trips ----
@@ -315,8 +363,8 @@ def test_contacts_parses_contacts_list():
 
     result, ws = asyncio.run(scenario())
     assert result == [
-        {"id": "4", "display_name": "Alice"},
-        {"id": "7", "display_name": "bob_1"},
+        {"id": "4", "display_name": "Alice", "local_name": "Alice"},
+        {"id": "7", "display_name": "bob_1", "local_name": "bob_1"},
     ]
     assert [m["cmd"] for m in ws.sent] == ["/user", "/_contacts 3"]
 

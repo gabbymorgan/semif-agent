@@ -14,11 +14,20 @@ gateway process.
 from __future__ import annotations
 
 import threading
+import time
 
-from semif_agent.simplex_ws import SimplexDaemon
+from semif_agent.simplex_ws import SimplexDaemon, parse_send_response
 
 from .base import BridgeInfo, BridgeService
 from .inbox import MessagingInbox
+
+#: Send statuses that mean the message really left the agent.
+SEND_OK_STATUSES = frozenset({"sndSent", "sndRcvd"})
+#: Send statuses that are final (no further polling needed).
+SEND_TERMINAL_STATUSES = frozenset({"sndSent", "sndRcvd", "sndError"})
+#: How long to poll the daemon for a terminal send status before giving up.
+SEND_CONFIRM_TIMEOUT = 6.0
+SEND_POLL_INTERVAL = 0.5
 
 
 class SimplexBridge(BridgeService):
@@ -34,9 +43,13 @@ class SimplexBridge(BridgeService):
         endpoints=(
             "GET /health -> 200 {\"ok\": true, \"platform\": \"simplex\"} — the "
             "bridge is up",
-            "GET /contacts -> 200 {\"contacts\": [{\"id\", \"display_name\"}]} — "
-            "contacts known to the daemon (learned from inbound messages and "
-            "refreshed from the daemon's contact list)",
+            "GET /contacts -> 200 {\"contacts\": [{\"id\", \"display_name\", "
+            "\"local_name\"?, \"connected\"?}]} — contacts known to the daemon "
+            "(learned from inbound messages and refreshed from the daemon's "
+            "contact list). `display_name` is the peer's profile name and can "
+            "collide; `local_name` is the daemon's unique local name; "
+            "`connected` (when the daemon reports it) is false for a peer whose "
+            "connection is not ready — prefer a connected peer",
             "GET /inbox -> 200 {\"messages\": [{\"id\", \"contact_id\", "
             "\"display_name\", \"text\", \"received_at\"}]} — peek buffered "
             "inbound messages; does not consume",
@@ -44,22 +57,29 @@ class SimplexBridge(BridgeService):
             "the oldest unread message (optionally from one contact); null means "
             "none buffered. The bridge owns the read cursor",
             "GET /unread -> 200 {\"chats\": [{\"contact_id\", \"display_name\", "
-            "\"unread_count\", \"min_unread_item_id\", \"unread\", \"messages\": "
+            "\"unread_count\", \"min_unread_item_id\", \"unread\", "
+            "\"connected\"?, \"auth_errors\"?, \"messages\": "
             "[{item_id, text, status, unread, direction, sent_at}]}]} — the "
             "daemon's persistent unread chats (survives bridge restarts), not "
             "just what arrived while connected. Read-only; 503 when the daemon "
             "is not connected, 502 when the lookup fails",
             "GET /history?contact=<id>&count=<n> -> 200 {\"contact_id\", "
             "\"messages\": [{item_id, text, status, unread, direction, "
-            "sent_at}]} — recent message history for one contact (count default "
-            "20); status is rcvNew (unread) or rcvRead. Read-only; 503/502 as "
-            "/unread, 400 without a contact",
+            "sent_at, error?}]} — recent message history for one contact (count "
+            "default 20); status is rcvNew (unread), rcvRead, sndSent, sndRcvd, "
+            "or sndError, and `error` carries the agent reason (e.g. auth) on a "
+            "failed send. Read-only; 503/502 as /unread, 400 without a contact",
             "GET /address -> 200 {\"short_link\", \"full_link\", \"created\"} — "
             "the agent's contact link; creates it on first call. 503 when the "
             "daemon is not connected, 502 when the lookup fails",
-            "POST /send {\"recipient\": \"<id|display_name>\", \"text\": \"...\"} "
-            "-> 200 {\"ok\": true, \"contact_id\": \"<id>\"}; 400 {\"error\": "
-            "\"...\"} on a missing/invalid field or an unknown recipient",
+            "POST /send {\"recipient\": \"<id|local_name|display_name>\", "
+            "\"text\": \"...\"} -> 200 {\"ok\": bool, \"contact_id\": \"<id>\", "
+            "\"item_id\": \"<id>\", \"status\": \"sndSent|sndRcvd|sndError\", "
+            "\"error\": \"...\"?}. The bridge resolves the recipient, sends, and "
+            "waits for the daemon's real send status: `ok` is true only for "
+            "sndSent/sndRcvd, and a failed send (e.g. an auth error on a dead "
+            "connection) returns ok:false with the reason — never a false "
+            "success. 400 on a missing/invalid field or an unknown recipient",
             "any request -> 401 {\"error\": \"unauthorized\"} when the token is "
             "configured and the auth header is missing or wrong",
         ),
@@ -170,10 +190,10 @@ class SimplexBridge(BridgeService):
         if not isinstance(text, str) or not text.strip():
             return 400, {"error": "text is required"}
         try:
-            contact_id = self.send(recipient, text)
+            result = self.send(recipient, text)
         except ValueError as exc:
             return 400, {"error": str(exc)}
-        return 200, {"ok": True, "contact_id": contact_id}
+        return 200, result
 
     # ---- actions ----
 
@@ -207,7 +227,24 @@ class SimplexBridge(BridgeService):
             return 503, {"error": f"unread lookup is not available: {exc}"[:300]}
         except Exception as exc:  # TimeoutError, daemon error
             return 502, {"error": f"unread lookup failed: {exc}"[:300]}
+        self._attach_health(chats)
         return 200, {"chats": chats}
+
+    def _attach_health(self, chats: list[dict]) -> None:
+        """Merge cached connection health into each chat summary, in place.
+
+        Lets a caller prefer a live conversation over a stale duplicate when
+        several chats share a display name. Best-effort: a chat with no cached
+        contact is left untouched.
+        """
+        health = {c["id"]: c for c in self.inbox.contacts()}
+        for chat in chats:
+            info = health.get(str(chat.get("contact_id") or ""))
+            if not info:
+                continue
+            for key in ("connected", "auth_errors"):
+                if key in info:
+                    chat[key] = info[key]
 
     def _history(self, contact: str | None, count: str | None) -> tuple[int, dict]:
         """Recent message history for one contact, straight from the daemon.
@@ -247,20 +284,93 @@ class SimplexBridge(BridgeService):
             return 502, {"error": "address lookup returned no link"}
         return 200, link
 
-    def send(self, recipient: str, text: str) -> str:
-        """Resolve a recipient and enqueue the message. Returns the contact id."""
+    def send(self, recipient: str, text: str) -> dict:
+        """Resolve a recipient, send the text, and report the real outcome.
+
+        Returns `{ok, contact_id, item_id?, status?, error?}`. `ok` is True only
+        when the daemon created the message and it reached a terminal status of
+        `sndSent` (relayed to the server) or `sndRcvd` (delivered to the peer).
+        A dead connection surfaces as `ok: false` carrying the daemon's agent
+        error (e.g. `auth`) — never a false success.
+        """
         contact_id = self.resolve(recipient)
         if contact_id is None:
             raise ValueError(f"unknown SimpleX recipient: {recipient!r}")
-        self.daemon.enqueue(contact_id, text)
-        return contact_id
+        try:
+            response = self.daemon.request_send(contact_id, text)
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "contact_id": contact_id,
+                "status": "unavailable",
+                "error": str(exc)[:300],
+            }
+        except Exception as exc:  # TimeoutError, daemon error
+            return {
+                "ok": False,
+                "contact_id": contact_id,
+                "status": "error",
+                "error": str(exc)[:300],
+            }
+        parsed = parse_send_response(response)
+        if parsed["item_id"] is None:
+            return {
+                "ok": False,
+                "contact_id": contact_id,
+                "status": "rejected",
+                "error": parsed["error"] or "the daemon rejected the send",
+            }
+        item_id = parsed["item_id"]
+        status, error = parsed["status"], parsed["error"]
+        if status not in SEND_TERMINAL_STATUSES:
+            status, error = self._await_send_status(contact_id, item_id, status)
+        result = {
+            "ok": status in SEND_OK_STATUSES,
+            "contact_id": contact_id,
+            "item_id": item_id,
+            "status": status,
+        }
+        if not result["ok"]:
+            result["error"] = error or f"send status {status}"
+        return result
+
+    def _await_send_status(
+        self, contact_id: str, item_id: str, current: str,
+        timeout: float = SEND_CONFIRM_TIMEOUT,
+    ) -> tuple[str, str]:
+        """Poll the daemon for the item's terminal send status + agent error.
+
+        A send is `sndNew` the moment it is created; the agent then resolves it
+        to `sndSent`/`sndRcvd` (success) or `sndError` (failure, with the reason
+        in `agentError`). Returns `(status, error)`; a still-`sndNew` item after
+        the window stays unconfirmed rather than being reported as sent.
+        """
+        deadline = time.monotonic() + timeout
+        status, error = current, ""
+        while True:
+            try:
+                messages = self.daemon.request_chat_history(contact_id, count=20)
+            except Exception:
+                return status or "unknown", error
+            for message in messages:
+                if str(message.get("item_id")) == str(item_id):
+                    status = str(message.get("status") or "")
+                    error = str(message.get("error") or "")
+            if status in SEND_TERMINAL_STATUSES:
+                return status, error
+            if time.monotonic() >= deadline:
+                return status or "unknown", error
+            time.sleep(SEND_POLL_INTERVAL)
 
     def resolve(self, recipient: str) -> str | None:
-        """A numeric id (with or without `@`) or a known display name.
+        """A numeric id (with or without `@`), a unique local name, or a display name.
 
-        On a display-name miss, refresh the daemon's contact list once and
-        retry: a contact the bridge has never received from is still addressable
-        as long as the daemon knows them.
+        An explicit id always wins. Two peers can share a profile display name
+        (the daemon suffixes its own local names, e.g. `pepper` / `pepper_1`),
+        so a local-name or display-name match that hits several peers prefers
+        the healthiest (connected, no recorded auth errors). On a miss, refresh
+        the daemon's contact list once and retry: a contact the bridge has never
+        received from is still addressable as long as the daemon knows them.
         """
         recipient = str(recipient or "").strip()
         if not recipient:
@@ -275,7 +385,43 @@ class SimplexBridge(BridgeService):
         return match
 
     def _match_contact(self, recipient: str) -> str | None:
-        for contact in self.inbox.contacts():
-            if contact["display_name"] == recipient or contact["id"] == recipient:
+        contacts = self.inbox.contacts()
+        for contact in contacts:
+            if contact["id"] == recipient:
                 return contact["id"]
+        exact = [
+            c
+            for c in contacts
+            if c.get("local_name") == recipient or c["display_name"] == recipient
+        ]
+        if exact:
+            return self._prefer_connected(exact)
+        lowered = recipient.lower()
+        partial = [
+            c
+            for c in contacts
+            if lowered in c["display_name"].lower()
+            or lowered in str(c.get("local_name", "")).lower()
+        ]
+        if len(partial) == 1:
+            return partial[0]["id"]
+        if partial:
+            return self._prefer_connected(partial)
         return None
+
+    @staticmethod
+    def _prefer_connected(matches: list[dict]) -> str:
+        """Pick the healthiest peer among equally-named matches.
+
+        Prefer a ready connection, then a connection with no recorded auth
+        errors (a stale duplicate that fails to send), and finally the first.
+        """
+
+        def rank(contact: dict) -> tuple[bool, bool]:
+            try:
+                clean = int(contact.get("auth_errors") or 0) == 0
+            except (TypeError, ValueError):
+                clean = True
+            return (bool(contact.get("connected")), clean)
+
+        return max(matches, key=rank)["id"]

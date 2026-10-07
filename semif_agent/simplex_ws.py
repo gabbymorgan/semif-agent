@@ -34,25 +34,45 @@ ConnectedHandler = Callable[[], Awaitable[None]]
 
 
 def contact_entry(contact: dict) -> dict | None:
-    """Normalize one daemon `Contact` into `{"id", "display_name"}`, or None.
+    """Normalize one daemon `Contact` into a contact dict, or None.
 
     The single source of truth for contact identity across the wire: the same
     shape appears in `newChatItems` items and in the `/_contacts` list. v7's
     `Contact.displayName` is null and the real peer name lives in
-    `profile.displayName`; `localDisplayName` is auto-suffixed on collisions
-    (e.g. a second contact becomes `pepper_1`).
+    `profile.displayName`; `localDisplayName` is the daemon's **unique** local
+    name, auto-suffixed on collisions (e.g. a second contact becomes
+    `pepper_1`). We keep both: `display_name` is the peer's profile name (what
+    a human recognizes, but it can collide) and `local_name` is the daemon's
+    unique name, so two peers with the same profile name stay distinguishable.
+    When the daemon reports connection state (the `/_contacts` list does),
+    `connected` and `auth_errors` are included so callers can prefer a live
+    peer over a dead one.
     """
     contact_id = str(contact.get("contactId") or contact.get("chatId") or "")
     if not contact_id:
         return None
     profile = contact.get("profile") or {}
+    local_name = (
+        contact.get("localDisplayName")
+        or contact.get("displayName")
+        or profile.get("displayName")
+        or ""
+    )
     display_name = (
         profile.get("displayName")
         or contact.get("displayName")
-        or contact.get("localDisplayName")
+        or local_name
         or ""
     )
-    return {"id": contact_id, "display_name": display_name}
+    entry = {"id": contact_id, "display_name": display_name, "local_name": local_name}
+    active = contact.get("activeConn") or {}
+    conn = active.get("connStatus") or {}
+    status = contact.get("contactStatus")
+    if status is not None or conn:
+        entry["connected"] = status == "active" and conn.get("type") == "ready"
+    if isinstance(active.get("authErrCounter"), int):
+        entry["auth_errors"] = active["authErrCounter"]
+    return entry
 
 
 def contact_link(resp: dict) -> dict:
@@ -111,8 +131,9 @@ def parse_chat_item(item: dict) -> dict | None:
     text = _text_from_content(item.get("content") or {})
     if not text:
         return None
-    status = (meta.get("itemStatus") or {}).get("type") or ""
-    return {
+    status_obj = meta.get("itemStatus") or {}
+    status = status_obj.get("type") or ""
+    entry = {
         "item_id": str(item_id),
         "text": text,
         "status": status,
@@ -120,6 +141,12 @@ def parse_chat_item(item: dict) -> dict | None:
         "direction": (item.get("chatDir") or {}).get("type") or "",
         "sent_at": meta.get("itemTs") or "",
     }
+    # A failed send carries the agent-level reason (`{"type":"auth"}` etc.);
+    # surface it so a caller can report *why* a message did not go out.
+    agent_error = status_obj.get("agentError") or {}
+    if agent_error:
+        entry["error"] = agent_error.get("type") or str(agent_error)
+    return entry
 
 
 def parse_chat(achat: dict) -> dict | None:
@@ -198,6 +225,7 @@ def parse_direct_text_item(item: dict) -> InboundDict | None:
         "text": text,
         "contact_id": entry["id"],
         "display_name": entry["display_name"],
+        "local_name": entry.get("local_name", ""),
         "raw": item,
     }
 
@@ -226,6 +254,31 @@ def accept_command(resp: dict) -> str | None:
     if req_id is None:
         return None
     return f"/_accept {req_id}"
+
+
+def parse_send_response(resp: dict) -> dict:
+    """Normalize a `/_send` response into `{item_id, status, error}`.
+
+    A successful send comes back as `newChatItems` carrying the freshly created
+    `chatItem` (its `meta.itemId` and initial `meta.itemStatus`, usually
+    `sndNew`). A rejected send comes back as `chatCmdError`. `item_id` is None
+    on any rejection so the caller can tell "no message was created" from
+    "created but later failed at the agent layer".
+    """
+    if not isinstance(resp, dict):
+        return {"item_id": None, "status": "", "error": "empty daemon response"}
+    if resp.get("type") == "chatCmdError" or resp.get("error"):
+        detail = resp.get("chatError") or resp.get("error") or "chat command failed"
+        return {"item_id": None, "status": "", "error": str(detail)[:300]}
+    for item in resp.get("chatItems") or []:
+        meta = (item.get("chatItem") or {}).get("meta") or {}
+        item_id = meta.get("itemId")
+        if item_id is None:
+            continue
+        status = (meta.get("itemStatus") or {}).get("type") or ""
+        error = ((meta.get("itemStatus") or {}).get("agentError") or {}).get("type") or ""
+        return {"item_id": str(item_id), "status": status, "error": error}
+    return {"item_id": None, "status": "", "error": "daemon returned no message id"}
 
 
 class SimplexDaemon:
@@ -433,6 +486,37 @@ class SimplexDaemon:
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
             raise TimeoutError("simplex address request timed out") from exc
+
+    # ---- send ----
+
+    async def send(self, chat_id: str, text: str, timeout: float = 20.0) -> dict:
+        """Send a direct text message and return the daemon's correlated reply.
+
+        Unlike `enqueue` (fire-and-forget, used by the command gateway), this
+        awaits the `/_send` response so the caller sees whether the message was
+        created and its initial status. The daemon reports agent-level failures
+        (auth, quota) asynchronously, so a caller that needs delivery truth must
+        still poll `chat_history` for the item's terminal status.
+        """
+        return await self._roundtrip(send_text_command(chat_id, text), timeout)
+
+    def request_send(self, chat_id: str, text: str, timeout: float = 20.0) -> dict:
+        """Thread-safe correlated send for callers off the event loop.
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated success.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(
+            self.send(chat_id, text, timeout=timeout), loop
+        )
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex send request timed out") from exc
 
     # ---- contacts ----
 

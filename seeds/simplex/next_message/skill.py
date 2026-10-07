@@ -9,6 +9,11 @@ the configured default contact is used; with no configured default (or a default
 with no unread message) the weak winner stands. It then pops and reports the
 oldest unread message for that conversation.
 
+When the live buffer is empty it falls back to the daemon's persistent unread
+(`/unread` + `/history`), so a message that arrived before the bridge started is
+still reported. (v7 has no mark-read command, so a persistent-unread message can
+be reported again until the user reads it in their own client.)
+
 The bridge owns the read cursor, so this skill keeps no state of its own. It
 never opens a WebSocket to the `simplex-chat` daemon — the bridge is the only
 messaging surface it uses.
@@ -97,6 +102,20 @@ def _senders(messages):
     return senders
 
 
+def _is_healthy(sender):
+    """A conversation is healthy when its connection is not known-bad.
+
+    `connected` is absent when the source did not report it (treat as unknown);
+    `auth_errors` counts failed sends on the connection and marks a stale peer.
+    """
+    if sender.get("connected") is False:
+        return False
+    try:
+        return int(sender.get("auth_errors") or 0) == 0
+    except (TypeError, ValueError):
+        return True
+
+
 def _default_sender(ctx, senders):
     """The configured default contact, if it has unread messages."""
     default = str(ctx.config.get("simplex_default_contact", "") or "").strip()
@@ -142,11 +161,15 @@ def act(ctx, request):
     except BridgeError as exc:
         return ActionResult(action_log=str(exc), new_state=request.text)
     senders = _senders(payload.get("messages") or [])
-    if not senders:
-        return ActionResult(
-            action_log="no unread SimpleX messages.",
-            new_state="no unread SimpleX messages",
-        )
+    if senders:
+        return _read_live(ctx, request, senders)
+    # The live buffer only holds messages that arrived while the bridge was
+    # connected; fall back to the daemon's persistent unread so a message that
+    # landed before the bridge started is not silently missed.
+    return _read_persistent(ctx, request)
+
+
+def _read_live(ctx, request, senders):
     decisions = []
     contact = _resolve_contact(ctx, request, senders, decisions)
     try:
@@ -166,7 +189,70 @@ def act(ctx, request):
             new_state="no unread SimpleX messages",
             decisions=decisions,
         )
-    sender = message.get("display_name") or contact
-    body = str(message.get("text") or "")
-    report = f"SimpleX message from {sender}: {body}"
+    return _report(message.get("display_name") or contact, message.get("text"), decisions)
+
+
+def _read_persistent(ctx, request):
+    try:
+        payload = _get(ctx, "/unread")
+    except BridgeError as exc:
+        return ActionResult(
+            action_log=f"no unread SimpleX messages ({exc}).",
+            new_state="no unread SimpleX messages",
+        )
+    chats = [c for c in (payload.get("chats") or []) if c.get("unread")]
+    if not chats:
+        return ActionResult(
+            action_log="no unread SimpleX messages.",
+            new_state="no unread SimpleX messages",
+        )
+    senders = [
+        {
+            "id": str(chat.get("contact_id") or ""),
+            "display_name": chat.get("display_name") or str(chat.get("contact_id") or ""),
+            "connected": chat.get("connected"),
+            "auth_errors": chat.get("auth_errors"),
+        }
+        for chat in chats
+        if chat.get("contact_id")
+    ]
+    decisions = []
+    healthy = [s for s in senders if _is_healthy(s)]
+    if len(healthy) == 1:
+        # Exactly one conversation is on a healthy connection (the rest are
+        # stale duplicates): read it without a coin-flip decision.
+        contact = healthy[0]["id"]
+    else:
+        contact = _resolve_contact(ctx, request, senders, decisions)
+    try:
+        history = _get(
+            ctx, f"/history?contact={urllib.parse.quote(contact)}&count=50"
+        )
+    except BridgeError as exc:
+        return ActionResult(
+            action_log=f"failed reading {contact!r}: {exc}",
+            new_state=request.text,
+            decisions=decisions,
+        )
+    messages = [m for m in (history.get("messages") or []) if m.get("unread")]
+    if not messages:
+        # Fall back to the previewed unread messages from /unread.
+        chat = next(
+            (c for c in chats if str(c.get("contact_id")) == str(contact)), {}
+        )
+        messages = [m for m in (chat.get("messages") or []) if m.get("unread")]
+    if not messages:
+        return ActionResult(
+            action_log=f"no unread message from {contact!r}.",
+            new_state="no unread SimpleX messages",
+            decisions=decisions,
+        )
+    sender = next(
+        (s["display_name"] for s in senders if s["id"] == str(contact)), str(contact)
+    )
+    return _report(sender, messages[0].get("text"), decisions)
+
+
+def _report(sender, body, decisions):
+    report = f"SimpleX message from {sender}: {str(body or '')}"
     return ActionResult(action_log=report, new_state=report, decisions=decisions)

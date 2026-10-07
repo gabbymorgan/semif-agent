@@ -32,6 +32,8 @@ class FakeDaemon:
         chats_error=None,
         history=None,
         history_error=None,
+        send_response=None,
+        send_error=None,
     ):
         self.link = link
         self.error = error
@@ -41,6 +43,8 @@ class FakeDaemon:
         self.chats_error = chats_error
         self.history_list = history or []
         self.history_error = history_error
+        self.send_response = send_response
+        self.send_error = send_error
         self.refresh_count = 0
         self.chat_calls = []
         self.history_calls = []
@@ -57,6 +61,19 @@ class FakeDaemon:
     def enqueue(self, chat_id, text=""):
         if chat_id is not None:
             self.sent.append((chat_id, text))
+
+    def request_send(self, chat_id, text, timeout=20.0):
+        self.sent.append((chat_id, text))
+        if self.send_error is not None:
+            raise self.send_error
+        if self.send_response is not None:
+            return self.send_response
+        return {
+            "type": "newChatItems",
+            "chatItems": [
+                {"chatItem": {"meta": {"itemId": 1, "itemStatus": {"type": "sndRcvd"}}}}
+            ],
+        }
 
     def request_address(self, timeout=20.0):
         if self.error is not None:
@@ -186,7 +203,9 @@ def test_send_routes_to_daemon():
     bridge, daemon, base = start_bridge()
     try:
         result = post(f"{base}/send", {"recipient": "7", "text": "on my way"})
-        assert result == {"ok": True, "contact_id": "7"}
+        assert result["ok"] is True, result
+        assert result["contact_id"] == "7", result
+        assert result["status"] == "sndRcvd", result
         assert daemon.sent == [("7", "on my way")]
     finally:
         bridge.stop()
@@ -199,6 +218,80 @@ def test_send_resolves_known_display_name():
         result = post(f"{base}/send", {"recipient": "Alice", "text": "hello"})
         assert result["contact_id"] == "4"
         assert daemon.sent == [("4", "hello")]
+    finally:
+        bridge.stop()
+
+
+def test_send_reports_a_failed_send_not_a_false_success():
+    # A dead connection: the daemon creates the item then marks it sndError.
+    # The bridge must surface ok:false with the reason, never a false success.
+    failed = {
+        "type": "newChatItems",
+        "chatItems": [
+            {
+                "chatItem": {
+                    "meta": {
+                        "itemId": 12,
+                        "itemStatus": {
+                            "type": "sndError",
+                            "agentError": {"type": "auth"},
+                        },
+                    }
+                }
+            }
+        ],
+    }
+    daemon = FakeDaemon(send_response=failed)
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        result = post(f"{base}/send", {"recipient": "7", "text": "hey"})
+        assert result["ok"] is False, result
+        assert result["status"] == "sndError", result
+        assert result["error"] == "auth", result
+        assert result["contact_id"] == "7"
+    finally:
+        bridge.stop()
+
+
+def test_send_verifies_status_via_history():
+    # The daemon accepts the send (sndNew) and only later resolves it to a
+    # delivered status; the bridge polls history to confirm.
+    accepted = {
+        "type": "newChatItems",
+        "chatItems": [
+            {"chatItem": {"meta": {"itemId": 5, "itemStatus": {"type": "sndNew"}}}}
+        ],
+    }
+    history = [
+        {"item_id": "5", "text": "hi", "status": "sndRcvd", "unread": False,
+         "direction": "directSnd", "sent_at": ""},
+    ]
+    daemon = FakeDaemon(send_response=accepted, history=history)
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        result = post(f"{base}/send", {"recipient": "7", "text": "hi"})
+        assert result["ok"] is True, result
+        assert result["status"] == "sndRcvd", result
+        assert daemon.history_calls, "the bridge must poll for the real status"
+    finally:
+        bridge.stop()
+
+
+def test_resolve_prefers_a_healthy_duplicate():
+    # Two peers share the display name "pepper"; the stale one has auth errors.
+    daemon = FakeDaemon(
+        contacts=[
+            {"id": "3", "display_name": "pepper", "local_name": "pepper",
+             "connected": True, "auth_errors": 2},
+            {"id": "4", "display_name": "pepper", "local_name": "pepper_1",
+             "connected": True, "auth_errors": 0},
+        ]
+    )
+    bridge, _, _ = start_bridge(daemon=daemon)
+    try:
+        assert bridge.resolve("pepper") == "4", "a stale duplicate must lose"
+        assert bridge.resolve("pepper_1") == "4"
+        assert bridge.resolve("3") == "3", "an explicit id always wins"
     finally:
         bridge.stop()
 
@@ -222,7 +315,7 @@ def test_send_resolves_daemon_only_contact():
     bridge, _, base = start_bridge(daemon=daemon)
     try:
         result = post(f"{base}/send", {"recipient": "Zed", "text": "hello"})
-        assert result == {"ok": True, "contact_id": "42"}
+        assert result["ok"] is True and result["contact_id"] == "42", result
         assert daemon.sent == [("42", "hello")]
     finally:
         bridge.stop()
@@ -366,6 +459,23 @@ def test_unread_returns_daemon_chats():
     try:
         assert get(f"{base}/unread") == {"chats": [chat_summary()]}
         assert daemon.chat_calls == [(True, 20)], "must ask the daemon for unread"
+    finally:
+        bridge.stop()
+
+
+def test_unread_attaches_cached_connection_health():
+    daemon = FakeDaemon(chats=[chat_summary(contact_id="4", display_name="pepper")])
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        bridge.inbox.merge_contacts(
+            [
+                {"id": "4", "display_name": "pepper", "local_name": "pepper_1",
+                 "connected": True, "auth_errors": 0},
+            ]
+        )
+        chats = get(f"{base}/unread")["chats"]
+        assert chats[0]["connected"] is True
+        assert chats[0]["auth_errors"] == 0
     finally:
         bridge.stop()
 

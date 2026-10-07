@@ -51,6 +51,8 @@ class FakeEngine:
 
 class BridgeHandler(BaseHTTPRequestHandler):
     messages = []
+    unread_chats = []
+    history = {}
     requests = []
     tokens = []
 
@@ -76,6 +78,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     found = self.messages.pop(index)
                     break
             self._send({"message": found})
+        elif url.path == "/unread":
+            self._send({"chats": list(self.unread_chats)})
+        elif url.path == "/history":
+            contact = (urllib.parse.parse_qs(url.query).get("contact") or [None])[0]
+            self._send(
+                {"contact_id": contact, "messages": list(self.history.get(str(contact), []))}
+            )
         else:
             self._send({"error": "not found"}, 404)
 
@@ -83,11 +92,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_server(messages):
+def start_server(messages, unread_chats=None, history=None):
     handler = type(
         "Handler",
         (BridgeHandler,),
-        {"messages": list(messages), "requests": [], "tokens": []},
+        {
+            "messages": list(messages),
+            "unread_chats": list(unread_chats or []),
+            "history": dict(history or {}),
+            "requests": [],
+            "tokens": [],
+        },
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -225,7 +240,88 @@ def test_empty_inbox_is_reported_honestly():
         request = Request("read my next simplex message")
         action = skill.act(ctx, request)
         assert "no unread" in action.action_log, action.action_log
-        assert handler.requests == ["/inbox"], "an empty inbox needs no pop"
+        # An empty live buffer falls back to the daemon's persistent unread.
+        assert handler.requests == ["/inbox", "/unread"], handler.requests
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_empty_live_inbox_falls_back_to_persistent_unread():
+    server, handler, url = start_server(
+        [],
+        unread_chats=[
+            {
+                "contact_id": "3",
+                "display_name": "pepper",
+                "unread_count": 2,
+                "min_unread_item_id": "8",
+                "unread": True,
+                "messages": [],
+            }
+        ],
+        history={
+            "3": [
+                {"item_id": "8", "text": "hello", "status": "rcvNew", "unread": True},
+                {"item_id": "9", "text": "hey yo", "status": "rcvNew", "unread": True},
+            ]
+        },
+    )
+    try:
+        engine = FakeEngine()
+        ctx = ActionContext(engine=engine, config=config(url))
+        request = Request("read my next simplex message")
+        action = skill.act(ctx, request)
+        assert engine.decisions == [], "a single unread chat needs no decision"
+        assert "hello" in action.action_log, action.action_log
+        assert "pepper" in action.action_log, action.action_log
+        assert handler.requests == ["/inbox", "/unread", "/history?contact=3&count=50"], (
+            handler.requests
+        )
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_persistent_unread_prefers_a_healthy_conversation():
+    server, handler, url = start_server(
+        [],
+        unread_chats=[
+            {
+                "contact_id": "3",
+                "display_name": "pepper",
+                "unread_count": 1,
+                "unread": True,
+                "connected": True,
+                "auth_errors": 2,
+                "messages": [],
+            },
+            {
+                "contact_id": "4",
+                "display_name": "pepper",
+                "unread_count": 1,
+                "unread": True,
+                "connected": True,
+                "auth_errors": 0,
+                "messages": [],
+            },
+        ],
+        history={
+            "3": [{"item_id": "8", "text": "stale hello", "status": "rcvNew", "unread": True}],
+            "4": [{"item_id": "20", "text": "fresh hello", "status": "rcvNew", "unread": True}],
+        },
+    )
+    try:
+        engine = FakeEngine()
+        ctx = ActionContext(engine=engine, config=config(url))
+        action = skill.act(ctx, Request("read my next simplex message"))
+        assert engine.decisions == [], "one healthy chat must win without a decision"
+        assert "fresh hello" in action.action_log, action.action_log
+        assert handler.requests == ["/inbox", "/unread", "/history?contact=4&count=50"], (
+            handler.requests
+        )
         print(action.action_log)
     finally:
         server.shutdown()
@@ -264,6 +360,8 @@ def main():
     test_weak_winner_without_default_stands()
     test_single_sender_needs_no_decision()
     test_empty_inbox_is_reported_honestly()
+    test_empty_live_inbox_falls_back_to_persistent_unread()
+    test_persistent_unread_prefers_a_healthy_conversation()
     test_unreachable_bridge_fails_honestly()
     test_auth_token_is_sent_when_configured()
     print("ok")

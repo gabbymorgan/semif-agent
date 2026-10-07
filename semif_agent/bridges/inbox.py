@@ -18,7 +18,7 @@ class MessagingInbox:
         self._lock = threading.Lock()
         self._items: deque[dict] = deque()
         self._max = max(1, int(max_size))
-        self._contacts: dict[str, str] = {}
+        self._contacts: dict[str, dict] = {}
 
     def record(self, message: dict) -> dict:
         contact_id = str(message.get("contact_id") or "")
@@ -31,14 +31,25 @@ class MessagingInbox:
             "received_at": time.time(),
         }
         with self._lock:
-            if display_name:
-                self._contacts[contact_id] = display_name
-            else:
-                self._contacts.setdefault(contact_id, "")
+            self._remember(contact_id, message)
             self._items.append(entry)
             while len(self._items) > self._max:
                 self._items.popleft()
         return entry
+
+    def _remember(self, contact_id: str, contact: dict) -> None:
+        """Upsert the cached contact for an id (caller holds the lock)."""
+        current = self._contacts.setdefault(
+            contact_id, {"id": contact_id, "display_name": ""}
+        )
+        name = contact.get("display_name") or ""
+        if name:
+            current["display_name"] = name
+        # Keep the unique local name and connection health when the source knows
+        # them; never invent them (an inbound item has no connection state).
+        for key in ("local_name", "connected", "auth_errors"):
+            if key in contact and contact[key] not in (None, ""):
+                current[key] = contact[key]
 
     def peek(self) -> list[dict]:
         with self._lock:
@@ -59,22 +70,17 @@ class MessagingInbox:
         """Upsert contacts learned from the daemon (not from a message).
 
         A non-empty incoming name overwrites a cached one; an empty name never
-        clobbers a name already learned from an inbound message.
+        clobbers a name already learned from an inbound message. The unique
+        local name and connection health ride along when the daemon reports
+        them.
         """
         with self._lock:
             for contact in contacts:
                 contact_id = str(contact.get("id") or "")
                 if not contact_id:
                     continue
-                name = contact.get("display_name") or ""
-                if name:
-                    self._contacts[contact_id] = name
-                else:
-                    self._contacts.setdefault(contact_id, "")
+                self._remember(contact_id, contact)
 
     def contacts(self) -> list[dict]:
         with self._lock:
-            return [
-                {"id": contact_id, "display_name": name}
-                for contact_id, name in self._contacts.items()
-            ]
+            return [dict(contact) for contact in self._contacts.values()]
