@@ -1015,7 +1015,8 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
             {
                 "top-level category": {"simplex": 1.0},
                 "Does the scope": {"covers": 1.0},
-                # Below softmax_bypass_tau (0.5), so the intent guard runs.
+                # The leaf softmax offers only existing skills, so the intent
+                # guard always runs (it is the create door).
                 "skill performs": {"next_message": 0.45, "connect_link": 0.3},
                 "same action": {"same": 0.8, "different": 0.2},
             }
@@ -1127,10 +1128,15 @@ def test_dispatch_intent_match_runs_skill(tmp_path):
     assert result.skill == "next_message"
 
 
-def test_dispatch_confident_leaf_winner_skips_intent_guard(tmp_path):
-    """A leaf softmax winner at/above `softmax_bypass_tau` skips the intent
-    confirm: the guard would reject here (same action = different), but a
-    decisive softmax runs the skill instead."""
+def test_dispatch_confident_leaf_winner_still_runs_intent_guard(tmp_path):
+    """A leaf softmax winner at/above `softmax_bypass_tau` does NOT skip the
+    intent confirm: the leaf softmax offers only existing skills (no create
+    option), so a confident winner is "best of the wrong lot", never a match.
+    The guard runs and, here, rejects the winner into create_skill.
+
+    Regression: with Winnow as the engine a send request picked `connect_link`
+    at 0.86 / `next_message` at 0.995, the old `intent_bypass` ran a read skill,
+    and codegen was never reached."""
     engine = _ProbEngine(
         {
             "top-level category": {"simplex": 1.0},
@@ -1165,12 +1171,16 @@ def test_dispatch_confident_leaf_winner_skips_intent_guard(tmp_path):
             Skill(name="connect_link", category="simplex", description="Show the contact link."),
         ]
     }
-    result = scheduler._dispatch(Request("read the next simplex message"))
-    assert result.kind == "ran"
-    assert result.skill == "next_message"
-    assert any(e["kind"] == "intent_bypass" for e in scheduler.trace.read())
+    queued: list = []
+    scheduler._queue_draft = lambda request, category, kind: queued.append(
+        (category, kind)
+    )
+    result = scheduler._dispatch(Request("send a simplex message to pepper"))
+    assert result.kind == "create_skill"
+    assert queued == [("simplex", "skill")]
+    assert not any(e["kind"] == "intent_bypass" for e in scheduler.trace.read())
     phases = [r["extra"].get("phase") for r in scheduler.log.read()]
-    assert "navigate:intent" not in phases
+    assert "navigate:intent" in phases
 
 
 

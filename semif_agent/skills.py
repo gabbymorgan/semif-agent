@@ -1171,17 +1171,22 @@ def navigate(
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
-    **Confident softmax winners skip their confirm guard.** When the category
-    softmax winner's probability is >= `bypass_tau` (default 0.5) the scope
-    confirm (`confirm_category_fit`) is skipped — the winner is taken as-is
-    (traced `category_scope_bypassed`); below it the guard runs and can reject
-    the winner into create. The leaf softmax winner's probability is handed to
-    dispatch (`request.meta["leaf_softmax_prob"]`) so `confirm_skill_fit` is
-    likewise skipped above the threshold (traced `intent_bypass`). The guards
-    exist to catch an unsure softmax; a winner at 0.5+ is already decisive, and
-    each skipped guard is one fewer SemIf call on the hot path. Below the
-    threshold the two-stage behavior is unchanged. The recorded data agrees:
-    every logged winner >= 0.5 also passed its guard.
+    **A confident category winner skips the scope confirm; the leaf intent
+    guard always runs.** When the category softmax winner's probability is >=
+    `bypass_tau` (default 0.5) the scope confirm (`confirm_category_fit`) is
+    skipped — the winner is taken as-is (traced `category_scope_bypassed`). That
+    is sound because `create_category` is one of the category softmax options, so
+    a confident winner genuinely beat "author a new category"; below the threshold
+    the guard runs and can reject the winner into create. The leaf softmax has
+    **no** create option (`create_skill` is deliberately absent), so its
+    probabilities are renormalized over only the existing skills and a confident
+    winner means "best of the wrong lot", not a match. The leaf intent guard
+    (`confirm_skill_fit`) is therefore **never** bypassed: it is the sole
+    leaf-level create door, and skipping it would make codegen unreachable for an
+    unmatched request. (Regression: with Winnow as the engine, "send a message to
+    pepper on SimpleX" picked `connect_link` at 0.86 / `next_message` at 0.995,
+    skipped the guard, and ran a read skill instead of authoring
+    `simplex.send_message`.)
 
     The **actionability guard** (`confirm_non_action`, phase
     `navigate:actionability`, keyed by `navigation.action_tau`) runs at the **top**
@@ -1333,9 +1338,6 @@ def navigate(
     leaf_result = engine.call(leaf)
     log.append(leaf, leaf_result, extra={"phase": "navigate:leaf", "run_id": request.id})
     pick = leaf_result.selected
-    # Hand the winner's confidence to dispatch so it can skip the intent guard
-    # when the softmax is already decisive (see `navigate` docstring).
-    request.meta["leaf_softmax_prob"] = float(leaf_result.probs.get(pick, 0.0))
     return next((s for s in skills if s.name == pick), skills[0])
 
 

@@ -248,9 +248,10 @@ class Scheduler:
         self.intent_tau = float(nav_cfg.get("intent_tau", 0.6))
         self.category_tau = float(nav_cfg.get("category_tau", 0.75))
         self.action_tau = float(nav_cfg.get("action_tau", 0.5))
-        #: A softmax winner at or above this probability skips its confirm guard
-        #: (scope/intent) — the winner is already decisive. Below it the guard
-        #: runs and can reject into create.
+        #: A **category** softmax winner at or above this probability skips the
+        #: category scope confirm — the winner is already decisive. The leaf
+        #: intent guard is never bypassed (the leaf softmax has no create
+        #: option, so its confidence carries no match signal).
         self.bypass_tau = float(nav_cfg.get("softmax_bypass_tau", 0.5))
         self.max_reentries = max_reentries
         self.codegen = codegen
@@ -456,10 +457,6 @@ class Scheduler:
     # ---- dispatch ----
 
     def _dispatch(self, request: Request) -> DispatchResult:
-        # Clear any confidence a prior dispatch left on the request (meta is
-        # copied across a requeue); navigation sets it fresh when a leaf softmax
-        # runs.
-        request.meta.pop("leaf_softmax_prob", None)
         # Explicit housekeeping commands are deterministic: they route straight
         # to the meta skill, bypassing the generic guards (which misread a
         # task-like skill name as the task). Natural-language phrasings still go
@@ -501,17 +498,12 @@ class Scheduler:
             # navigation's pick directly (the meta skill asks for any missing
             # target as an input variable).
             return self._run_skill(navigation, request)
-        leaf_prob = request.meta.pop("leaf_softmax_prob", None)
-        if leaf_prob is not None and leaf_prob >= self.bypass_tau:
-            # A decisive leaf softmax winner skips the intent confirm.
-            self.trace.append(
-                "intent_bypass",
-                request.id,
-                category=navigation.category,
-                skill=navigation.name,
-                prob=leaf_prob,
-            )
-            return self._run_skill(navigation, request)
+        # The leaf softmax offers only existing skills (create_skill is
+        # deliberately not an option), so its winner is "the closest existing
+        # skill", never a statement that the skill matches. The intent guard is
+        # therefore the sole leaf-level create door and is never bypassed: a
+        # confident softmax winner among only-wrong options must still be
+        # checked, or codegen can never be reached for an unmatched request.
         if not confirm_skill_fit(
             self.engine, self.log, self.trace, request, navigation, self.intent_tau
         ):

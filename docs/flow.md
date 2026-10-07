@@ -58,15 +58,13 @@ flowchart TD
     HASSKILLS -- "none" --> CREATESKILL["CreateSkill"]
     HASSKILLS -- "one" --> SOLE["sole skill<br/>softmax skipped"]
     HASSKILLS -- "many" --> LEAF["SemIf choice<br/>phase 'navigate:leaf'<br/>options = existing skills only"]
-    LEAF --> PICK["picked skill<br/>+ leaf_softmax_prob"]
+    LEAF --> PICK["picked skill"]
     SOLE --> PICK
 
     %% ---------- reuse vs create ----------
     PICK --> HARD{"hard-locked category?<br/>(housekeeping)"}
     HARD -- "yes" --> RUN
-    HARD -- "no" --> INTENTBYP{"winner prob >=<br/>softmax_bypass_tau?"}
-    INTENTBYP -- "yes (decisive)" --> RUN
-    INTENTBYP -- "no (unsure)" --> INTENT["SemIf choice<br/>phase 'navigate:intent'<br/>P same >= intent_tau?"]
+    HARD -- "no" --> INTENT["SemIf choice<br/>phase 'navigate:intent'<br/>P same >= intent_tau?"]
     INTENT -- "same" --> RUN
     INTENT -- "different" --> CREATESKILL
 
@@ -196,7 +194,7 @@ flowchart TD
 | Category scope | does it cover? | `navigate:category_scope` | descend / create (skipped when decisive) |
 | Canned | which reply | `navigate:response` | canned line |
 | Leaf | which skill | `navigate:leaf` | skill |
-| Intent guard | same action? | `navigate:intent` | run / create (skipped when decisive) |
+| Intent guard | same action? | `navigate:intent` | run / create (never bypassed) |
 | Config record | record or ask? | `config:record` | persisted / per-fire |
 | Outcome | did it succeed? | `assess:outcome` | ok / failed |
 | Requeue | complete or retry? | `assess:requeue` | done / requeue |
@@ -214,9 +212,11 @@ first and decides whether the input is an actionable request at all; only
 non-action input reaches the closed `response` tree, so a request is never
 canned. The category softmax then offers the real categories (never `response`)
 plus `create_category`, and the leaf softmax offers only the existing skills —
-the reuse-vs-create decision is the intent guard. A softmax winner at or above
-`softmax_bypass_tau` (default 0.5) is already decisive, so its confirm guard
-(scope/intent) is skipped; below it the guard runs and can reject into create.
+the reuse-vs-create decision is the intent guard. A **category** softmax winner
+at or above `softmax_bypass_tau` (default 0.5) is already decisive, so its scope
+confirm is skipped; the **leaf** intent guard is never bypassed (the leaf softmax
+has no create option, so a confident winner is only the closest existing skill,
+never a match) — it always runs and can reject into create.
 New-skill creation is also gated deterministically by the per-category
 `locks.new_skill` (the `housekeeping` and `response` categories are hard-locked
 in code).

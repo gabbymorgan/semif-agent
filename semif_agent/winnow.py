@@ -9,7 +9,7 @@ and the question becomes its ``instructions``; the server returns a probability
 over exactly those keys.
 
 Winnow runs as its own process (``winnow-server``); see ``local/ENVIRONMENT.md``
-for the guppy deployment. The engine is real: any network, HTTP, or distribution
+for this deployment. The engine is real: any network, HTTP, or distribution
 failure raises `EngineUnavailable`, which the scheduler treats as fatal — there
 is no fallback model and no fabricated reply.
 """
