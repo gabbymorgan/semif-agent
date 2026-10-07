@@ -624,6 +624,13 @@ LLM bridge (generation for skills):
   - Runs inside the same 'semif-bridge' process. It reuses the top-level `llm`
     model (configured once) and serves a generic POST /chat; skills call it via
     the top-level llm_bridge_url (default http://127.0.0.1:5229).
+
+Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
+  - Runs inside the same 'semif-bridge' process (Nextcloud is plain HTTPS, so
+    there is no separate daemon). Configure the account once in config.json under
+    bridges.nextcloud (url/username/app_password) — or reuse the top-level
+    nextcloud_* values the calendar seeds collect. Skills call it via the
+    top-level nextcloud_bridge_url (default http://127.0.0.1:5230).
 EOF
 
 if [[ "$VOICE" = 1 ]]; then

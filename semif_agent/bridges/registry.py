@@ -14,10 +14,11 @@ import threading
 
 from .base import BridgeInfo, BridgeService
 from .llm import LLMBridge
+from .nextcloud import NextcloudBridge
 from .simplex import SimplexBridge
 
 #: Known bridge services. Order is presentation order.
-CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge, LLMBridge)
+CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge, LLMBridge, NextcloudBridge)
 
 
 def _class_for(name: str) -> type[BridgeService] | None:
@@ -75,7 +76,9 @@ def build_bridge(
 
     `llm` is the scheduler's configured language-model client, handed to the LLM
     bridge so it reuses the top-level `llm` endpoint/model instead of duplicating
-    that config. Other bridges ignore it.
+    that config. The Nextcloud bridge gets the top-level `nextcloud_*` values as a
+    fallback, so the same account the calendar seeds use is configured once. Other
+    bridges ignore both.
     """
     bridge_class = _class_for(name)
     if bridge_class is None:
@@ -83,6 +86,18 @@ def build_bridge(
     block = (config.get("bridges", {}) or {}).get(name, {}) or {}
     if bridge_class is LLMBridge:
         return LLMBridge(block, trace=trace, client=llm)
+    if bridge_class is NextcloudBridge:
+        return NextcloudBridge(
+            block,
+            trace=trace,
+            fallback={
+                "url": config.get("nextcloud_url"),
+                "username": config.get("nextcloud_username"),
+                "app_password": config.get("nextcloud_app_password"),
+                "default_calendar": config.get("nextcloud_default_calendar"),
+                "default_addressbook": config.get("nextcloud_default_addressbook"),
+            },
+        )
     return bridge_class(block, trace=trace)
 
 

@@ -384,7 +384,7 @@ semif_agent/
   voice_transport.py neutral voice transport: mic capture, wake word, VAD,
                     speech-to-text (faster-whisper), text-to-speech (Piper)
   gateway/          messenger COMMAND intake/reply (SimpleX, LXMF, voice)
-  bridges/          standalone third-party API bridges (SimpleX + the LLM bridge)
+  bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud)
 seeds/              committed starter skills (calendar, simplex)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
@@ -516,6 +516,8 @@ Key blocks:
 | `simplex_bridge_url` / `simplex_bridge_token` | what skill bodies call |
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
 | `llm_bridge_url` / `llm_bridge_token` | what skill bodies call for generation |
+| `bridges.nextcloud` | Nextcloud bridge: host/port/token + connection (url/username/app_password/defaults) |
+| `nextcloud_bridge_url` / `nextcloud_bridge_token` | what skill bodies call for Nextcloud |
 | `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
 
@@ -684,9 +686,10 @@ python -m semif_agent.cli gateway --platform voice
 ### Bridge services
 
 `cli bridge` runs standalone bridges: each is a process that stands up a small,
-token-guarded localhost HTTP API in front of one third-party system and owns its
-own daemon/profile. Generated skill bodies call them like any HTTP service (base
-URL from a config var), so they never speak a native protocol directly.
+token-guarded localhost HTTP API in front of one third-party system (and, where
+the system needs one, owns its own daemon/profile). Generated skill bodies call
+them like any HTTP service (base URL from a config var), so they never speak a
+native protocol directly.
 
 The first bridge is **SimpleX** (`semif_agent/bridges/simplex.py`), with its own
 simplex-chat daemon separate from the gateway's. Its HTTP surface:
@@ -727,6 +730,45 @@ carries just the local listener. Skills call it via `llm_bridge_url`
 (+ optional `llm_bridge_token`); with no client it returns `502`, never a
 fabricated reply. It starts in the same `semif-bridge.service` process as the
 other enabled bridges.
+
+The **Nextcloud bridge** (`semif_agent/bridges/nextcloud.py`) is the third: it
+wraps the account's native protocols — WebDAV files, CalDAV calendar events and
+tasks, CardDAV contacts, and the OCS Notes API — behind one JSON surface, so a
+body never speaks DAV/OCS directly. It has **no service daemon** (Nextcloud is
+plain HTTPS) and is stdlib-only (`urllib` + `xml.etree`), so it starts instantly
+in the same `semif-bridge` process. The connection (base URL, username, app
+password) is configured in `bridges.nextcloud` and falls back to the top-level
+`nextcloud_url` / `nextcloud_username` / `nextcloud_app_password` /
+`nextcloud_default_calendar` the calendar seeds use, so the account is
+configured once. Skills call it via `nextcloud_bridge_url` (+ optional
+`nextcloud_bridge_token`). Its HTTP surface:
+
+```
+GET  /health
+GET  /user                            # account info (OCS)
+GET  /capabilities                    # server capabilities (OCS)
+GET  /files?path=<dir>                # list a folder (WebDAV)
+GET  /files/stat?path=<path>
+GET  /files/read?path=<path>          # text, or base64 for binary
+GET  /files/search?query=<text>&path=<dir>
+POST /files/write   {"path","content","encoding"?,"overwrite"?}
+POST /files/mkdir | /files/delete | /files/move | /files/copy
+GET  /calendars
+GET  /calendars/events?calendar=<name>&start=<iso>&end=<iso>   # CalDAV VEVENT
+POST /calendars/events | /calendars/events/update | /calendars/events/delete
+GET  /tasks?calendar=<name>           # CalDAV VTODO
+POST /tasks | /tasks/update | /tasks/complete | /tasks/delete
+GET  /addressbooks
+GET  /contacts?addressbook=<name>&query=<text>                 # CardDAV
+POST /contacts | /contacts/update | /contacts/delete
+GET  /notes | /notes/get?id=<id>      # Notes app (OCS)
+POST /notes | /notes/update | /notes/delete
+```
+
+A missing connection is `503`; a real Nextcloud failure (transport, HTTP error,
+or a bad reply) is `502` — never a fabricated success. Calendar and addressbook
+defaults resolve from `bridges.nextcloud` when a request names none and the
+account has several.
 
 ### Dream report
 

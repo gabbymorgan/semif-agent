@@ -243,8 +243,8 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 `gateway.simplex` / `gateway.lxmf` / `gateway.voice`. The
                 gateway MUST NOT read history, show/create invite links, or
                 compose messages — see "gateway isolation" below.
-bridges/        standalone third-party API bridges (SimpleX first, plus the
-                LLM bridge). base.py:
+bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
+                and Nextcloud). base.py:
                 BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
                 `X-Semif-Token` guard). inbox.py: MessagingInbox (bounded FIFO +
                 contacts learned from inbound DMs and the daemon contact list,
@@ -257,6 +257,12 @@ bridges/        standalone third-party API bridges (SimpleX first, plus the
                 scheduler's configured `llm` client (reused, not re-configured),
                 so bodies get short generated text (e.g. an event title +
                 description) over HTTP.
+                nextcloud.py + nextcloud_client.py: NextcloudBridge — files
+                (WebDAV), calendar events + tasks (CalDAV), contacts (CardDAV),
+                and Notes (OCS) behind one JSON surface, so bodies never speak
+                DAV/OCS; no service daemon (stdlib-only), connection from
+                `bridges.nextcloud` with a fallback to the top-level
+                `nextcloud_*` values the calendar seeds use.
                 registry.py: CATALOG, describe_bridges() (catalog injected
                 into the codegen prompts), run_bridges() (threads the scheduler's
                 `llm` client into the LLM bridge). Run with `python -m
@@ -1287,6 +1293,35 @@ CLI, unit tests (24) + integration tests (2).
   client it reports `502`, never a fabricated reply. `calendar.create_event` is
   the first consumer (title + description extraction, cached in `request.meta`
   across a `needs_input` resume).
+- **Nextcloud bridge** (`bridges/nextcloud.py` + `bridges/nextcloud_client.py`).
+  Wraps the account's native protocols — WebDAV files, CalDAV calendar events and
+  tasks (VTODO), CardDAV contacts, and the OCS Notes API — behind one uniform
+  JSON surface, so a body never speaks DAV/OCS directly. It has **no service
+  daemon** (Nextcloud is plain HTTPS) and is stdlib-only (`urllib` + `xml.etree`
+  + `ssl`), so `check_requirements` is always `(True, None)` and it starts
+  instantly inside the existing `semif-bridge.service`. HTTP Basic auth uses the
+  username + app password. The connection is configured in `bridges.nextcloud`
+  (`url`/`username`/`app_password`, plus `default_calendar`/`default_addressbook`
+  and `verify_tls`/`timeout`); `build_bridge` passes the top-level
+  `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
+  `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
+  the same account the calendar seeds collect is configured once and a block value
+  wins. Bodies reach it via the top-level `nextcloud_bridge_url` (+ optional
+  `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
+  Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
+  `/files/read` text-or-base64, `/files/search`, `/files/write|mkdir|delete|move|copy`),
+  calendars (`/calendars`, `/calendars/events` list, `POST /calendars/events` +
+  `/update` + `/delete`), tasks (`/tasks` list, `POST /tasks` + `/update` +
+  `/complete` + `/delete`), contacts (`/addressbooks`, `/contacts` list/search,
+  `POST /contacts` + `/update` + `/delete`), notes (`/notes`, `/notes/get`,
+  `POST /notes` + `/update` + `/delete`), and `/user` + `/capabilities` (OCS).
+  A missing connection is `503`; a real failure (`NextcloudError` — transport,
+  HTTP error, or bad reply) is `502`, never a fabricated success. Event/task
+  updates edit the stored iCalendar properties in place (preserving VALARM/
+  ATTENDEE), guarded by `If-Match`; creates use `If-None-Match: *`. Calendar/
+  addressbook defaults resolve from config when a request names none and the
+  account has several. `tests/test_nextcloud_bridge.py` drives the real client
+  over a loopback `http.server` faking Nextcloud's DAV/OCS shapes.
 
 ## Bridge backlog (one session per item)
 
@@ -1324,9 +1359,12 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   (threaded through `run_bridges`/`build_bridge`, never re-configured), registered
   in `CATALOG` and seeded under `bridges.llm` + top-level `llm_bridge_url`.
   `calendar.create_event` extracts its title + description through it.
-- [ ] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
+- [x] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
   + config block + `CATALOG` entry; the codegen prompts pick it up automatically
-  through `describe_bridges()`.
+  through `describe_bridges()`. Nextcloud shipped (`bridges/nextcloud.py` +
+  `bridges/nextcloud_client.py`): files/calendars/tasks/contacts/notes over one
+  JSON surface, no daemon, connection from `bridges.nextcloud` with a top-level
+  `nextcloud_*` fallback. Future bridges follow the same shape.
 
 ### Code principles
 - **Contain installation artifacts in the repo.** Everything a machine installs

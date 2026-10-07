@@ -1559,7 +1559,10 @@ def test_other_codegen_error_does_not_retry():
             model="test",
             timeout=10,
             stream=True,
-            context_window=3000,
+            # Large enough that the prompt (which carries the bridge catalog via
+            # describe_bridges) passes the pre-flight budget and generation
+            # starts, so the *output* cap is what trips.
+            context_window=10000,
             max_output=0.01,
             idle_timeout=30,
             max_attempts=3,
