@@ -32,7 +32,7 @@
 #
 # Usage:
 #   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
-#                        [--codegen-model MODEL] [--copy-data SRC] [--voice] [-h]
+#                        [--codegen-model MODEL] [--copy-data SRC] [--voice] [--gpu MODE] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
@@ -43,6 +43,7 @@ LLM_MODEL=""
 CODEGEN_MODEL=""
 COPY_DATA=""
 VOICE=0
+GPU_MODE="auto"
 
 usage() {
   sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -53,6 +54,7 @@ usage() {
   echo "  --codegen-model MODEL  override codegen.model from config.json for this run"
   echo "  --copy-data SRC        rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
   echo "  --voice                install the optional voice-gateway stack + download its models"
+  echo "  --gpu MODE             decision-engine llama.cpp backend: auto (default; a GPU build only when engine.gpu_layers is set), vulkan, rocm, cuda, cpu"
   echo "  -h                     this help"
   exit "${1:-0}"
 }
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --voice) VOICE=1; shift ;;
+    --gpu) GPU_MODE="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
   esac
@@ -239,6 +242,65 @@ if [[ "$(git -C "$ENGINE" rev-parse HEAD 2>/dev/null)" != "$SEMIF_REF" ]]; then
   git -C "$ENGINE" checkout "$SEMIF_REF"
 fi
 
+# --- stage 2b: pick the llama.cpp GPU backend ---------------------------------
+# The decision engine scores the GGUF through llama.cpp, which runs on CPU
+# unless llama-cpp-python was built with a GPU backend. A GPU-enabled build is
+# opt-in: llama.cpp's Vulkan backend splits the compute graph across CPU and
+# Vulkan even with `n_gpu_layers=0`, roughly doubling CPU latency, so a CPU-only
+# host must not get one. `--gpu <backend>` forces a build; `--gpu auto` (the
+# default) builds a GPU backend only when config.json asks for offload
+# (`engine.gpu_layers` nonzero).
+CONFIG_GPU_LAYERS="$(python3 - "$CONFIG" <<'PY'
+import json, sys
+try:
+    print(int(json.load(open(sys.argv[1])).get("engine", {}).get("gpu_layers", 0) or 0))
+except Exception:
+    print(0)
+PY
+)"
+detect_gpu_backend() {
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    echo cuda; return
+  fi
+  if [[ -d /opt/rocm ]]; then
+    echo rocm; return
+  fi
+  if command -v glslc >/dev/null 2>&1 && compgen -G "/usr/share/vulkan/icd.d/*.json" >/dev/null; then
+    echo vulkan; return
+  fi
+  echo cpu
+}
+case "$GPU_MODE" in
+  cpu) GPU_BACKEND=cpu ;;
+  vulkan|rocm|cuda) GPU_BACKEND="$GPU_MODE" ;;
+  auto)
+    if [[ "$CONFIG_GPU_LAYERS" != 0 ]]; then
+      GPU_BACKEND="$(detect_gpu_backend)"
+    else
+      GPU_BACKEND=cpu
+    fi
+    ;;
+  *) echo "unknown --gpu mode: $GPU_MODE (want auto, vulkan, rocm, cuda, cpu)" >&2; exit 2 ;;
+esac
+case "$GPU_BACKEND" in
+  vulkan) LLAMA_CMAKE_ARGS="-DGGML_VULKAN=on" ;;
+  rocm)   LLAMA_CMAKE_ARGS="-DGGML_HIP=on" ;;
+  cuda)   LLAMA_CMAKE_ARGS="-DGGML_CUDA=on" ;;
+  *)      LLAMA_CMAKE_ARGS="" ;;
+esac
+echo "== decision-engine llama.cpp backend: $GPU_BACKEND (engine.gpu_layers=$CONFIG_GPU_LAYERS)"
+
+if [[ "$GPU_BACKEND" = vulkan ]]; then
+  VULKAN_PKGS=(libvulkan-dev glslc spirv-headers glslang-tools)
+  vk_missing=()
+  for p in "${VULKAN_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || vk_missing+=("$p"); done
+  if [[ ${#vk_missing[@]} -gt 0 ]]; then
+    echo "== installing Vulkan build prereqs: ${vk_missing[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${vk_missing[@]}"
+  fi
+fi
+
 # --- stage 3: venv + deps -------------------------------------------------------
 if [[ ! -x "$PYTHON" ]]; then
   echo "== creating venv at $VENV"
@@ -247,7 +309,22 @@ fi
 echo "== installing engine deps into $VENV"
 "$PIP" install --upgrade pip setuptools wheel
 "$PIP" install -e "$ENGINE" --no-deps
-CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
+CMAKE_ARGS="$LLAMA_CMAKE_ARGS" CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 \
+  "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
+
+# Make the installed llama-cpp-python match the requested backend: pip ships a
+# CPU wheel and its wheel cache hands it back even when CMAKE_ARGS asks for a
+# GPU backend, so force a source build whenever offload support disagrees.
+installed_gpu=no
+"$PYTHON" -c 'import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)' 2>/dev/null && installed_gpu=yes
+want_gpu=yes
+[[ "$GPU_BACKEND" = cpu ]] && want_gpu=no
+if [[ "$installed_gpu" != "$want_gpu" ]]; then
+  LLAMA_PIN="$(grep -m1 -E '^llama-cpp-python==' "$REPO_ROOT/requirements/staging.txt")"
+  echo "== rebuilding llama-cpp-python for the $GPU_BACKEND backend ($LLAMA_PIN)"
+  CMAKE_ARGS="$LLAMA_CMAKE_ARGS" CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 \
+    "$PIP" install --no-deps --force-reinstall --no-cache-dir --no-binary llama-cpp-python "$LLAMA_PIN"
+fi
 "$PIP" install -e "$REPO_ROOT" --no-deps
 
 # --- stage 3b: optional voice-gateway stack (--voice) --------------------------

@@ -177,6 +177,7 @@ def build_engine_config(config: dict, pins: dict | None = None) -> EngineConfig:
     gguf = _anchor_path(override) if override else str(
         REPO_ROOT / ".runtime" / "models" / os.path.basename(pin_eng.get("gguf_url", ""))
     )
+    gpu_device = eng.get("gpu_device")
     return EngineConfig(
         backend=eng.get("backend", "llamacpp"),
         source=pin_eng.get("source", ""),
@@ -184,6 +185,9 @@ def build_engine_config(config: dict, pins: dict | None = None) -> EngineConfig:
         gguf=gguf,
         context_tokens=int(eng.get("context_tokens", 4096)),
         threads=eng.get("threads"),
+        gpu_layers=int(eng.get("gpu_layers", 0)),
+        gpu_device=None if gpu_device is None else int(gpu_device),
+        gpu_split=int(eng.get("gpu_split", 0)),
     )
 
 

@@ -2,10 +2,11 @@
 
 Wraps the SemIf package (`semif_phase1`). The import and model load happen
 lazily so the rest of the agent is pure stdlib and testable without SemIf
-installed. On hardware that is neither CUDA nor Apple, use the shipped
-llama.cpp backend: a local GGUF scored on CPU (or Vulkan if your llama.cpp
-build enables it). This engine is only usable on a machine with SemIf and the
-pinned GGUF available; elsewhere calls raise EngineUnavailable.
+installed. The shipped llama.cpp backend scores a local GGUF; it runs on CPU by
+default, and `EngineConfig.gpu_layers` offloads to a GPU when llama-cpp-python
+was built with a GPU backend (Vulkan/ROCm/CUDA). This engine is only usable on a
+machine with SemIf and the pinned GGUF available; elsewhere calls raise
+EngineUnavailable.
 """
 
 from __future__ import annotations
@@ -29,6 +30,67 @@ class EngineConfig:
     gguf: str = ""
     context_tokens: int = 4096
     threads: int | None = None
+    # GPU offload (llama.cpp). 0 keeps the CPU-only default; a positive count
+    # offloads that many layers, -1 offloads all of them. Requires a
+    # llama-cpp-python built with a GPU backend (Vulkan/ROCm/CUDA).
+    gpu_layers: int = 0
+    gpu_device: int | None = None
+    gpu_split: int = 0
+
+
+def _require_gpu_offload() -> None:
+    """Fail loudly when GPU layers are requested but the build cannot offload."""
+    import llama_cpp
+
+    if not llama_cpp.llama_supports_gpu_offload():
+        raise EngineUnavailable(
+            "engine.gpu_layers is set but this llama-cpp-python build has no GPU "
+            "backend. Rebuild it with one, e.g. "
+            "CMAKE_ARGS='-DGGML_VULKAN=on' (Vulkan), '-DGGML_HIP=on' (ROCm) or "
+            "'-DGGML_CUDA=on' (CUDA)."
+        )
+
+
+def _install_gpu_state_reset(model) -> None:
+    """Force a full cache reset between scored prompts when running on the GPU.
+
+    SemIf's `_Engine.clear` calls `llama_memory_clear(memory, False)`: it resets
+    the cache metadata but leaves the stored data. The CPU backend tolerates that
+    (the slots are overwritten before use), but the Vulkan backend keeps stale
+    hybrid-attention/recurrent state, so repeated `score` calls drift and return
+    wrong probabilities. Clearing the data as well restores determinism and
+    matches the CPU path. Applied only when offloading, so CPU behaviour is
+    untouched.
+    """
+    engine = model.engine
+    library = engine.lib
+
+    def clear():
+        library.llama_memory_clear(engine.memory, True)
+
+    engine.clear = clear
+
+
+def _offloading_params(original, config: EngineConfig):
+    """Wrap SemIf's CPU-only model-params factory to offload layers to the GPU.
+
+    `semif_phase1.llamacpp_backend` is CPU-only by construction: its
+    `_cpu_model_params` hardcodes `n_gpu_layers = 0`. The backend looks that name
+    up on its own module while loading, so wrapping it for the duration of the
+    load lets the same path offload without patching (and losing) the re-cloned
+    engine source. The caller restores the original afterwards, so a CPU engine
+    loaded later in the same process is unaffected.
+    """
+
+    def offloading(library):
+        params = original(library)
+        params.n_gpu_layers = config.gpu_layers
+        params.split_mode = config.gpu_split
+        if config.gpu_device is not None:
+            params.main_gpu = config.gpu_device
+        return params
+
+    return offloading
 
 
 class SemIfEngine:
@@ -59,6 +121,11 @@ class SemIfEngine:
                 "SemIf is not installed here. Install it on the target box with "
                 "`pip install -e '.[test,llamacpp]'`."
             ) from exc
+        if self.config.gpu_layers:
+            _require_gpu_offload()
+        original_params = backend._cpu_model_params
+        if self.config.gpu_layers:
+            backend._cpu_model_params = _offloading_params(original_params, self.config)
         try:
             model, tokenizer, metadata = backend.load_model(
                 self.config.source,
@@ -69,6 +136,16 @@ class SemIfEngine:
             )
         except Exception as exc:
             raise EngineUnavailable(f"Failed to load the SemIf model: {exc}") from exc
+        finally:
+            backend._cpu_model_params = original_params
+        if self.config.gpu_layers:
+            _install_gpu_state_reset(model)
+        # The backend hardcodes n_gpu_layers=0 in its metadata; record what we
+        # actually asked llama.cpp to offload instead.
+        metadata = dict(metadata)
+        metadata["n_gpu_layers"] = self.config.gpu_layers
+        if self.config.gpu_device is not None:
+            metadata["main_gpu"] = self.config.gpu_device
         self._model, self._tokenizer, self._metadata = model, tokenizer, metadata
         return model, tokenizer, metadata
 

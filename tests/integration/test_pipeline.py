@@ -25,7 +25,7 @@ from semif_agent.codegen import (
     parse_contract,
     parse_integration,
 )
-from semif_agent.decisions import Request
+from semif_agent.decisions import DecisionRequest, Option, Request
 from semif_agent.dream import dream
 from semif_agent.engine import EngineUnavailable, SemIfEngine
 from semif_agent.log import DecisionLog
@@ -95,6 +95,55 @@ def _install_tracking_fixture(scheduler):
             category_description="Package tracking: checking the delivery status of parcels and shipments.",
         )
     ]
+
+
+def test_engine_gpu_offload_is_deterministic_and_matches_cpu(tmp_path):
+    """With a GPU-backed llama-cpp-python and `engine.gpu_layers` set, offload
+    must be deterministic across repeated calls and match the CPU path.
+
+    Regression: SemIf's `_Engine.clear` resets only cache metadata
+    (`llama_memory_clear(mem, False)`). The CPU backend tolerates that, but the
+    Vulkan backend keeps stale hybrid-attention state, so successive `score`
+    calls drifted (0.08 -> 0.36 -> 0.43). The wrapper clears the data too. This
+    is the honest correctness check: "it loaded" is not enough on Qwen3.5's
+    hybrid architecture.
+    """
+    import llama_cpp
+
+    config = load_config()
+    require_real(config)
+    if not llama_cpp.llama_supports_gpu_offload():
+        pytest.skip("llama-cpp-python has no GPU backend")
+    base = build_engine_config(config)
+    if not base.gpu_layers:
+        pytest.skip("engine.gpu_layers is 0 (CPU-only); set it to exercise offload")
+
+    from dataclasses import replace
+
+    request = DecisionRequest(
+        state=(
+            "The user said: 'check the weather in Paris tomorrow and tell me if "
+            "I need an umbrella'."
+        ),
+        question="Is this input an actionable request, or non-action chatter?",
+        options=[
+            Option(id="action", description="An actionable request to perform a task."),
+            Option(
+                id="non_action",
+                description="Chit-chat, a statement, or too vague to act on.",
+            ),
+        ],
+    )
+    cpu = SemIfEngine(replace(base, gpu_layers=0)).call(request).probabilities
+    gpu_engine = SemIfEngine(base)
+    runs = [gpu_engine.call(request).probabilities for _ in range(3)]
+    print(f"cpu={cpu} gpu={runs}")
+    for run in runs[1:]:
+        assert max(abs(a - b) for a, b in zip(runs[0], run)) < 1e-5, (
+            "GPU offload must be deterministic across repeated calls"
+        )
+    diff = max(abs(a - b) for a, b in zip(cpu, runs[0]))
+    assert diff < 2e-3, f"GPU offload changed the option probabilities by {diff}"
 
 
 def test_pipeline_end_to_end(tmp_path):

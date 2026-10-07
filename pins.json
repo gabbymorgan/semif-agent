@@ -2,7 +2,7 @@
   "_comment": "Committed pin manifest for the external artifacts this repo downloads: the SemIf engine ref, the pinned GGUF, the HF tokenizer revision, and the simplex-chat binary. These are code-owned, deployment-independent values bumped by a git change and picked up on the next `scripts/bootstrap.sh` run. They are deliberately NOT in config.json (per-machine user config): a ref that changes with every update is not user configuration. The agent reads engine.source/revision from here; the GGUF path is derived from engine.gguf_url unless config.json overrides engine.gguf.",
   "engine": {
     "semif_repo": "https://github.com/TheoLeeCJ/SemIf.git",
-    "semif_ref": "1f2dea3e25379f9dfc98cb83c324f00ab5deda37",
+    "semif_ref": "23cf1f39fc9534fe81437200959b6dfc7106e45a",
     "gguf_url": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf",
     "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
     "source": "Qwen/Qwen3.5-4B",

@@ -14,9 +14,13 @@
   "queue": {"max_size": 100},
   "engine": {
     "_comment": "Per-machine engine settings only. The pinned engine/tokenizer/GGUF refs (semif_repo, semif_ref, gguf_url, gguf_sha256, source, revision) live in the committed pins.json — bumped on update, never per-machine config. The GGUF path is derived from pins.json's engine.gguf_url under .runtime/models/; set `gguf` here only to override it with a custom path.",
+    "_gpu_comment": "gpu_layers: 0 keeps the CPU-only default, -1 offloads every layer, a positive count offloads that many. Requires a llama-cpp-python built with a GPU backend (bootstrap detects Vulkan/ROCm/CUDA). gpu_device picks the llama.cpp device index and gpu_split sets its split mode (0 = none).",
     "backend": "llamacpp",
     "context_tokens": 4096,
-    "threads": 8
+    "threads": 8,
+    "gpu_layers": 0,
+    "gpu_device": null,
+    "gpu_split": 0
   },
   "llm": {
     "_comment": "Small OpenAI-compatible model that authors a new category/skill title + description (never the runnable body — that is `codegen` below). Deliberately its own endpoint/model, so it can be local and fast even when codegen is remote. Runs on THIS machine's local ollama; bootstrap reads base_url/model from here (a --llm-url/--llm-model flag overrides for that run only) and pulls `model` if it is missing. `model` is required (no default): set it to a model the endpoint serves. Uses the same provider machinery as codegen (real SSE stream, token budget, idle watchdog); short JSON replies. Sampler params (temperature/top_p/presence_penalty/frequency_penalty) are opt-in: an unset value is omitted from the request so the server's model default applies — set them here only when you know the right values for the model. The draft is authored asynchronously by a single-slot worker and the request re-runs when it lands; an unreachable endpoint is graceful (traced, user notified), not fatal. disable_thinking sends reasoning_effort:none so a reasoning model answers the short JSON directly instead of spending the reply budget on hidden chain-of-thought (set false only for an endpoint that rejects the parameter). provider selects the transport: \"ollama\" (default; a local OpenAI-compatible server, context auto-detected via /api/show), \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code or glm-5.3, and provide api_key or api_key_env; the ollama probe is skipped), or \"semif\" (the loaded SemIf decision GGUF generates in-process via SemIfEngine.generate — no endpoint/model/api_key is used; see the `semif` block below).",

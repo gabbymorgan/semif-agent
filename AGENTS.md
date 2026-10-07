@@ -564,9 +564,21 @@ CLI, unit tests (24) + integration tests (2).
 ### Environment
 - The core is pure stdlib and runs anywhere Python does. Never pip-install heavy
   deps on a thin client; a full install belongs on a provisioned host.
-- The SemIf engine runs via llama.cpp **CPU** backend (its llamacpp backend
-  forces `n_gpu_layers=0`), so the decision engine does not use a GPU; ollama
-  does.
+- The SemIf engine runs via llama.cpp. It is **CPU by default**: SemIf's
+  llamacpp backend hardcodes `n_gpu_layers=0`. Setting `engine.gpu_layers` in
+  config.json offloads to a GPU when llama-cpp-python was built with a GPU
+  backend (Vulkan/ROCm/CUDA). The agent wraps the backend's `_cpu_model_params`
+  so the knob works without patching the re-cloned engine source, and on the GPU
+  path also forces a full cache reset (`llama_memory_clear(mem, True)`): SemIf's
+  metadata-only clear leaves stale hybrid-attention state on Vulkan, so repeated
+  scores drift otherwise. **A GPU build is opt-in** — llama.cpp's Vulkan backend
+  splits the graph across CPU and GPU even at `n_gpu_layers=0`, roughly halving
+  CPU throughput, so a CPU-only host must not get one (`bootstrap.sh --gpu
+  vulkan|rocm|cuda`, or set `engine.gpu_layers` and rerun, builds it; the default
+  stays CPU-only). Offload needs the accelerator **to itself**: the 4B Q4 model
+  needs ~2.9 GiB, so a GPU already holding another model (e.g. ollama) makes the
+  engine slower than CPU and can abort the process with `vk::DeviceLostError`.
+  ollama is a separate GPU user.
 - The SemIf tokenizer is fetched from HF (`Qwen/Qwen3.5-4B` at the pinned
   revision), cached under each checkout's `.runtime/hf` (`HF_HOME`).
 - Per-host specs and model choices for this deployment: `local/ENVIRONMENT.md`.
@@ -584,7 +596,12 @@ CLI, unit tests (24) + integration tests (2).
   `pip install -e <semif-clone> --no-deps`, then
   `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install -r requirements/staging.txt`
   (numpy 2.3.5, transformers 5.17.0, tokenizers 0.23.2, huggingface-hub 1.31.0,
-  llama-cpp-python 0.3.35, pytest).
+  llama-cpp-python 0.3.35, pytest). GPU offload is **opt-in**: set
+  `engine.gpu_layers` and run `bootstrap.sh --gpu vulkan|rocm|cuda` (with
+  `--gpu auto`, detection picks a backend when `engine.gpu_layers` is set),
+  which installs the Vulkan build prereqs
+  (`libvulkan-dev glslc spirv-headers glslang-tools`) when needed. A CPU-only
+  host keeps the default CPU wheel — a GPU build is slower on CPU.
 - **Expected pip warnings:** pip reports "dependency conflicts" against
   semif-phase1's declared requirements (torch/accelerate/protobuf/sentencepiece
   not installed, numpy 2.2.6 vs 2.3.5). These are informational — the staging
@@ -595,7 +612,11 @@ CLI, unit tests (24) + integration tests (2).
   gcc (`internal compiler error: Segmentation fault`). Limit parallelism:
   `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install llama-cpp-python==0.3.35`.
   Do NOT bump the llama-cpp-python version — SemIf calls specific llama.cpp C
-  APIs that change between versions.
+  APIs that change between versions. **GPU builds:** pip's wheel cache serves the
+  prebuilt CPU wheel even when `CMAKE_ARGS` requests a GPU backend, so force a
+  real source build with
+  `--force-reinstall --no-cache-dir --no-binary llama-cpp-python` (bootstrap does
+  this when the installed build reports no GPU offload).
 - The pinned GGUF: `Qwen3.5-4B-Q4_K_M.gguf` from bartowski (2.8G), downloaded
   into `.runtime/models/` by bootstrap. Load ~34s; score ~0.9s/decision on CPU
   at 8 threads.

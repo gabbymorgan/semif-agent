@@ -422,8 +422,10 @@ machines:
   decision engine model generates in-process, with no endpoint and no
   `llm.model` at all (see the `llm.semif` block in `config.json`).
 
-The **decision engine is separate** and runs via llama.cpp CPU (or Vulkan if your
-build enables it), not ollama.
+The **decision engine is separate** and runs via llama.cpp, not ollama. It is CPU
+by default; to offload it to a GPU, set `engine.gpu_layers` in `config.json` and
+run `scripts/bootstrap.sh --gpu vulkan|rocm|cuda` (a GPU build is opt-in because
+it is slower on CPU).
 
 ### Option A: one-command provisioning (`bootstrap.sh`)
 
