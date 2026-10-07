@@ -418,6 +418,10 @@ happened:
 
 Rules:
 
+- **Do not prefix the skill name to `action_log` or `new_state`.** The runner
+  wraps the result in the deterministic summary (`category.name: ok — <detail>`)
+  and carries the skill ref structurally, so a body writes only the result text
+  — never `"<category>.<name>: ..."`.
 - **Return the real result.** A read/query skill returns the data it fetched; an
   action skill reports the service's real response. A generic "done" that omits
   the result is a broken output.

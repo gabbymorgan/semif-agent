@@ -435,6 +435,18 @@ def _print_approvals(scheduler: Scheduler) -> None:
         print(f"[approval] {item['id']}  new {item['kind']} {target}: {item['description']}")
 
 
+def _print_reply(reply, show_run_id: bool = False) -> None:
+    """Print a scheduler reply, optionally keeping its run id visible."""
+    label = f"[{reply.run_id}] " if (show_run_id and reply.run_id) else ""
+    print(f"[{reply.status}] {label}{reply.text}")
+
+
+def _drain_queue(scheduler: Scheduler) -> None:
+    """Run queued work, printing each outcome with its run id."""
+    for reply in scheduler.run_queue():
+        _print_reply(reply, show_run_id=True)
+
+
 def _fatal_exit(scheduler: Scheduler) -> int | None:
     """If the scheduler hit a fatal engine failure, print it and return non-zero.
 
@@ -518,8 +530,7 @@ def repl(scheduler: Scheduler, config: dict) -> int:
             print(f"[{status}] {detail}")
             _answer_questions(scheduler)
             _answer_approvals(scheduler)
-            for result_status, result_detail in scheduler.run_queue():
-                print(f"[{result_status}] {result_detail}")
+            _drain_queue(scheduler)
             continue
         if lower.startswith("relabel "):
             parts = line.split()
@@ -587,19 +598,16 @@ def repl(scheduler: Scheduler, config: dict) -> int:
             scheduler.busy(line[5:].strip())
             print("current process set (busy).")
             continue
-        status, detail = scheduler.submit(line)
-        print(f"[{status}] {detail}")
+        _print_reply(scheduler.submit(line))
         if _fatal_exit(scheduler) is not None:
             return 1
         while scheduler.pending is not None:
             hint = "" if scheduler.pending.pre_act else " [leave empty to skip]"
             answer = input(f"{scheduler.pending.question}{hint} ")
-            status, detail = scheduler.answer(answer)
-            print(f"[{status}] {detail}")
+            _print_reply(scheduler.answer(answer))
             if _fatal_exit(scheduler) is not None:
                 return 1
-        for result_status, result_detail in scheduler.run_queue():
-            print(f"[{result_status}] {result_detail}")
+        _drain_queue(scheduler)
         if _fatal_exit(scheduler) is not None:
             return 1
         _answer_questions(scheduler)
@@ -612,12 +620,12 @@ def scripted(scheduler: Scheduler, path: str) -> int:
     print(try_warm(scheduler))
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     for row in rows:
-        status, detail = scheduler.submit(str(row["text"]), source=row.get("source", "scripted"))
-        print(f"[{status}] {detail}")
+        _print_reply(
+            scheduler.submit(str(row["text"]), source=row.get("source", "scripted"))
+        )
         if _fatal_exit(scheduler) is not None:
             return 1
-    for result_status, result_detail in scheduler.run_queue():
-        print(f"[{result_status}] {result_detail}")
+    _drain_queue(scheduler)
     return _fatal_exit(scheduler) or 0
 
 

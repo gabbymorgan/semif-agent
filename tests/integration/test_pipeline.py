@@ -109,9 +109,9 @@ def test_pipeline_end_to_end(tmp_path):
         "what is the delivery status of my parcel",
     ]
     for text in inputs:
-        status, detail = scheduler.submit(text)
-        print(f"[{status}] {detail}")
-        assert status in ("running", "queued", "rejected")
+        reply = scheduler.submit(text)
+        print(f"[{reply.status}] {reply.text}")
+        assert reply.status in ("running", "queued", "rejected")
 
     scheduler.run_queue()
 
@@ -295,9 +295,9 @@ def test_busy_queue_path(tmp_path):
     _install_tracking_fixture(scheduler)
 
     scheduler.busy("driving on the freeway", skill="driving")
-    status, detail = scheduler.submit("tell me if my package was delivered")
-    print(f"[{status}] {detail}")
-    assert status == "queued"
+    reply = scheduler.submit("tell me if my package was delivered")
+    print(f"[{reply.status}] {reply.text}")
+    assert reply.status == "queued"
     scheduler.idle()
 
 
@@ -499,13 +499,13 @@ def test_create_skill_empty_category_does_not_wedge(tmp_path):
     scheduler.tree["travel_planning"] = []
 
     for _ in range(2):
-        status, detail = scheduler.submit("look up flights to japan for february")
-        print(f"[{status}] {detail}")
-        assert status in ("running", "queued", "rejected", "error")
+        reply = scheduler.submit("look up flights to japan for february")
+        print(f"[{reply.status}] {reply.text}")
+        assert reply.status in ("running", "queued", "rejected", "error")
         assert scheduler.current is None, "scheduler must never stay wedged after a submit"
 
-    status, detail = scheduler.submit("tell me if my package was delivered")
-    print(f"[{status}] {detail}")
+    reply = scheduler.submit("tell me if my package was delivered")
+    print(f"[{reply.status}] {reply.text}")
     assert scheduler.current is None
 
 
@@ -533,10 +533,10 @@ def test_create_simplex_send_skill(tmp_path):
         f"the simplex seeds must be loaded, got {seeded}"
     )
 
-    status, detail = scheduler.submit("send a simplex message to pepper saying hi")
-    print(f"[{status}] {detail}")
-    assert status in ("running", "queued", "rejected")
-    assert "new skill for simplex" in detail, (
+    reply = scheduler.submit("send a simplex message to pepper saying hi")
+    print(f"[{reply.status}] {reply.text}")
+    assert reply.status in ("running", "queued", "rejected")
+    assert "new skill for simplex" in reply.text, (
         "a send request must route to create_skill for simplex"
     )
     assert scheduler.current is None, "gate must be free again right after the draft is queued"
@@ -627,9 +627,9 @@ def test_skill_pauses_for_input_and_resumes(tmp_path):
     assert scheduler.pending is not None
     assert scheduler.current is not None
 
-    status, detail = scheduler.answer("AB123")
-    print(f"[{status}] {detail}")
-    assert status == "ran"
+    reply = scheduler.answer("AB123")
+    print(f"[{reply.status}] {reply.text}")
+    assert reply.status == "ran"
     assert seen == ["AB123"]
     assert scheduler.pending is None
     assert scheduler.current is None
@@ -653,7 +653,7 @@ def test_empty_result_is_assessed_as_success(tmp_path):
 
     def act(ctx, request):
         return ActionResult(
-            action_log="simplex.next_message: no unread SimpleX messages.",
+            action_log="no unread SimpleX messages.",
             new_state="no unread SimpleX messages",
         )
 

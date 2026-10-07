@@ -362,12 +362,12 @@ def act(ctx, request):
         calendars = _discover_calendars(ctx)
     except CalDavError as exc:
         return ActionResult(
-            action_log=f"calendar.next_event: calendar discovery failed: {exc}",
+            action_log=f"calendar discovery failed: {exc}",
             new_state=request.text,
         )
     if not calendars:
         return ActionResult(
-            action_log="calendar.next_event: calendar discovery failed: no calendars found",
+            action_log="calendar discovery failed: no calendars found",
             new_state=request.text,
         )
 
@@ -375,7 +375,7 @@ def act(ctx, request):
     calendar = _resolve_calendar(ctx, request, calendars, decisions)
     if not calendar:
         return ActionResult(
-            action_log="calendar.next_event aborted: no calendar resolved.",
+            action_log="aborted: no calendar resolved.",
             new_state=request.text,
             decisions=decisions,
         )
@@ -395,7 +395,7 @@ def act(ctx, request):
         events = _parse_events(_calendar_payloads(body), local_tz)
     except CalDavError as exc:
         return ActionResult(
-            action_log=f"calendar.next_event failed on {calendar!r}: {exc}",
+            action_log=f"failed on {calendar!r}: {exc}",
             new_state=request.text,
             decisions=decisions,
         )

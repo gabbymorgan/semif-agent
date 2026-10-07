@@ -111,13 +111,13 @@ def act(ctx, request):
     if seconds is None:
         request.meta["timer_awaiting"] = True
         return ActionResult(
-            action_log="time.set_timer: waiting for a duration",
+            action_log="waiting for a duration",
             new_state=request.text,
             needs_input="How long should the timer run? (e.g. '5 minutes')",
         )
     if ctx.timers is None:
         return ActionResult(
-            action_log="time.set_timer: no timer service is available in this front end",
+            action_log="no timer service is available in this front end",
             new_state=request.text,
         )
 
@@ -125,4 +125,4 @@ def act(ctx, request):
     timer = ctx.timers.set_timer(seconds, label, run_id=request.id, source=request.source)
     due = timer.due_datetime().strftime("%H:%M")
     message = f"Timer set for {label}; it will fire at {due}."
-    return ActionResult(action_log=f"time.set_timer: {message}", new_state=message)
+    return ActionResult(action_log=message, new_state=message)

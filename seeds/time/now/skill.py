@@ -33,4 +33,4 @@ def act(ctx, request):
         f"It is {now.strftime('%H:%M')} "
         f"({now.strftime('%I:%M %p').lstrip('0')} {zone}{_offset_text(now)})."
     )
-    return ActionResult(action_log=f"time.now: {message}", new_state=message)
+    return ActionResult(action_log=message, new_state=message)

@@ -176,7 +176,10 @@ def test_gateway_skill_config_disables_humanize():
     service = build_service_with_store(
         llm, {"humanize": {"enabled": True}, "simplex": {}}, store
     )
-    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    service._reply(
+        "simplex", "c", "time.now: ok — 12:00", kind="result",
+        skill_ref="time.now", result="12:00",
+    )
     assert service.outbound["simplex"].get_nowait().text == "time.now: ok — 12:00"
     assert llm.calls == []
 
@@ -190,7 +193,10 @@ def test_gateway_skill_config_enables_humanize_over_platform():
         {"humanize": {"enabled": False}, "simplex": {"humanize": False}},
         store,
     )
-    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    service._reply(
+        "simplex", "c", "time.now: ok — 12:00", kind="result",
+        skill_ref="time.now", result="12:00",
+    )
     assert service.outbound["simplex"].get_nowait().text == "It is 12:00."
 
 
@@ -201,13 +207,8 @@ def test_gateway_skill_config_absent_falls_back_to_platform():
     service = build_service_with_store(
         llm, {"humanize": {"enabled": True}, "simplex": {}}, store
     )
-    service._reply("simplex", "c", "time.now: ok — 12:00", kind="result")
+    service._reply(
+        "simplex", "c", "time.now: ok — 12:00", kind="result",
+        skill_ref="time.now", result="12:00",
+    )
     assert service.outbound["simplex"].get_nowait().text == "It is 12:00."
-
-
-def test_skill_ref_parses_summary_and_resumed_marker():
-    from semif_agent.gateway.service import _skill_ref
-
-    assert _skill_ref("time.now: ok — 12:00") == "time.now"
-    assert _skill_ref("[resumed] track.manual: ok — sent") == "track.manual"
-    assert _skill_ref("queued") is None

@@ -18,4 +18,4 @@ CONTRACT = {}
 def act(ctx, request):
     today = local_now(ctx.config).date()
     message = f"Today is {today.strftime('%A, %B %d, %Y')} ({today.isoformat()})."
-    return ActionResult(action_log=f"time.date: {message}", new_state=message)
+    return ActionResult(action_log=message, new_state=message)

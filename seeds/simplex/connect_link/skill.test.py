@@ -135,7 +135,7 @@ def test_unreachable_bridge_fails_honestly():
     ctx = ActionContext(engine=None, config=config("http://127.0.0.1:1"))
     request = Request("give me your simplex link")
     action = skill.act(ctx, request)
-    assert action.action_log.startswith("simplex.connect_link:"), action.action_log
+    assert action.action_log and "simplex.connect_link" not in action.action_log, action.action_log
     assert action.new_state == request.text
     print(action.action_log)
 

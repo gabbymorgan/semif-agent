@@ -422,7 +422,7 @@ def test_unreachable_server_fails_honestly():
     action, request, _engine = run(
         None, "http://127.0.0.1:1", "add standup on 2026-11-10 at 9am"
     )
-    assert action.action_log.startswith("calendar.create_event:"), action.action_log
+    assert action.action_log and "calendar.create_event" not in action.action_log, action.action_log
     assert action.new_state == request.text
     print(action.action_log)
 

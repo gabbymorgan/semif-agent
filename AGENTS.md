@@ -92,7 +92,10 @@ scheduler.py    no up-front gate: every input is dispatched
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
                 operate on the tree via `ctx.admin`; per-category new-skill locks
                 (`locks.new_skill` in the category config) gate creation, with
-                `housekeeping`/`response` hard-locked in code
+                `housekeeping`/`response` hard-locked in code; front ends get a
+                structured `SchedulerReply` (status, text, run_id, skill_ref,
+                result) from `submit_request`/`answer`/`run_queue` so they never
+                parse the run id or skill ref back out of the summary
 queue.py        bounded FIFO request queue (arrival order, max depth)
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 tree plus the `housekeeping` meta skills), navigation = SemIf
@@ -127,7 +130,8 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 assess is a SemIf decision (`assess:outcome` success/failure at
                 tau; on failure `assess:requeue` complete/retry) and the run
                 summary is deterministic (no generation), built from
-                category.skill + ok/failed + action_log; the assess state carries
+                category.skill + ok/failed + action_log — the body writes only the
+                result, the runner adds the `category.name:` ref; the assess state carries
                 the resolved inputs (secrets redacted); a `DETERMINISTIC_CATEGORIES`
                 run (housekeeping) skips assessment/repair — it is an internal
                 mechanical action with a known result, not an external run;
@@ -1103,8 +1107,11 @@ CLI, unit tests (24) + integration tests (2).
   bool/`{enabled}` overrides it. A **skill's own recorded config**
   (`data/skills/<category>/<name>/config.json` -> `{"humanize": bool}`) wins
   over both, so a skill whose result is already speakable (e.g. `time.now`)
-  skips the rewrite while a mechanical one keeps it; the gateway resolves the
-  skill ref from the summary prefix (`category.name:`). Only `kind == "result"`
+  skips the rewrite while a mechanical one keeps it; the gateway reads the
+  skill ref from the structured `SchedulerReply.skill_ref` (the scheduler's
+  `run_queue`/`submit_request`/`answer` carry `run_id`, `skill_ref`, and the
+  unwrapped `result` alongside the human-facing `text` — no parsing it back out
+  of the summary). Only `kind == "result"`
   lines are touched
   (questions, repair/approval notices, and status chatter pass through); like
   `result_only`, an enabled platform unwraps the result detail before cleaning.

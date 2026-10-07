@@ -255,13 +255,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with self.lock:
                 try:
                     body = self._read_json()
-                    status, detail, request_id = self.scheduler.submit_request(
+                    reply = self.scheduler.submit_request(
                         str(body.get("text", "")), source=str(body.get("source", "dashboard"))
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))
                     return
-            self._send(200, {"status": status, "detail": detail, "request_id": request_id})
+            self._send(200, {"status": reply.status, "detail": reply.text, "request_id": reply.run_id})
             return
         if path == "/api/relabel":
             with self.lock:
@@ -277,11 +277,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with self.lock:
                 try:
                     body = self._read_json()
-                    status, detail = self.scheduler.answer(str(body.get("text", "")))
+                    reply = self.scheduler.answer(str(body.get("text", "")))
                 except Exception as exc:
                     self._send_error(500, str(exc))
                     return
-            self._send(200, {"status": status, "detail": detail})
+            self._send(200, {"status": reply.status, "detail": reply.text})
             return
         if path == "/api/restart":
             with self.lock:

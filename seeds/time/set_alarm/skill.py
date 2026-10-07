@@ -71,17 +71,17 @@ def act(ctx, request):
     if when is None:
         request.meta["alarm_awaiting"] = True
         return ActionResult(
-            action_log="time.set_alarm: waiting for a time",
+            action_log="waiting for a time",
             new_state=request.text,
             needs_input="What time should the alarm go off? (e.g. '5pm')",
         )
     if ctx.timers is None:
         return ActionResult(
-            action_log="time.set_alarm: no timer service is available in this front end",
+            action_log="no timer service is available in this front end",
             new_state=request.text,
         )
 
     label = when.strftime("%H:%M")
     ctx.timers.set_alarm(when, label, run_id=request.id, source=request.source)
     message = f"Alarm set for {when.strftime('%H:%M')} on {when.strftime('%A')}."
-    return ActionResult(action_log=f"time.set_alarm: {message}", new_state=message)
+    return ActionResult(action_log=message, new_state=message)

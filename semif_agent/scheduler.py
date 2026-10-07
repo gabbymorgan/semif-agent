@@ -196,6 +196,29 @@ class DispatchResult:
     skill: str | None = None
     decisions_logged: int = 0
     needs_input: str | None = None
+    #: `category.name` when a skill produced the outcome, else None. Carried
+    #: structurally so front ends never parse it back out of `summary`.
+    skill_ref: str | None = None
+    #: The skill's own detail (its `action_log`, or `new_state` when empty) —
+    #: the unwrapped result a `result_only` front end speaks.
+    result: str | None = None
+
+
+@dataclass
+class SchedulerReply:
+    """One scheduler outcome as a structured reply.
+
+    `text` is the human-facing summary (e.g. ``"time.now: ok — 12:00"``). The
+    machine-readable fields a front end needs — the run id, the skill ref, and
+    the skill's own unwrapped detail — ride alongside it instead of being
+    parsed back out of `text`.
+    """
+
+    status: str
+    text: str
+    run_id: str = ""
+    skill_ref: str | None = None
+    result: str | None = None
 
 
 class Scheduler:
@@ -320,15 +343,12 @@ class Scheduler:
 
     # ---- intake ----
 
-    def submit(self, text: str, source: str = "typed") -> tuple[str, str]:
-        """Feed one input. Returns (status, detail)."""
-        status, detail, _ = self.submit_request(text, source)
-        return status, detail
+    def submit(self, text: str, source: str = "typed") -> SchedulerReply:
+        """Feed one input. Returns the structured reply."""
+        return self.submit_request(text, source)
 
-    def submit_request(
-        self, text: str, source: str = "typed"
-    ) -> tuple[str, str, str]:
-        """Feed one input, also returning the request id.
+    def submit_request(self, text: str, source: str = "typed") -> SchedulerReply:
+        """Feed one input, returning the request id on the reply.
 
         The id lets out-of-band interfaces (the messenger gateway) map a run
         back to the chat that originated it. The decision engine is real, so an
@@ -337,13 +357,13 @@ class Scheduler:
         try:
             return self._submit(text, source)
         except EngineUnavailable as exc:
-            return "fatal", self._mark_fatal(exc), ""
+            return SchedulerReply("fatal", self._mark_fatal(exc))
 
-    def _submit(self, text: str, source: str = "typed") -> tuple[str, str, str]:
+    def _submit(self, text: str, source: str = "typed") -> SchedulerReply:
         with self._lock:
             return self._submit_locked(text, source)
 
-    def _submit_locked(self, text: str, source: str = "typed") -> tuple[str, str, str]:
+    def _submit_locked(self, text: str, source: str = "typed") -> SchedulerReply:
         request = Request(text, source=source)
         self.trace.append("submit", request.id, text=text, source=source)
 
@@ -355,16 +375,22 @@ class Scheduler:
                 if self.pending is None:
                     self.current = None
             if outcome.kind == "needs_input":
-                return "needs_input", outcome.summary, request.id
+                return SchedulerReply(
+                    "needs_input", outcome.summary, request.id,
+                    outcome.skill_ref, outcome.result,
+                )
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            return "running", outcome.summary, request.id
+            return SchedulerReply(
+                "running", outcome.summary, request.id,
+                outcome.skill_ref, outcome.result,
+            )
 
         ok = self.queue.push(request)
         if not ok:
             self.trace.append("rejected", request.id, reason="queue is full")
-            return "rejected", "queue is full", request.id
+            return SchedulerReply("rejected", "queue is full", request.id)
         self.trace.append("queued", request.id)
-        return "queued", "queued", request.id
+        return SchedulerReply("queued", "queued", request.id)
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
         """Set a fake in-progress process so the queue path is exercised."""
@@ -381,8 +407,8 @@ class Scheduler:
                 self.pending = None
             self.current = None
 
-    def run_queue(self) -> list[tuple[str, str]]:
-        """Process the queue while idle. Returns the outcomes.
+    def run_queue(self) -> list[SchedulerReply]:
+        """Process the queue while idle. Returns the structured outcomes.
 
         Safe to call from any thread: guarded by the scheduler lock (RLock, so
         the async codegen worker can drain the queue from its completion path).
@@ -390,7 +416,7 @@ class Scheduler:
         with self._lock:
             return self._run_queue_locked()
 
-    def _run_queue_locked(self) -> list[tuple[str, str]]:
+    def _run_queue_locked(self) -> list[SchedulerReply]:
         results = []
         while self.current is None and len(self.queue) > 0:
             if self._fatal is not None:
@@ -402,7 +428,7 @@ class Scheduler:
                 outcome = self._dispatch(request)
             except EngineUnavailable as exc:
                 self._mark_fatal(exc)
-                results.append(("fatal", self._fatal))
+                results.append(SchedulerReply("fatal", self._fatal))
                 break
             except Exception as exc:
                 self.trace.append("error", request.id, phase="dispatch", message=str(exc))
@@ -411,10 +437,20 @@ class Scheduler:
                 if self.pending is None:
                     self.current = None
             if outcome.kind == "needs_input":
-                results.append(("needs_input", f"[{request.id}] {outcome.summary}"))
+                results.append(
+                    SchedulerReply(
+                        "needs_input", outcome.summary, request.id,
+                        outcome.skill_ref, outcome.result,
+                    )
+                )
                 continue
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
-            results.append(("ran", f"[{request.id}] {outcome.summary}"))
+            results.append(
+                SchedulerReply(
+                    "ran", outcome.summary, request.id,
+                    outcome.skill_ref, outcome.result,
+                )
+            )
         return results
 
     # ---- dispatch ----
@@ -595,7 +631,7 @@ class Scheduler:
         outcome = self.runner.run(skill, request)
         return self._finish_run(skill, request, outcome)
 
-    def answer(self, text: str) -> tuple[str, str]:
+    def answer(self, text: str) -> SchedulerReply:
         """Feed the human's answer to a run paused for input.
 
         Routed directly to the pending run — no gate, score, or navigation —
@@ -606,7 +642,7 @@ class Scheduler:
         """
         with self._lock:
             if self.pending is None:
-                return "error", "no run is waiting for input"
+                return SchedulerReply("error", "no run is waiting for input")
             pending = self.pending
             self.pending = None
             pending.request.user_input = text
@@ -621,10 +657,16 @@ class Scheduler:
             )
             result = self._finish_run(pending.skill, pending.request, outcome)
             if result.kind == "needs_input":
-                return "needs_input", result.summary
+                return SchedulerReply(
+                    "needs_input", result.summary, pending.request.id,
+                    result.skill_ref, result.result,
+                )
             self.current = None
             self.trace.append("ran", pending.request.id, skill=result.skill, summary=result.summary)
-            return "ran", f"[resumed] {result.summary}"
+            return SchedulerReply(
+                "ran", f"[resumed] {result.summary}", pending.request.id,
+                result.skill_ref, result.result,
+            )
 
     def _finish_run(self, skill: Skill, request: Request, outcome) -> DispatchResult:
         if outcome.error:
@@ -649,6 +691,8 @@ class Scheduler:
                 summary=outcome.needs_input,
                 skill=skill.name,
                 needs_input=outcome.needs_input,
+                skill_ref=f"{skill.category}.{skill.name}",
+                result=outcome.action_log or outcome.new_state or None,
             )
         self.trace.append(
             "assessed",
@@ -672,13 +716,11 @@ class Scheduler:
             self._propose_repair(skill, request, outcome)
         return DispatchResult(
             kind="ran",
-            summary=(
-                f"{skill.category}.{skill.name}: "
-                f"{'ok' if outcome.success else 'failed'} — "
-                f"{outcome.action_log or outcome.summary}"
-            ),
+            summary=outcome.summary,
             skill=skill.name,
             decisions_logged=outcome.decisions_logged,
+            skill_ref=f"{skill.category}.{skill.name}",
+            result=(outcome.action_log or outcome.new_state or None),
         )
 
     # ---- repair loop ----

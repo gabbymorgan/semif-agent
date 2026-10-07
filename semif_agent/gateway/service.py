@@ -22,25 +22,16 @@ reaches the right chat.
 from __future__ import annotations
 
 import queue
-import re
 import threading
 import time
 
 from .base import InboundMessage, OutboundMessage
 from .humanize import Humanizer
 
-_LEADING_RUN_ID = re.compile(r"^\[[0-9a-f]{6,}\]\s*")
-
-#: A result summary starts with the skill ref (`category.name:`), optionally
-#: preceded by a `[resumed]` marker. Used to look up a skill's own config
-#: (`data/skills/<cat>/<name>/config.json`) for a per-skill humanize override.
-_SKILL_REF = re.compile(
-    r"^(?:\[resumed\]\s*)?([A-Za-z0-9_][A-Za-z0-9_-]*\.[A-Za-z0-9_][A-Za-z0-9_-]*):\s"
-)
-
 #: The scheduler's run summary wraps the real result as
 #: `"<skill>: <ok|failed> — <detail>"`. A result-only platform (the voice
-#: gateway) speaks just `<detail>`.
+#: gateway) speaks just `<detail>`. Kept as a fallback for callers that hand
+#: `_reply` a raw summary; the scheduler itself passes the unwrapped `result`.
 _RESULT_SEP = " — "
 
 _REPAIR_ACTIONS = {
@@ -67,21 +58,6 @@ _APPROVAL_ACTIONS = {
 
 #: An owner target is `(platform, chat_id)`.
 Target = tuple[str, str]
-
-
-def _strip_run_id(text: str) -> str:
-    return _LEADING_RUN_ID.sub("", text or "")
-
-
-def _skill_ref(text: str) -> str | None:
-    """The `category.name` a result summary belongs to, or None."""
-    match = _SKILL_REF.match(text or "")
-    return match.group(1) if match else None
-
-
-def _leading_run_id(text: str) -> str:
-    match = _LEADING_RUN_ID.match(text or "")
-    return match.group(0)[1:-2] if match else ""
 
 
 def _result_detail(text: str) -> str:
@@ -311,10 +287,13 @@ class GatewayService:
             if pending is not None and pending.request.source == self.source_for(
                 platform, msg.chat_id
             ):
-                status, detail = self.scheduler.answer(msg.text)
+                reply = self.scheduler.answer(msg.text)
                 if self.scheduler.pending is None:
                     self._pending_owner = None
-                self._reply(*reply_to, detail, kind=_reply_kind(status))
+                self._reply(
+                    *reply_to, reply.text, kind=_reply_kind(reply.status),
+                    skill_ref=reply.skill_ref, result=reply.result,
+                )
             elif pending is not None and self._pending_owner not in (None, reply_to):
                 self._reply(
                     *reply_to,
@@ -339,14 +318,17 @@ class GatewayService:
                 self._surfaced.add(approval_id)
                 self._reply(*reply_to, detail, kind="notice")
             else:
-                status, detail, run_id = self.scheduler.submit_request(
+                reply = self.scheduler.submit_request(
                     msg.text, source=self.source_for(platform, msg.chat_id)
                 )
-                if run_id:
-                    self._owners[run_id] = reply_to
-                if status == "needs_input":
+                if reply.run_id:
+                    self._owners[reply.run_id] = reply_to
+                if reply.status == "needs_input":
                     self._pending_owner = reply_to
-                self._reply(*reply_to, detail, kind=_reply_kind(status))
+                self._reply(
+                    *reply_to, reply.text, kind=_reply_kind(reply.status),
+                    skill_ref=reply.skill_ref, result=reply.result,
+                )
             self.drain()
             self.surface(origin=reply_to)
 
@@ -356,15 +338,16 @@ class GatewayService:
             results = self.scheduler.run_queue()
             if not results:
                 break
-            for status, detail in results:
-                run_id = _leading_run_id(detail)
-                owner = self._owner_of(run_id)
-                text = _strip_run_id(detail)
-                if status == "needs_input" and owner:
+            for reply in results:
+                owner = self._owner_of(reply.run_id)
+                if reply.status == "needs_input" and owner:
                     self._pending_owner = owner
                 target = owner or self._fallback_target()
                 if target:
-                    self._reply(*target, text, kind=_reply_kind(status))
+                    self._reply(
+                        *target, reply.text, kind=_reply_kind(reply.status),
+                        skill_ref=reply.skill_ref, result=reply.result,
+                    )
 
     def surface(self, origin: Target | None = None) -> None:
         """Send any newly posted authoring questions / repair offers."""
@@ -474,11 +457,15 @@ class GatewayService:
             trace.append(kind, "?", **fields)
 
     def _reply(
-        self, platform: str, chat_id: str, text: str, kind: str = "reply"
+        self,
+        platform: str,
+        chat_id: str,
+        text: str,
+        kind: str = "reply",
+        skill_ref: str | None = None,
+        result: str | None = None,
     ) -> None:
-        text = _strip_run_id(text)
         result_only = self._result_only(platform)
-        skill_ref = _skill_ref(text) if kind == "result" else None
         humanize = kind == "result" and self._humanize_enabled(platform, skill_ref)
         if result_only:
             # A spoken front end says the skill's result, not the scheduler's
@@ -486,9 +473,10 @@ class GatewayService:
             if kind == "status":
                 return
         if kind == "result" and (result_only or humanize):
-            # Unwrap `<skill>: <ok|failed> — <detail>` to the skill's own
-            # result before optionally cleaning it up.
-            text = _result_detail(text)
+            # The scheduler hands us the skill's own unwrapped detail; fall back
+            # to unwrapping `<skill>: <ok|failed> — <detail>` for raw-string
+            # callers.
+            text = result if result is not None else _result_detail(text)
             if humanize:
                 started = time.time()
                 text = self.humanizer.humanize(text)

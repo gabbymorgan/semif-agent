@@ -73,19 +73,17 @@ def act(ctx, request):
     try:
         payload = _get(ctx, "/health")
     except BridgeError as exc:
-        return ActionResult(
-            action_log=f"simplex.connect_link: {exc}", new_state=request.text
-        )
+        return ActionResult(action_log=str(exc), new_state=request.text)
     if not payload.get("ok"):
         return ActionResult(
-            action_log="simplex.connect_link: simplex forwarding bridge is not healthy",
+            action_log="simplex forwarding bridge is not healthy",
             new_state=request.text,
         )
     try:
         payload = _get(ctx, "/address")
     except BridgeError as exc:
         return ActionResult(
-            action_log=f"simplex.connect_link failed: {exc}",
+            action_log=f"reading the contact link failed: {exc}",
             new_state=request.text,
         )
     short = str(payload.get("short_link") or "").strip()
@@ -93,7 +91,7 @@ def act(ctx, request):
     if not (short or full):
         return ActionResult(
             action_log=(
-                "simplex.connect_link: the bridge returned no SimpleX "
+                "the bridge returned no SimpleX "
                 "contact link; the bot has no address yet."
             ),
             new_state=request.text,

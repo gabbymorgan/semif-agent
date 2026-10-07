@@ -140,11 +140,11 @@ def act(ctx, request):
     try:
         payload = _get(ctx, "/inbox")
     except BridgeError as exc:
-        return ActionResult(action_log=f"simplex.next_message: {exc}", new_state=request.text)
+        return ActionResult(action_log=str(exc), new_state=request.text)
     senders = _senders(payload.get("messages") or [])
     if not senders:
         return ActionResult(
-            action_log="simplex.next_message: no unread SimpleX messages.",
+            action_log="no unread SimpleX messages.",
             new_state="no unread SimpleX messages",
         )
     decisions = []
@@ -155,14 +155,14 @@ def act(ctx, request):
         )
     except BridgeError as exc:
         return ActionResult(
-            action_log=f"simplex.next_message failed reading {contact!r}: {exc}",
+            action_log=f"failed reading {contact!r}: {exc}",
             new_state=request.text,
             decisions=decisions,
         )
     message = payload.get("message")
     if not message:
         return ActionResult(
-            action_log=f"simplex.next_message: no unread message from {contact!r}.",
+            action_log=f"no unread message from {contact!r}.",
             new_state="no unread SimpleX messages",
             decisions=decisions,
         )

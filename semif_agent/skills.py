@@ -586,7 +586,7 @@ def _canned_response(name: str, message: str):
     """An act that returns a fixed line. No transport, no generation, no config."""
 
     def act(ctx: ActionContext, request: Request) -> ActionResult:
-        return ActionResult(action_log=f"{name}: {message}", new_state=message)
+        return ActionResult(action_log=message, new_state=message)
 
     return act
 
@@ -799,7 +799,7 @@ def _resolve_target(admin, request: Request):
         names = ", ".join(f"{c}.{n}" for c, n in resolved)
         return ActionResult(
             action_log=(
-                f"housekeeping: several skills match ({names}); "
+                f"several skills match ({names}); "
                 "name one as category.skill"
             ),
             new_state="ambiguous",
@@ -807,7 +807,7 @@ def _resolve_target(admin, request: Request):
     answer = (request.user_input or "").strip()
     if not answer:
         return ActionResult(
-            action_log="housekeeping: awaiting skill name",
+            action_log="awaiting skill name",
             new_state="awaiting target",
             needs_input=_TARGET_QUESTION,
         )
@@ -819,11 +819,11 @@ def _resolve_target(admin, request: Request):
     if isinstance(ref, list):
         names = ", ".join(f"{c}.{n}" for c, n in ref)
         return ActionResult(
-            action_log=f"housekeeping: several skills match ({names}); be specific",
+            action_log=f"several skills match ({names}); be specific",
             new_state="ambiguous",
         )
     return ActionResult(
-        action_log=f"housekeeping: no skill matches {answer!r}",
+        action_log=f"no skill matches {answer!r}",
         new_state="not found",
     )
 
@@ -831,7 +831,7 @@ def _resolve_target(admin, request: Request):
 def _delete_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
     admin = ctx.admin
     if admin is None:
-        return ActionResult("housekeeping.delete_skill: no admin available", "error")
+        return ActionResult("no admin available", "error")
     target = _resolve_target(admin, request)
     if isinstance(target, ActionResult):
         return target
@@ -840,35 +840,35 @@ def _delete_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
     if request.meta.get("housekeeping_confirm") != ref:
         request.meta["housekeeping_confirm"] = ref
         return ActionResult(
-            action_log=f"housekeeping.delete_skill: awaiting confirmation for {ref}",
+            action_log=f"awaiting confirmation for {ref}",
             new_state="awaiting confirmation",
             needs_input=f"Delete {ref} and all its files? Reply yes to confirm.",
         )
     if not _confirmed(request):
         return ActionResult(
-            action_log=f"housekeeping.delete_skill: cancelled by user for {ref}",
+            action_log=f"cancelled by user for {ref}",
             new_state="cancelled",
         )
     _status, detail = admin.delete_skill(category, name)
-    return ActionResult(f"housekeeping.delete_skill: {detail}", detail)
+    return ActionResult(detail, detail)
 
 
 def _clear_config_act(ctx: ActionContext, request: Request) -> ActionResult:
     admin = ctx.admin
     if admin is None:
-        return ActionResult("housekeeping.clear_config: no admin available", "error")
+        return ActionResult("no admin available", "error")
     target = _resolve_target(admin, request)
     if isinstance(target, ActionResult):
         return target
     category, name = target
     _status, detail = admin.clear_skill_config(category, name)
-    return ActionResult(f"housekeeping.clear_config: {detail}", detail)
+    return ActionResult(detail, detail)
 
 
 def _regen_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
     admin = ctx.admin
     if admin is None:
-        return ActionResult("housekeeping.regen_skill: no admin available", "error")
+        return ActionResult("no admin available", "error")
     target = _resolve_target(admin, request)
     if isinstance(target, ActionResult):
         return target
@@ -877,19 +877,19 @@ def _regen_skill_act(ctx: ActionContext, request: Request) -> ActionResult:
     if request.meta.get("housekeeping_regen") != ref:
         request.meta["housekeeping_regen"] = ref
         return ActionResult(
-            action_log=f"housekeeping.regen_skill: awaiting guidance for {ref}",
+            action_log=f"awaiting guidance for {ref}",
             new_state="awaiting guidance",
             needs_input="What needs to be fixed?",
         )
     guidance = (request.user_input or "").strip()
     _status, detail = admin.regen_skill(category, name, guidance)
-    return ActionResult(f"housekeeping.regen_skill: {detail}", detail)
+    return ActionResult(detail, detail)
 
 
 def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
     admin = ctx.admin
     if admin is None:
-        return ActionResult("housekeeping.cancel_build: no admin available", "error")
+        return ActionResult("no admin available", "error")
     writing = [
         (category, skill.name)
         for category, skills in admin.tree.items()
@@ -905,7 +905,7 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
             names = ", ".join(f"{c}.{n}" for c, n in resolved)
             return ActionResult(
                 action_log=(
-                    f"housekeeping.cancel_build: several skills match ({names}); "
+                    f"several skills match ({names}); "
                     "name one as category.skill"
                 ),
                 new_state="ambiguous",
@@ -915,7 +915,7 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
                 category, name = resolved
                 return ActionResult(
                     action_log=(
-                        f"housekeeping.cancel_build: no build is in progress for "
+                        f"no build is in progress for "
                         f"{category}.{name}"
                     ),
                     new_state="no build",
@@ -925,14 +925,14 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
             category, name = writing[0]
         elif not writing:
             return ActionResult(
-                action_log="housekeeping.cancel_build: no skill build is in progress",
+                action_log="no skill build is in progress",
                 new_state="no build",
             )
         else:
             answer = (request.user_input or "").strip()
             if not answer:
                 return ActionResult(
-                    action_log="housekeeping.cancel_build: awaiting skill name",
+                    action_log="awaiting skill name",
                     new_state="awaiting target",
                     needs_input="Which skill build should I cancel? Reply with its name.",
                 )
@@ -943,7 +943,7 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
             else:
                 return ActionResult(
                     action_log=(
-                        f"housekeeping.cancel_build: no build in progress matching "
+                        f"no build in progress matching "
                         f"{answer!r}"
                     ),
                     new_state="no build",
@@ -953,7 +953,7 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
     if request.meta.get("housekeeping_confirm") != ref:
         request.meta["housekeeping_confirm"] = ref
         return ActionResult(
-            action_log=f"housekeeping.cancel_build: awaiting confirmation for {ref}",
+            action_log=f"awaiting confirmation for {ref}",
             new_state="awaiting confirmation",
             needs_input=(
                 f"Cancel the build for {ref} and delete its half-built leaf? "
@@ -962,11 +962,11 @@ def _cancel_build_act(ctx: ActionContext, request: Request) -> ActionResult:
         )
     if not _confirmed(request):
         return ActionResult(
-            action_log=f"housekeeping.cancel_build: cancelled by user for {ref}",
+            action_log=f"cancelled by user for {ref}",
             new_state="cancelled",
         )
     _status, detail = admin.cancel_skill_build(category, name)
-    return ActionResult(f"housekeeping.cancel_build: {detail}", detail)
+    return ActionResult(detail, detail)
 
 
 def build_housekeeping_skills() -> list[Skill]:

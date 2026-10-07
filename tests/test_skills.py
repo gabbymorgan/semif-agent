@@ -1591,15 +1591,15 @@ def test_skill_pre_act_contract_pause_and_resume(tmp_path):
     assert scheduler.pending is not None
     assert scheduler.pending.pre_act is True
 
-    status, detail = scheduler.answer("AB123")
-    assert status == "needs_input"
+    reply = scheduler.answer("AB123")
+    assert reply.status == "needs_input"
     assert scheduler.pending is not None
     assert scheduler.pending.pre_act is False
     assert scheduler.pending.request.meta["config_answers"]["token"] == "AB123"
     assert "Confirm?" in scheduler.pending.question
 
-    status, detail = scheduler.answer("yes")
-    assert status == "ran"
+    reply = scheduler.answer("yes")
+    assert reply.status == "ran"
     assert scheduler.pending is None
 
 
@@ -1631,8 +1631,8 @@ def test_pre_act_skip_leaves_variable_unset_and_does_not_reask(tmp_path):
     assert result.kind == "needs_input"
     assert scheduler.pending is not None and scheduler.pending.pre_act is True
 
-    status, detail = scheduler.answer("")
-    assert status == "ran", detail
+    reply = scheduler.answer("")
+    assert reply.status == "ran", reply.text
     assert scheduler.pending is None
     assert "token" not in seen, "a skipped variable must stay unset"
 
@@ -1664,13 +1664,13 @@ def test_pre_act_skip_advances_to_next_missing_variable(tmp_path):
     assert result.kind == "needs_input"
     assert "`alpha`" in result.summary
 
-    status, detail = scheduler.answer("")
-    assert status == "needs_input"
+    reply = scheduler.answer("")
+    assert reply.status == "needs_input"
     assert scheduler.pending is not None
     assert "`beta`" in scheduler.pending.question
 
-    status, detail = scheduler.answer("")
-    assert status == "ran", detail
+    reply = scheduler.answer("")
+    assert reply.status == "ran", reply.text
     assert "alpha" not in seen and "beta" not in seen
 
 

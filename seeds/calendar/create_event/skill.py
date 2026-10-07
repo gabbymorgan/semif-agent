@@ -506,7 +506,7 @@ def _build_ics(uid, summary, start, end, all_day, stamp, description=""):
 def _ask(request, field, question):
     request.meta["create_event_awaiting"] = field
     return ActionResult(
-        action_log=f"calendar.create_event: waiting for {field}",
+        action_log=f"waiting for {field}",
         new_state=request.text,
         needs_input=question,
     )
@@ -526,7 +526,7 @@ def act(ctx, request):
             fields = _extract_fields(ctx, request)
         except BridgeError as exc:
             return ActionResult(
-                action_log=f"calendar.create_event: {exc}",
+                action_log=str(exc),
                 new_state=request.text,
             )
         request.meta["create_event_fields"] = fields
@@ -576,12 +576,12 @@ def act(ctx, request):
         calendars = _discover_calendars(ctx)
     except CalDavError as exc:
         return ActionResult(
-            action_log=f"calendar.create_event: calendar discovery failed: {exc}",
+            action_log=f"calendar discovery failed: {exc}",
             new_state=request.text,
         )
     if not calendars:
         return ActionResult(
-            action_log="calendar.create_event: no calendars found on the account",
+            action_log="no calendars found on the account",
             new_state=request.text,
         )
 
@@ -606,7 +606,7 @@ def act(ctx, request):
     except CalDavError as exc:
         return ActionResult(
             action_log=(
-                f"calendar.create_event: could not create {title!r} on "
+                f"could not create {title!r} on "
                 f"{calendar!r}: {exc}"
             ),
             new_state=request.text,
@@ -622,7 +622,7 @@ def act(ctx, request):
         )
     report = f"Created {title!r} on calendar {calendar!r}: {when_text} (UID {uid})."
     return ActionResult(
-        action_log=f"calendar.create_event: {report}",
+        action_log=report,
         new_state=report,
         decisions=decisions,
     )

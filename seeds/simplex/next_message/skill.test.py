@@ -237,7 +237,7 @@ def test_unreachable_bridge_fails_honestly():
     ctx = ActionContext(engine=engine, config=config("http://127.0.0.1:1"))
     request = Request("read my next simplex message")
     action = skill.act(ctx, request)
-    assert action.action_log.startswith("simplex.next_message:"), action.action_log
+    assert action.action_log and "simplex.next_message" not in action.action_log, action.action_log
     assert action.new_state == request.text, "a failed read must not fake a result"
     print(action.action_log)
 

@@ -67,8 +67,8 @@ def test_skill_pause_and_answer(tmp_path):
     assert scheduler.current.skill == "track.manual"
     assert scheduler.log.read() == [], "sub-decisions must be deferred until completion"
 
-    status, detail = scheduler.answer("AB123")
-    assert status == "ran"
+    reply = scheduler.answer("AB123")
+    assert reply.status == "ran"
     assert seen == ["AB123"]
     assert scheduler.pending is None
     assert scheduler.current is None
@@ -82,9 +82,9 @@ def test_skill_pause_and_answer(tmp_path):
 
 def test_answer_without_pending_is_error(tmp_path):
     scheduler = build_scheduler(tmp_path)
-    status, detail = scheduler.answer("hello")
-    assert status == "error"
-    assert "waiting for input" in detail
+    reply = scheduler.answer("hello")
+    assert reply.status == "error"
+    assert "waiting for input" in reply.text
 
 
 def test_act_decisions_logged_on_completion(tmp_path):
@@ -164,13 +164,13 @@ def test_resume_can_ask_again(tmp_path):
     scheduler = build_scheduler(tmp_path)
 
     scheduler._run_skill(skill, Request("track"))
-    status, detail = scheduler.answer("XYZ")
-    assert status == "needs_input"
+    reply = scheduler.answer("XYZ")
+    assert reply.status == "needs_input"
     assert seen == ["XYZ"]
     assert scheduler.pending is not None
 
-    status, detail = scheduler.answer("AB123")
-    assert status == "ran"
+    reply = scheduler.answer("AB123")
+    assert reply.status == "ran"
     assert scheduler.pending is None
     assert scheduler.current is None
 
@@ -196,8 +196,8 @@ def test_empty_answer_is_accepted_and_forwarded(tmp_path):
     result = scheduler._run_skill(skill, Request("track my package"))
     assert result.kind == "needs_input"
 
-    status, detail = scheduler.answer("")
-    assert status == "ran", detail
+    reply = scheduler.answer("")
+    assert reply.status == "ran", reply.text
     assert seen == [None, ""], "the empty answer must reach act"
     assert scheduler.pending is None
     assert scheduler.current is None
