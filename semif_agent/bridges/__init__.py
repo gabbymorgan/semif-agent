@@ -26,6 +26,7 @@ from .base import BridgeInfo, BridgeService
 from .inbox import MessagingInbox
 from .registry import (
     build_bridge,
+    derived_config_vars,
     describe_bridges,
     known_infos,
     run_bridges,
@@ -36,6 +37,7 @@ __all__ = [
     "BridgeService",
     "MessagingInbox",
     "build_bridge",
+    "derived_config_vars",
     "describe_bridges",
     "known_infos",
     "run_bridges",

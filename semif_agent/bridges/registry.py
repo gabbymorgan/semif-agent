@@ -32,6 +32,35 @@ def known_infos() -> list[BridgeInfo]:
     return [bridge_class.INFO for bridge_class in CATALOG]
 
 
+def derived_config_vars(config: dict) -> dict[str, str]:
+    """Skill-facing config vars for every bridge, derived from its own block.
+
+    The `bridges.<name>` block is the single source of truth: its `host`/`port`
+    are the listener a skill body calls and its `token` is the shared secret.
+    There is deliberately no duplicate top-level `*_bridge_url`/`*_bridge_token`
+    to keep in sync — the values are derived here and injected into the config a
+    skill reads (`ctx.config`). A bridge with no block (or no port) contributes
+    nothing, so an unconfigured bridge still surfaces as an unresolved contract
+    variable the operator is asked for.
+    """
+    blocks = config.get("bridges", {}) or {}
+    derived: dict[str, str] = {}
+    for info in known_infos():
+        block = blocks.get(info.name)
+        if not isinstance(block, dict):
+            continue
+        host = str(block.get("host") or "127.0.0.1").strip()
+        # A bind-all address is not a callable one; skills always call loopback.
+        if host in ("", "0.0.0.0", "::", "[::]"):
+            host = "127.0.0.1"
+        port = block.get("port")
+        if info.url_config_var and port:
+            derived[info.url_config_var] = f"http://{host}:{int(port)}"
+        if info.auth_config_var:
+            derived[info.auth_config_var] = str(block.get("token") or "")
+    return derived
+
+
 def describe_bridges() -> str:
     """A prompt block describing every available bridge service.
 

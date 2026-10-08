@@ -513,13 +513,16 @@ Key blocks:
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
 | `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD, follow-up window |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
-| `simplex_bridge_url` / `simplex_bridge_token` | what skill bodies call |
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
-| `llm_bridge_url` / `llm_bridge_token` | what skill bodies call for generation |
 | `bridges.nextcloud` | Nextcloud bridge: host/port/token + connection (url/username/app_password/defaults) |
-| `nextcloud_bridge_url` / `nextcloud_bridge_token` | what skill bodies call for Nextcloud |
 | `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
+
+Bridge skills read `simplex_bridge_url` / `llm_bridge_url` / `nextcloud_bridge_url`
+(+ their `_token`) from `ctx.config`; each is **derived** at startup from its
+`bridges.<name>` host/port/token, so there is no duplicate top-level key to keep
+in sync. A bridge with no block (or no port) leaves the variable unresolved and
+the operator is asked for it.
 
 `llm.model` and `codegen.model` are **required** (no default): set each to a
 model its endpoint serves. A missing model fails fast at startup with a clear
@@ -710,7 +713,8 @@ so they see messages that arrived while the bridge was down — unlike the live
 `/inbox` receive buffer. Both are read-only: v7 has no mark-read command, so
 acking is a client-side read receipt, not an API call.
 
-`simplex_bridge_url` (top-level config) is what skills call; the bridge catalog
+Skills call the forwarding bridge at the address derived from `bridges.simplex`
+(`simplex_bridge_url`); the bridge catalog
 is injected into every codegen prompt via `describe_bridges()`, so it is the
 single source of bridge specifics. Adding a bridge = a class + a config block +
 a `CATALOG` entry.
@@ -726,10 +730,10 @@ text (e.g. extract an event title + description) over HTTP instead of speaking
 the OpenAI-compatible protocol itself. It does not own the model connection:
 `cli bridge` threads the scheduler's already-configured `llm` client into it, so
 the endpoint/model/sampler live only in the top-level `llm` block; `bridges.llm`
-carries just the local listener. Skills call it via `llm_bridge_url`
-(+ optional `llm_bridge_token`); with no client it returns `502`, never a
-fabricated reply. It starts in the same `semif-bridge.service` process as the
-other enabled bridges.
+carries just the local listener. Skills call it at the address derived from
+`bridges.llm` (`llm_bridge_url`, + optional `llm_bridge_token`); with no client
+it returns `502`, never a fabricated reply. It starts in the same
+`semif-bridge.service` process as the other enabled bridges.
 
 The **Nextcloud bridge** (`semif_agent/bridges/nextcloud.py`) is the third: it
 wraps the account's native protocols — WebDAV files, CalDAV calendar events and
@@ -740,8 +744,8 @@ in the same `semif-bridge` process. The connection (base URL, username, app
 password) is configured in `bridges.nextcloud` and falls back to the top-level
 `nextcloud_url` / `nextcloud_username` / `nextcloud_app_password` /
 `nextcloud_default_calendar` the calendar seeds use, so the account is
-configured once. Skills call it via `nextcloud_bridge_url` (+ optional
-`nextcloud_bridge_token`). Its HTTP surface:
+configured once. Skills call it at the address derived from `bridges.nextcloud`
+(`nextcloud_bridge_url`, + optional `nextcloud_bridge_token`). Its HTTP surface:
 
 ```
 GET  /health

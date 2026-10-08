@@ -734,9 +734,9 @@ CLI, unit tests (24) + integration tests (2).
   `codegen.timeout: 3600`, the SimpleX gateway enabled
   (`gateway.simplex.enabled = true`, `ws_url` from `simplex_chat.port`) and the
   standalone forwarding bridge enabled (`bridges.simplex.enabled = true`,
-  `ws_url` from `simplex_chat.forward_port`, top-level `simplex_bridge_url`) and
-  the LLM bridge enabled (`bridges.llm.enabled = true`, top-level
-  `llm_bridge_url`; it reuses the `llm` model);
+  `ws_url` from `simplex_chat.forward_port`) and
+  the LLM bridge enabled (`bridges.llm.enabled = true`; it reuses the `llm`
+  model);
   the operator sets `llm.model`/`llm.base_url` and `codegen.model`/
   `codegen.base_url`. Bootstrap renders/enables four user services:
   `semif-simplex.service` (the command `simplex-chat` bot daemon,
@@ -1273,9 +1273,13 @@ CLI, unit tests (24) + integration tests (2).
   (surviving bridge restarts), unlike the live `/inbox` buffer; both are
   read-only because v7 has no mark-read command (acking is a client-side read
   receipt).
-- **Skill-facing config.** The top-level `simplex_bridge_url` is the address a
-  body calls (the data-contract config search auto-populates it); bootstrap keeps
-  it in sync with the bridge port. Skills reach a bridge with the ordinary `http`
+- **Skill-facing config.** A body calls a bridge at the address derived from that
+  bridge's own `bridges.<name>` block (`host`/`port`/`token`) — the
+  `simplex_bridge_url` / `llm_bridge_url` / `nextcloud_bridge_url` var (+ `_token`)
+  is injected into `ctx.config` by `build_scheduler` via
+  `bridges.registry.derived_config_vars`, so there is no duplicate top-level key to
+  keep in sync and the data-contract config search finds it and auto-populates the
+  skill config. Skills reach a bridge with the ordinary `http`
   transport, so their hermetic tests are loopback HTTP like any other HTTP body.
   `simplex.next_message` and `simplex.connect_link` are the seeds.
 - **LLM bridge** (`bridges/llm.py`). A generic `POST /chat`
@@ -1287,7 +1291,7 @@ CLI, unit tests (24) + integration tests (2).
   scheduler's already-configured `llm` client through `run_bridges`/`build_bridge`
   into `LLMBridge`, so the endpoint/model/sampler stay configured once in the
   top-level `llm` block; the `bridges.llm` block carries only the local listener
-  (`enabled`/`host`/`port`/`token`). Bodies reach it via the top-level
+  (`enabled`/`host`/`port`/`token`). Bodies reach it via the derived
   `llm_bridge_url` (+ optional `llm_bridge_token`). It runs inside the existing
   `semif-bridge.service` process (all enabled bridges start together); with no
   client it reports `502`, never a fabricated reply. `calendar.create_event` is
@@ -1306,7 +1310,7 @@ CLI, unit tests (24) + integration tests (2).
   `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
   `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
   the same account the calendar seeds collect is configured once and a block value
-  wins. Bodies reach it via the top-level `nextcloud_bridge_url` (+ optional
+  wins. Bodies reach it via the derived `nextcloud_bridge_url` (+ optional
   `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
   Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
   `/files/read` text-or-base64, `/files/search`, `/files/write|mkdir|delete|move|copy`),
@@ -1357,7 +1361,7 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
 - [x] **4. LLM bridge** (`bridges/llm.py`). Shipped: `LLMBridge` exposes a
   generic `POST /chat` in front of the scheduler's configured `llm` client
   (threaded through `run_bridges`/`build_bridge`, never re-configured), registered
-  in `CATALOG` and seeded under `bridges.llm` + top-level `llm_bridge_url`.
+  in `CATALOG` and seeded under `bridges.llm` (its URL is derived from that block).
   `calendar.create_event` extracts its title + description through it.
 - [x] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
   + config block + `CATALOG` entry; the codegen prompts pick it up automatically

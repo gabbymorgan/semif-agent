@@ -117,12 +117,6 @@
   },
   "skill_bodies": "data/skills",
   "skill_seeds": "seeds",
-  "simplex_bridge_url": "http://127.0.0.1:5227",
-  "simplex_bridge_token": "",
-  "llm_bridge_url": "http://127.0.0.1:5229",
-  "llm_bridge_token": "",
-  "nextcloud_bridge_url": "http://127.0.0.1:5230",
-  "nextcloud_bridge_token": "",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
@@ -136,7 +130,7 @@
   "bridges": {
     "_comment": "Standalone third-party API bridges: a simple, secure local HTTP layer between codegen-authored skill bodies and real system services. Each bridge runs as its own process (`python -m semif_agent.cli bridge [--name NAME]`), one process per service daemon, and never runs inside the command gateway — gateway isolation is non-negotiable (see AGENTS.md). The bridge catalog (names, endpoints, config vars) is injected into the code-generation prompts via `semif_agent.bridges.describe_bridges()`.",
     "simplex": {
-      "_comment": "SimpleX forwarding bridge: buffers every inbound DM (no allowlist — the point is to see who reached the bot through its invite link), and serves invite-link / read / send over HTTP. It owns its own simplex-chat daemon/profile (`ws_url`, `forward_port` above), separate from the command gateway's. Skills use the top-level `simplex_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
+      "_comment": "SimpleX forwarding bridge: buffers every inbound DM (no allowlist — the point is to see who reached the bot through its invite link), and serves invite-link / read / send over HTTP. It owns its own simplex-chat daemon/profile (`ws_url`, `forward_port` above), separate from the command gateway's. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
       "enabled": true,
       "host": "127.0.0.1",
       "port": 5227,
@@ -148,14 +142,14 @@
       "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
     },
     "llm": {
-      "_comment": "LLM bridge: a generic `POST /chat` in front of the agent's configured `llm` model, so skill bodies can ask for short generated text (e.g. an event title + description) over HTTP instead of speaking the OpenAI-compatible protocol. It reuses the top-level `llm` client (endpoint/model/sampler configured once there); this block only carries the local listener. Skills use the top-level `llm_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. It runs inside the same `semif-bridge.service` process as the other enabled bridges.",
+      "_comment": "LLM bridge: a generic `POST /chat` in front of the agent's configured `llm` model, so skill bodies can ask for short generated text (e.g. an event title + description) over HTTP instead of speaking the OpenAI-compatible protocol. It reuses the top-level `llm` client (endpoint/model/sampler configured once there); this block only carries the local listener. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. It runs inside the same `semif-bridge.service` process as the other enabled bridges.",
       "enabled": true,
       "host": "127.0.0.1",
       "port": 5229,
       "token": ""
     },
     "nextcloud": {
-      "_comment": "Nextcloud bridge: files (WebDAV), calendar events and tasks (CalDAV), contacts (CardDAV), and Notes (the Notes app) over one uniform local JSON API, so skill bodies never speak the native DAV/OCS protocols. It has no service daemon (Nextcloud is plain HTTPS) and runs inside the same `semif-bridge` process as the other enabled bridges. The connection is configured HERE (url/username/app_password); when a value is blank the bridge falls back to the top-level nextcloud_url/nextcloud_username/nextcloud_app_password/nextcloud_default_calendar the calendar seeds already use, so the account is configured once. `app_password` is a Nextcloud app password (Settings > Security > Devices & sessions), not the account password. `default_calendar`/`default_addressbook` are used when a request names none and the account has several. `verify_tls` false skips certificate verification (self-signed hosts). Skills use the top-level `nextcloud_bridge_url`; keep it in sync with host/port. Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
+      "_comment": "Nextcloud bridge: files (WebDAV), calendar events and tasks (CalDAV), contacts (CardDAV), and Notes (the Notes app) over one uniform local JSON API, so skill bodies never speak the native DAV/OCS protocols. It has no service daemon (Nextcloud is plain HTTPS) and runs inside the same `semif-bridge` process as the other enabled bridges. The connection is configured HERE (url/username/app_password); when a value is blank the bridge falls back to the top-level nextcloud_url/nextcloud_username/nextcloud_app_password/nextcloud_default_calendar the calendar seeds already use, so the account is configured once. `app_password` is a Nextcloud app password (Settings > Security > Devices & sessions), not the account password. `default_calendar`/`default_addressbook` are used when a request names none and the account has several. `verify_tls` false skips certificate verification (self-signed hosts). Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
       "enabled": true,
       "host": "127.0.0.1",
       "port": 5230,

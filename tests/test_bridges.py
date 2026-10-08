@@ -15,7 +15,11 @@ import urllib.request
 import pytest
 
 from semif_agent.bridges.llm import LLMBridge
-from semif_agent.bridges.registry import describe_bridges, known_infos
+from semif_agent.bridges.registry import (
+    derived_config_vars,
+    describe_bridges,
+    known_infos,
+)
 from semif_agent.bridges.simplex import SimplexBridge
 
 
@@ -672,6 +676,39 @@ def test_every_bridge_documents_its_config_vars_and_auth():
         if info.auth_header or info.auth_config_var:
             assert info.auth_header and info.auth_config_var, info.name
             assert info.auth_config_var in info.config_vars, info.name
+
+
+def test_derived_config_vars_come_from_each_bridge_block():
+    config = {
+        "bridges": {
+            "simplex": {"host": "127.0.0.1", "port": 5227, "token": "s"},
+            "llm": {"host": "127.0.0.1", "port": 5229, "token": ""},
+            "nextcloud": {"host": "127.0.0.1", "port": 5230, "token": "n"},
+        }
+    }
+    derived = derived_config_vars(config)
+    assert derived["simplex_bridge_url"] == "http://127.0.0.1:5227"
+    assert derived["simplex_bridge_token"] == "s"
+    assert derived["llm_bridge_url"] == "http://127.0.0.1:5229"
+    assert derived["llm_bridge_token"] == ""
+    assert derived["nextcloud_bridge_url"] == "http://127.0.0.1:5230"
+    assert derived["nextcloud_bridge_token"] == "n"
+
+
+def test_derived_config_vars_normalize_bind_all_host():
+    config = {"bridges": {"llm": {"host": "0.0.0.0", "port": 5229}}}
+    assert derived_config_vars(config)["llm_bridge_url"] == "http://127.0.0.1:5229"
+
+
+def test_derived_config_vars_skip_unconfigured_bridges():
+    # No block at all: nothing derived, so the contract variable stays
+    # unresolved and the operator is asked for it.
+    assert derived_config_vars({}) == {}
+    # A block without a port is not a callable address: no URL, but the token
+    # var is still satisfiable (empty = no auth).
+    derived = derived_config_vars({"bridges": {"nextcloud": {"token": ""}}})
+    assert "nextcloud_bridge_url" not in derived
+    assert derived["nextcloud_bridge_token"] == ""
 
 
 def test_describe_bridges_renders_service_auth_and_endpoints():

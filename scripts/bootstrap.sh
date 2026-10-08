@@ -616,21 +616,21 @@ SimpleX forwarding bridge (messaging UX for skills):
     and 'semif-bridge' (the standalone bridge API). Its contact address is printed
     above; re-print with:
       "$PYTHON" scripts/simplex-address.py --ws-url ws://127.0.0.1:$SIMPLEX_FORWARD_PORT
-  - Skills reach it over HTTP via the top-level simplex_bridge_url
-    (default http://127.0.0.1:5227); simplex.connect_link shows its address and
-    simplex.next_message reads messages sent to it.
+  - Skills reach it over HTTP at the address derived from bridges.simplex
+    (host/port, default http://127.0.0.1:5227); simplex.connect_link shows its
+    address and simplex.next_message reads messages sent to it.
 
 LLM bridge (generation for skills):
   - Runs inside the same 'semif-bridge' process. It reuses the top-level `llm`
-    model (configured once) and serves a generic POST /chat; skills call it via
-    the top-level llm_bridge_url (default http://127.0.0.1:5229).
+    model (configured once) and serves a generic POST /chat; skills call it at
+    the address derived from bridges.llm (default http://127.0.0.1:5229).
 
 Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
   - Runs inside the same 'semif-bridge' process (Nextcloud is plain HTTPS, so
     there is no separate daemon). Configure the account once in config.json under
     bridges.nextcloud (url/username/app_password) — or reuse the top-level
-    nextcloud_* values the calendar seeds collect. Skills call it via the
-    top-level nextcloud_bridge_url (default http://127.0.0.1:5230).
+    nextcloud_* values the calendar seeds collect. Skills call it at the address
+    derived from bridges.nextcloud (default http://127.0.0.1:5230).
 EOF
 
 if [[ "$VOICE" = 1 ]]; then

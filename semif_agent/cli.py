@@ -313,6 +313,13 @@ def build_llm_client(config: dict, engine):
 
 
 def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
+    # Bridge listener addresses/tokens are derived from each bridge's own
+    # `bridges.<name>` block (host/port/token) — the single source of truth.
+    # There is no duplicate top-level *_bridge_url to drift; skills read these
+    # from ctx.config and the contract config search finds them here.
+    from .bridges.registry import derived_config_vars
+
+    config = {**config, **derived_config_vars(config)}
     engine = build_engine(config)
     llm = build_llm_client(config, engine)
     log = DecisionLog(config.get("log", "data/decisions.jsonl"))
