@@ -1164,8 +1164,8 @@ CLI, unit tests (24) + integration tests (2).
   runner, and the rewrite is never fed back into assessment, tracing, or the
   decision log (the runner and REPL keep the raw deterministic summary). The
   prompt forbids adding/inferring/dropping facts, and `Humanizer.humanize`
-  always falls back to the original text on any error, timeout, empty/refusal
-  reply, or runaway length, so a cleanup failure never swallows a real result.
+  always falls back to the original text on any error, timeout, empty reply, or
+  runaway length, so a cleanup failure never swallows a real result.
   It reuses the scheduler's `llm` client (endpoint/model/sampler configured
   once) with a short per-call `timeout` (a new optional `chat()` argument) so a
   slow cleanup cannot hold the gateway poll loop for the authoring budget. Off
@@ -1205,7 +1205,7 @@ CLI, unit tests (24) + integration tests (2).
   real `Scheduler` (lazy engine, unreachable LLM).
   `tests/test_humanize.py` covers the optional result cleanup with an injected
   fake `llm` client (rewrite, quote/whitespace normalization, fallback on
-  error/empty/refusal/runaway, disabled passthrough, and the global +
+  error/empty/runaway, disabled passthrough, and the global +
   per-platform gateway enable/disable wiring).
   `tests/test_lxmf_transport.py` covers the neutral LXMF transport's
   missing-dep contract, default paths, and `normalize_message` (no real `lxmf`

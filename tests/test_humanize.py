@@ -61,11 +61,6 @@ def test_humanize_falls_back_on_empty_reply():
     assert Humanizer(client).humanize("raw result") == "raw result"
 
 
-def test_humanize_falls_back_on_refusal():
-    client = FakeClient(reply="I cannot rewrite that.")
-    assert Humanizer(client).humanize("raw result") == "raw result"
-
-
 def test_humanize_falls_back_on_runaway_length():
     client = FakeClient(reply="x" * 1000)
     assert Humanizer(client, max_chars=100).humanize("raw") == "raw"

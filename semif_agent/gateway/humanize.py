@@ -10,7 +10,7 @@ It is generation, never a decision: the success/failure verdict and the routing
 are already settled by SemIf and the runner, and the rewrite is never fed back
 into assessment, tracing, or the decision log. The prompt forbids adding,
 inferring, or dropping facts, and `humanize` falls back to the original text on
-any error, timeout, empty reply, refusal, or runaway length — a cleanup failure
+any error, timeout, empty reply, or runaway length — a cleanup failure
 must never swallow or corrupt a real result.
 
 It reuses the scheduler's configured ``llm`` client (its endpoint/model/sampler)
@@ -33,18 +33,6 @@ SYSTEM_PROMPT = (
     "or internal bookkeeping unless that is the only content.\n"
     "- One sentence. No preamble, no explanation, no quotes, no markdown.\n"
     "- If the result is already a plain sentence, return it unchanged."
-)
-
-#: Leading phrases that mark a meta/refusal reply rather than a rewrite.
-_REFUSAL_PREFIXES = (
-    "i cannot",
-    "i can't",
-    "i'm sorry",
-    "i am sorry",
-    "i'm unable",
-    "i am unable",
-    "as an ai",
-    "sorry,",
 )
 
 
@@ -82,7 +70,7 @@ class Humanizer:
         """Return a grounded rewrite of `text`, or `text` unchanged.
 
         Never raises: any failure (unreachable client, timeout, empty or
-        unusable reply, refusal, runaway length) returns the original text.
+        unusable reply, runaway length) returns the original text.
         """
         source = (text or "").strip()
         if not self.enabled or not source:
@@ -99,8 +87,6 @@ class Humanizer:
             return text
         cleaned = _clean_reply(raw)
         if not cleaned:
-            return text
-        if cleaned.lower().startswith(_REFUSAL_PREFIXES):
             return text
         if len(cleaned) > self.max_chars:
             return text
