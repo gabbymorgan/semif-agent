@@ -668,6 +668,10 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
         "Time and date utilities: telling the current time or date, setting "
         "countdown timers, and setting alarms."
     ),
+    "productivity_management": (
+        "Personal productivity: creating and managing the user's to-do tasks "
+        "and task lists."
+    ),
     "housekeeping": (
         "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
         "cancelling the agent's own skills."

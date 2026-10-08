@@ -1,0 +1,6 @@
+{
+  "nextcloud_bridge_url": "Base URL of the local Nextcloud bridge, e.g. http://127.0.0.1:5230 (no trailing slash needed); used to list task lists and create the task.",
+  "nextcloud_bridge_token": "Shared secret for the Nextcloud bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
+  "llm_bridge_url": "Base URL of the local LLM bridge, e.g. http://127.0.0.1:5229 (no trailing slash needed); used to phrase the task title and description.",
+  "llm_bridge_token": "Shared secret for the LLM bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth."
+}

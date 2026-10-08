@@ -833,9 +833,12 @@ CLI, unit tests (24) + integration tests (2).
   resumes, resolves the target calendar with a SemIf choice over the owned
   calendars — a strong winner is used, otherwise the configured default);
   `calendar.next_event` is the read counterpart (Nextcloud CalDAV, recurring
-  events expanded server-side); `simplex.next_message` (read via the forwarding
-  bridge) and `simplex.connect_link` (show/create the forwarding bot's contact
-  link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
+  events expanded server-side); `productivity_management.create_nextcloud_task`
+  adds a task to a Nextcloud task list through the Nextcloud bridge (`GET
+  /tasklists` for a VTODO-capable target, `POST /tasks` to create it, the LLM
+  bridge to phrase the summary/description); `simplex.next_message` (read via the
+  forwarding bridge) and `simplex.connect_link` (show/create the forwarding bot's
+  contact link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
   `time.set_alarm` are the local time utilities (`compute` transport, empty
   contract) — they read the host clock and schedule on `ctx.timers`. Local time
   is the top-level `timezone` config value (an IANA name such as
