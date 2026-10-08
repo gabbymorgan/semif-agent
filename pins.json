@@ -1,5 +1,5 @@
 {
-  "_comment": "Committed pin manifest for the external artifacts this repo downloads: the SemIf engine ref, the pinned GGUF, the HF tokenizer revision, and the simplex-chat binary. These are code-owned, deployment-independent values bumped by a git change and picked up on the next `scripts/bootstrap.sh` run. They are deliberately NOT in config.json (per-machine user config): a ref that changes with every update is not user configuration. The agent reads engine.source/revision from here; the GGUF path is derived from engine.gguf_url unless config.json overrides engine.gguf.",
+  "_comment": "Committed pin manifest for the external artifacts this repo downloads: the SemIf engine ref, the pinned GGUF, the HF tokenizer revision, the simplex-chat binary, and the voice-training toolchain/checkpoint. These are code-owned, deployment-independent values bumped by a git change and picked up on the next `scripts/bootstrap.sh` run (the voice refs by `scripts/voice-train.sh`). They are deliberately NOT in config.json (per-machine user config): a ref that changes with every update is not user configuration. The agent reads engine.source/revision from here; the GGUF path is derived from engine.gguf_url unless config.json overrides engine.gguf.",
   "engine": {
     "semif_repo": "https://github.com/TheoLeeCJ/SemIf.git",
     "semif_ref": "23cf1f39fc9534fe81437200959b6dfc7106e45a",
@@ -12,5 +12,12 @@
     "version": "v7.0.3",
     "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
     "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0"
+  },
+  "voice": {
+    "_comment": "Piper TTS voice-training refs used by scripts/voice-train.sh (optional, off-bootstrap): the piper1-gpl training toolchain commit and the medium base checkpoint it fine-tunes from. See docs/VOICE-TRAIN.md.",
+    "piper_train_repo": "https://github.com/OHF-Voice/piper1-gpl.git",
+    "piper_train_ref": "efffbfb226bfb511ebbcf55d0cecd8b35a89743d",
+    "base_checkpoint_url": "https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main/en/en_US/lessac/medium/epoch=2164-step=1355540.ckpt",
+    "base_checkpoint_sha256": "ab7e5b8dab40f834b7cc58ae4ad7b7009c954b901e4ddbb784bbe11ce379a1cd"
   }
 }

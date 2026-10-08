@@ -289,6 +289,15 @@ voice_transport.py
                 lazy-imported, keeping the module stdlib-only; the engine
                 interfaces are plain classes so tests inject fakes. Knows
                 nothing about the scheduler or the gateway.
+voice_train.py
+                neutral recording helpers for training a custom Piper voice
+                (optional, off-bootstrap): LJSpeech dataset writer
+                (`metadata.csv` + `wavs/NNNN.wav`), prompt loading, WAV I/O,
+                level math for the mic check, and the silence-endpointing
+                capture loop. Stdlib-only (numpy lazy in `resample_pcm16`);
+                `scripts/voice-record.py` is the CLI front end and
+                `scripts/voice-train.sh` the GPU fine-tune/export pipeline. See
+                docs/VOICE-TRAIN.md. Knows nothing about the scheduler.
 ```
 
 ## Run / verify
@@ -549,6 +558,22 @@ CLI, unit tests (24) + integration tests (2).
   the venv under `.runtime/venv`, the Piper voice under `.runtime/voice/tts`,
   the faster-whisper model in the `.runtime/hf` cache). See
   "### gateway (messenger intake)".
+- **Custom Piper voice (train your own)** (Oct 2026): the TTS voice is
+  replaceable with one fine-tuned on the user's own recordings. This is an
+  optional, off-bootstrap pipeline (`scripts/voice-record.py` records an
+  LJSpeech dataset; `scripts/voice-train.sh` fine-tunes from the checkpoint
+  pinned in `pins.json` `voice` and exports ONNX on a GPU host;
+  `semif_agent/voice_train.py` holds the neutral recording helpers).
+  Deployment needs **no gateway code change**: `cli._build_gateway_adapter`
+  anchors `tts.voice_dir` to `.runtime/voice/tts`, so a trained `<name>.onnx` +
+  `<name>.onnx.json` dropped there is selected by setting
+  `gateway.voice.tts.voice` to `<name>`. Only a real spoken reply proves it.
+  The recorder has three modes: interactive (default), `--speak-prompts`
+  (TTS reads each line) and `--read-prompts` (prints each line + beeps, no
+  speech). Two field gotchas: a mic that re-enumerates (usually on a USB hub)
+  drops the stream — reads take a `--read-timeout` so a take ends instead of
+  hanging, and prefer a direct port; and prompt/reply audio needs the ALSA
+  output unmuted (PortAudio has no volume control). See `docs/VOICE-TRAIN.md`.
 - **Bridge services (SimpleX first)** (Sep 2026): messaging *UX* — invite links,
   reading incoming messages, composing sends — is decoupled from the command
   gateway. `semif_agent.bridges` is a folder of standalone third-party API
@@ -1220,7 +1245,10 @@ CLI, unit tests (24) + integration tests (2).
   `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
   follow-up window, `speak` truncation/failure, adapter + CLI wiring) — no
-  hardware, network, or heavy packages. The live `websockets` transport against
+  hardware, network, or heavy packages. `tests/test_voice_record.py` covers the
+  recording helpers (`semif_agent/voice_train.py`) — prompt loading, WAV I/O,
+  level math, the silence-endpointing loop, and the LJSpeech dataset writer —
+  with a scripted fake audio source. The live `websockets` transport against
   a real daemon, the live LXMF transport against a real Reticulum network, and
   the live voice pipeline against a real microphone are live-integration
   concerns.

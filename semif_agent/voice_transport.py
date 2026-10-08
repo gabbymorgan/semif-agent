@@ -226,10 +226,14 @@ class WhisperTranscriber(Transcriber):
         device: str = "cpu",
         compute_type: str = "int8",
         language: str = "en",
+        beam_size: int = 1,
+        vad_filter: bool = True,
     ):
         from faster_whisper import WhisperModel
 
         self.language = str(language or "en") or None
+        self.beam_size = int(beam_size)
+        self.vad_filter = bool(vad_filter)
         self._model = WhisperModel(str(model or "base.en"), device=str(device or "cpu"),
                                    compute_type=str(compute_type or "int8"))
 
@@ -240,8 +244,8 @@ class WhisperTranscriber(Transcriber):
         segments, _info = self._model.transcribe(
             audio,
             language=self.language,
-            beam_size=1,
-            vad_filter=True,
+            beam_size=self.beam_size,
+            vad_filter=self.vad_filter,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
@@ -435,8 +439,19 @@ class SoundDeviceAudio(AudioIO):
         except queue.Full:
             pass  # a slow consumer (STT) drops stale frames; the mic is real-time
 
-    def read(self) -> bytes | None:
-        return self._frames.get()
+    def read(self, timeout: float | None = None) -> bytes | None:
+        """Block for the next frame (or up to `timeout` seconds).
+
+        Returns `None` once the input is closed, or on a `timeout` with no
+        frame — a caller that passes a timeout can detect a stalled stream
+        instead of blocking forever.
+        """
+        if timeout is None:
+            return self._frames.get()
+        try:
+            return self._frames.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     def open_output(self, sample_rate: int, device: str = "") -> None:
         pass  # a raw stream is opened per utterance in `write`
