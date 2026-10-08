@@ -263,6 +263,13 @@ bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
                 DAV/OCS; no service daemon (stdlib-only), connection from
                 `bridges.nextcloud` with a fallback to the top-level
                 `nextcloud_*` values the calendar seeds use.
+                outlook.py + outlook_client.py: OutlookBridge — the user's
+                Microsoft account (Outlook / Microsoft 365) over Microsoft Graph:
+                mail, calendar events, Microsoft To Do tasks, contacts, and
+                OneDrive files, plus the OAuth2 device-code + refresh flow. No
+                daemon (stdlib-only `urllib`); tokens stored under
+                `.runtime/outlook/token.json` and seeded once with
+                `scripts/outlook-auth.py`; connection from `bridges.outlook`.
                 registry.py: CATALOG, describe_bridges() (catalog injected
                 into the codegen prompts), run_bridges() (threads the scheduler's
                 `llm` client into the LLM bridge). Run with `python -m
@@ -1359,6 +1366,36 @@ CLI, unit tests (24) + integration tests (2).
   addressbook defaults resolve from config when a request names none and the
   account has several. `tests/test_nextcloud_bridge.py` drives the real client
   over a loopback `http.server` faking Nextcloud's DAV/OCS shapes.
+- **Outlook bridge** (`bridges/outlook.py` + `bridges/outlook_client.py`).
+  Wraps the user's Microsoft account — Outlook / Microsoft 365 mail, calendar
+  events, Microsoft To Do tasks, contacts, and OneDrive files — behind one
+  uniform JSON surface over **Microsoft Graph**, so a body never speaks Graph or
+  OAuth directly. Like Nextcloud it has **no service daemon** (Graph is plain
+  HTTPS) and is stdlib-only (`urllib` + `json` + `ssl` + `base64`), so
+  `check_requirements` is always `(True, None)` and it starts instantly inside
+  `semif-bridge.service`. Authorization is the OAuth2 **device code flow** (a
+  public client, no secret): `scripts/outlook-auth.py` runs it once and stores
+  the access + refresh tokens 0600 under the checkout's
+  `.runtime/outlook/token.json` (override with `bridges.outlook.token_path`); the
+  client refreshes on expiry/401. The bridge starts without a token — an
+  unauthenticated route returns `503` telling the operator to run the helper
+  (`OutlookAuthRequired`), a real Graph failure is `502` (`OutlookError`), and a
+  missing `client_id` is `503`. The connection is configured in
+  `bridges.outlook` (`client_id`, `tenant` default `common`,
+  `default_calendar`/`default_task_list`/`default_mail_folder`/`default_timezone`,
+  `verify_tls`/`timeout`); it also accepts `graph`/`login` base URLs (a test
+  seam/defaulting to the real hosts). Bodies reach it via the derived
+  `outlook_bridge_url` (+ optional `outlook_bridge_token`). Routes (reads `GET`,
+  mutations `POST`): `/user`, mail (`/mail/folders`, `/mail/messages` list +
+  `/mail/messages/get`, `POST /mail/send` immediate + `/mail/draft`), calendar
+  (`/calendars`, `/calendars/events` via `calendarView` so recurrences expand,
+  `POST /calendars/events` + `/update` + `/delete`), To Do (`/tasklists`,
+  `/tasks`, `POST /tasks` + `/update` + `/complete` + `/delete`), contacts
+  (`/contacts` search), and OneDrive (`/files` list, `/files/read`
+  text-or-base64, `POST /files/write`). Graph's `@odata.nextLink` paging and
+  `429`/`Retry-After` backoff are handled in the client.
+  `tests/test_outlook_bridge.py` drives the real client over a loopback
+  `http.server` faking the token endpoint and Graph shapes.
 
 ## Bridge backlog (one session per item)
 
@@ -1402,6 +1439,15 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   `bridges/nextcloud_client.py`): files/calendars/tasks/contacts/notes over one
   JSON surface, no daemon, connection from `bridges.nextcloud` with a top-level
   `nextcloud_*` fallback. Future bridges follow the same shape.
+- [x] **6. Outlook / Microsoft Graph bridge** (`bridges/outlook.py` +
+  `bridges/outlook_client.py`). Shipped: the `OutlookBridge` exposes mail,
+  calendar, Microsoft To Do, contacts, and OneDrive over one JSON surface in
+  front of Graph; OAuth2 device-code + refresh (`scripts/outlook-auth.py`, tokens
+  under `.runtime/outlook/token.json`); seven `seeds/outlook/*` skills
+  (`next_message`, `send_message` confirm-gated, `next_event`, `create_event`,
+  `create_task`, `list_contacts`, `list_files`). Deferred: writing/reusing
+  Outlook app-registration guidance in the docs, and a mail-send seed that
+  attaches files.
 
 ### Code principles
 - **Contain installation artifacts in the repo.** Everything a machine installs

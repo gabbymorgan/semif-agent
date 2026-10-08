@@ -15,10 +15,16 @@ import threading
 from .base import BridgeInfo, BridgeService
 from .llm import LLMBridge
 from .nextcloud import NextcloudBridge
+from .outlook import OutlookBridge
 from .simplex import SimplexBridge
 
 #: Known bridge services. Order is presentation order.
-CATALOG: tuple[type[BridgeService], ...] = (SimplexBridge, LLMBridge, NextcloudBridge)
+CATALOG: tuple[type[BridgeService], ...] = (
+    SimplexBridge,
+    LLMBridge,
+    NextcloudBridge,
+    OutlookBridge,
+)
 
 
 def _class_for(name: str) -> type[BridgeService] | None:

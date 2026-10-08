@@ -162,6 +162,21 @@
       "default_addressbook": "",
       "verify_tls": true,
       "timeout": 30
+    },
+    "outlook": {
+      "_comment": "Outlook bridge: the user's Microsoft account (Outlook / Microsoft 365) through Microsoft Graph — mail, calendar events, Microsoft To Do tasks, contacts, and OneDrive files — over one uniform local JSON API, so skill bodies never speak Graph or OAuth. No service daemon and no extra dependency (Graph is plain HTTPS); it runs inside the same `semif-bridge` process as the other enabled bridges. Authorization is the OAuth2 device code flow: register an Entra ID public-client app, put its `client_id` here, run `scripts/outlook-auth.py` once, and the tokens are stored (0600) under `.runtime/outlook/token.json` (override with `token_path`). `tenant` is usually `common` (personal + work accounts). `default_calendar`/`default_task_list`/`default_mail_folder` are used when a request names none; `default_timezone` (IANA name) labels created events/tasks whose start has no offset. `verify_tls` false skips certificate verification. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. Disabled by default because it needs a client id + an authorization run first.",
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 5231,
+      "token": "",
+      "client_id": "",
+      "tenant": "common",
+      "default_calendar": "",
+      "default_task_list": "",
+      "default_mail_folder": "inbox",
+      "default_timezone": "UTC",
+      "verify_tls": true,
+      "timeout": 30
     }
   },
   "gateway": {

@@ -515,14 +515,16 @@ Key blocks:
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
 | `bridges.nextcloud` | Nextcloud bridge: host/port/token + connection (url/username/app_password/defaults) |
+| `bridges.outlook` | Outlook bridge: host/port/token + Microsoft Graph connection (client_id/tenant/defaults) |
 | `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
 
-Bridge skills read `simplex_bridge_url` / `llm_bridge_url` / `nextcloud_bridge_url`
-(+ their `_token`) from `ctx.config`; each is **derived** at startup from its
-`bridges.<name>` host/port/token, so there is no duplicate top-level key to keep
-in sync. A bridge with no block (or no port) leaves the variable unresolved and
-the operator is asked for it.
+Bridge skills read `simplex_bridge_url` / `llm_bridge_url` /
+`nextcloud_bridge_url` / `outlook_bridge_url` (+ their `_token`) from
+`ctx.config`; each is **derived** at startup from its `bridges.<name>`
+host/port/token, so there is no duplicate top-level key to keep in sync. A bridge
+with no block (or no port) leaves the variable unresolved and the operator is
+asked for it.
 
 `llm.model` and `codegen.model` are **required** (no default): set each to a
 model its endpoint serves. A missing model fails fast at startup with a clear
@@ -773,6 +775,46 @@ A missing connection is `503`; a real Nextcloud failure (transport, HTTP error,
 or a bad reply) is `502` — never a fabricated success. Calendar and addressbook
 defaults resolve from `bridges.nextcloud` when a request names none and the
 account has several.
+
+The **Outlook bridge** (`semif_agent/bridges/outlook.py`) wraps the user's
+Microsoft account (Outlook / Microsoft 365) through **Microsoft Graph**: mail,
+calendar events, Microsoft To Do tasks, contacts, and OneDrive files. Like
+Nextcloud it has **no service daemon** (Graph is plain HTTPS) and is stdlib-only,
+so it starts instantly in the same `semif-bridge` process. Authorization is the
+OAuth2 **device code flow**: register an Entra ID public-client app, put its
+`client_id` in `bridges.outlook`, and run `scripts/outlook-auth.py` once — the
+tokens are stored (0600) under the checkout's `.runtime/outlook/token.json` and
+refreshed automatically. The bridge starts without a token; an unauthenticated
+route returns `503` telling the operator to run that helper. Skills call it at the
+address derived from `bridges.outlook` (`outlook_bridge_url`, + optional
+`outlook_bridge_token`). Its HTTP surface:
+
+```
+GET  /health
+GET  /user                                          # the signed-in account
+GET  /mail/folders
+GET  /mail/messages?folder=<name|id>&count=<n>&search=<text>&unread=<bool>
+GET  /mail/messages/get?id=<id>
+POST /mail/send   {"to":[...],"cc"?,"subject"?,"body"?,"content_type"?}
+POST /mail/draft  {"to"?,"cc"?,"subject"?,"body"?,"content_type"?}
+GET  /calendars
+GET  /calendars/events?calendar=<name|id>&start=<iso>&end=<iso>   # recurrences expand
+POST /calendars/events | /calendars/events/update | /calendars/events/delete
+GET  /tasklists                                     # Microsoft To Do
+GET  /tasks?list=<name|id>
+POST /tasks | /tasks/update | /tasks/complete | /tasks/delete
+GET  /contacts?query=<text>&count=<n>
+GET  /files?path=<dir>                              # OneDrive
+GET  /files/read?path=<path>                        # text, or base64 for binary
+POST /files/write   {"path","content","encoding"?,"overwrite"?}
+```
+
+A missing `client_id` or an unauthorized bridge is `503`; a real Graph failure
+(transport, HTTP error, or a bad reply) is `502` — never a fabricated success.
+Seven `seeds/outlook/*` skills ship (`next_message`, `send_message`,
+`next_event`, `create_event`, `create_task`, `list_contacts`, `list_files`);
+`send_message` composes the message through the LLM bridge and asks for
+confirmation before it sends.
 
 ### Dream report
 
