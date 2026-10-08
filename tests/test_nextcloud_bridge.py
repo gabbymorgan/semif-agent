@@ -48,7 +48,9 @@ class FakeNextcloud:
             "/Documents/readme.txt": {"type": "file", "content": b"hello world"},
             "/image.png": {"type": "file", "content": b"\x89PNG\x00\xff"},
         }
-        self.calendars = {"personal": {"label": "Personal", "objects": {}}}
+        self.calendars = {
+            "personal": {"label": "Personal", "components": ["VEVENT"], "objects": {}}
+        }
         self.addressbooks = {"contacts": {"label": "Contacts", "cards": {}}}
         self.notes = {}
         self._next_note_id = 1
@@ -257,12 +259,16 @@ class FakeNextcloud:
             )
         ]
         for name, calendar in self.calendars.items():
+            components = calendar.get("components") or ["VEVENT"]
+            comp_xml = "".join(f'<c:comp name="{c}"/>' for c in components)
             responses.append(
                 self._response(
                     f"/remote.php/dav/calendars/{USER}/{name}/",
                     "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>"
                     f"<d:displayname>{calendar['label']}</d:displayname>"
                     "<c:calendar-description>desc</c:calendar-description>"
+                    f"<c:supported-calendar-component-set>{comp_xml}"
+                    "</c:supported-calendar-component-set>"
                     '<nc:calendar-color>#ff0000</nc:calendar-color>'
                     "<c:getctag>ctag-1</c:getctag>",
                 )
@@ -546,6 +552,7 @@ def test_list_calendars(nextcloud):
             "description": "desc",
             "color": "#ff0000",
             "ctag": "ctag-1",
+            "components": ["VEVENT"],
         }
     ]
 
@@ -807,6 +814,83 @@ def test_bridge_uses_only_calendar_when_unset(nextcloud):
         "/calendars/events", {"summary": "Only", "start": "2026-03-01T12:00:00Z"}
     )
     assert status == 200 and payload["calendar"] == "personal"
+
+
+# ---- bridge: task-list resolution ----
+
+
+def test_bridge_tasklists_exclude_event_calendars_and_deck(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["tasks"] = {"label": "Tasks", "components": ["VTODO"], "objects": {}}
+    fake.calendars["app-generated--deck--board-1"] = {
+        "label": "Deck: Board",
+        "components": ["VTODO"],
+        "objects": {},
+    }
+    status, payload = bridge_for(base).handle_get("/tasklists", {})
+    assert status == 200
+    assert [c["name"] for c in payload["tasklists"]] == ["tasks"]
+
+
+def test_bridge_create_task_uses_default_task_calendar(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["tasks"] = {"label": "Tasks", "components": ["VTODO"], "objects": {}}
+    status, payload = bridge_for(base, default_task_calendar="tasks").handle_post(
+        "/tasks", {"summary": "Buy milk"}
+    )
+    assert status == 200
+    assert payload["ok"] is True and payload["calendar"] == "tasks"
+
+
+def test_bridge_create_task_resolves_sole_task_list(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["tasks"] = {"label": "Tasks", "components": ["VTODO"], "objects": {}}
+    # default_calendar points at an event-only calendar; a task must skip it.
+    status, payload = bridge_for(base, default_calendar="personal").handle_post(
+        "/tasks", {"summary": "Buy milk"}
+    )
+    assert status == 200 and payload["calendar"] == "tasks"
+
+
+def test_bridge_task_default_must_accept_vtodo(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["tasks"] = {"label": "Tasks", "components": ["VTODO"], "objects": {}}
+    status, payload = bridge_for(base, default_task_calendar="personal").handle_post(
+        "/tasks", {"summary": "Buy milk"}
+    )
+    assert status == 200 and payload["calendar"] == "tasks"
+
+
+def test_bridge_task_prefers_vtodo_capable_default_calendar(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["morgan"] = {
+        "label": "Morgan",
+        "components": ["VEVENT", "VTODO"],
+        "objects": {},
+    }
+    fake.calendars["other"] = {"label": "Other", "components": ["VTODO"], "objects": {}}
+    status, payload = bridge_for(base, default_calendar="morgan").handle_post(
+        "/tasks", {"summary": "Buy milk"}
+    )
+    assert status == 200 and payload["calendar"] == "morgan"
+
+
+def test_bridge_create_task_rejects_event_calendar(nextcloud):
+    _fake, base = nextcloud
+    status, payload = bridge_for(base).handle_post(
+        "/tasks", {"calendar": "personal", "summary": "Buy milk"}
+    )
+    assert status == 400
+    assert "not a task list" in payload["error"]
+
+
+def test_bridge_task_requires_calendar_when_ambiguous(nextcloud):
+    fake, base = nextcloud
+    fake.calendars["tasks-a"] = {"label": "Tasks A", "components": ["VTODO"], "objects": {}}
+    fake.calendars["tasks-b"] = {"label": "Tasks B", "components": ["VTODO"], "objects": {}}
+    status, payload = bridge_for(base).handle_post("/tasks", {"summary": "Buy milk"})
+    assert status == 400
+    assert "calendar is required" in payload["error"]
 
 
 def test_bridge_maps_nextcloud_error_to_502(nextcloud):

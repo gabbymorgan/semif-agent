@@ -149,7 +149,7 @@
       "token": ""
     },
     "nextcloud": {
-      "_comment": "Nextcloud bridge: files (WebDAV), calendar events and tasks (CalDAV), contacts (CardDAV), and Notes (the Notes app) over one uniform local JSON API, so skill bodies never speak the native DAV/OCS protocols. It has no service daemon (Nextcloud is plain HTTPS) and runs inside the same `semif-bridge` process as the other enabled bridges. The connection is configured HERE (url/username/app_password); when a value is blank the bridge falls back to the top-level nextcloud_url/nextcloud_username/nextcloud_app_password/nextcloud_default_calendar the calendar seeds already use, so the account is configured once. `app_password` is a Nextcloud app password (Settings > Security > Devices & sessions), not the account password. `default_calendar`/`default_addressbook` are used when a request names none and the account has several. `verify_tls` false skips certificate verification (self-signed hosts). Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
+      "_comment": "Nextcloud bridge: files (WebDAV), calendar events and tasks (CalDAV), contacts (CardDAV), and Notes (the Notes app) over one uniform local JSON API, so skill bodies never speak the native DAV/OCS protocols. It has no service daemon (Nextcloud is plain HTTPS) and runs inside the same `semif-bridge` process as the other enabled bridges. The connection is configured HERE (url/username/app_password); when a value is blank the bridge falls back to the top-level nextcloud_url/nextcloud_username/nextcloud_app_password/nextcloud_default_calendar the calendar seeds already use, so the account is configured once. `app_password` is a Nextcloud app password (Settings > Security > Devices & sessions), not the account password. `default_calendar`/`default_task_calendar`/`default_addressbook` are used when a request names none and the account has several; task operations only ever target a VTODO-capable task list (GET /tasklists), never an event-only calendar. `verify_tls` false skips certificate verification (self-signed hosts). Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
       "enabled": true,
       "host": "127.0.0.1",
       "port": 5230,
@@ -158,6 +158,7 @@
       "username": "",
       "app_password": "",
       "default_calendar": "",
+      "default_task_calendar": "",
       "default_addressbook": "",
       "verify_tls": true,
       "timeout": 30

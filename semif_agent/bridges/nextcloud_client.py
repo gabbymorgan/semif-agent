@@ -57,6 +57,23 @@ def _int(value, default=None):
         return default
 
 
+def _component_set(prop) -> list[str]:
+    """The component types a calendar accepts (`VEVENT`/`VTODO`/`VJOURNAL`).
+
+    Parsed from the CalDAV `supported-calendar-component-set` property. An empty
+    list means the server did not advertise it (unknown), not "accepts nothing".
+    """
+    node = prop.find(f"{{{CALDAV}}}supported-calendar-component-set")
+    if node is None:
+        return []
+    names = []
+    for comp in node.findall(f"{{{CALDAV}}}comp"):
+        name = (comp.get("name") or "").strip().upper()
+        if name:
+            names.append(name)
+    return names
+
+
 def _norm_path(path) -> str:
     """A user-facing DAV path: always leading `/`, no trailing slash (root `/`)."""
     text = "/" + str(path or "").strip("/")
@@ -457,6 +474,7 @@ _CALENDAR_PROPFIND = (
     '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" '
     'xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">'
     "<d:prop><d:resourcetype/><d:displayname/><c:calendar-description/>"
+    "<c:supported-calendar-component-set/>"
     "<c:getctag/><oc:getctag/><nc:calendar-color/><oc:calendar-color/></d:prop>"
     "</d:propfind>"
 ).encode("utf-8")
@@ -860,6 +878,7 @@ class NextcloudClient:
             ctag = _text(prop.find(f"{{{CALDAV}}}getctag")) or _text(
                 prop.find(f"{{{OC}}}getctag")
             )
+            components = _component_set(prop)
             calendars.append(
                 {
                     "name": name,
@@ -867,6 +886,7 @@ class NextcloudClient:
                     "description": _text(prop.find(f"{{{CALDAV}}}calendar-description")),
                     "color": color,
                     "ctag": ctag,
+                    "components": components,
                 }
             )
         calendars.sort(key=lambda calendar: calendar["name"].lower())

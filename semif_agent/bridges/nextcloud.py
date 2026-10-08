@@ -26,6 +26,45 @@ import uuid
 from .base import BridgeInfo, BridgeService
 from .nextcloud_client import DEFAULT_TIMEOUT, NextcloudClient, NextcloudError
 
+#: Nextcloud Deck backs each board with a VTODO-only calendar named like this.
+_DECK_PREFIX = "app-generated--deck--"
+
+_COMPONENT_KINDS = {
+    "VTODO": "task list",
+    "VEVENT": "event calendar",
+    "VJOURNAL": "journal",
+}
+
+
+def _supports(calendar: dict, component: str) -> bool:
+    """Whether a calendar accepts `component`; unknown (empty) means allow."""
+    components = calendar.get("components") or []
+    return not components or component in components
+
+
+def _is_deck_board(calendar: dict) -> bool:
+    return str(calendar.get("name") or "").startswith(_DECK_PREFIX)
+
+
+def _component_kind(component: str) -> str:
+    return _COMPONENT_KINDS.get(component, "calendar of that kind")
+
+
+def _join_components(calendar: dict) -> str:
+    components = calendar.get("components") or []
+    return ", ".join(components) if components else "an unknown component set"
+
+
+def _task_list_hint(calendars: list[dict]) -> str:
+    names = [
+        c["name"]
+        for c in calendars
+        if _supports(c, "VTODO") and not _is_deck_board(c)
+    ]
+    if names:
+        return "task lists: " + ", ".join(names)
+    return "no VTODO-capable task lists are available"
+
 
 class NextcloudBridge(BridgeService):
     name = "nextcloud"
@@ -62,7 +101,12 @@ class NextcloudBridge(BridgeService):
             "POST /files/copy {\"path\", \"destination\", \"overwrite\"?: bool} "
             "-> 200 {\"ok\": true, \"path\", \"destination\"}",
             "GET /calendars -> 200 {\"calendars\": [{name, label, description, "
-            "color, ctag}]}",
+            "color, ctag, components}]} — components lists the CalDAV component "
+            "types each collection accepts (VEVENT, VTODO, VJOURNAL)",
+            "GET /tasklists -> 200 {\"tasklists\": [{name, label, description, "
+            "color, ctag, components}]} — the user's task lists (calendars that "
+            "accept VTODO), excluding Nextcloud Deck boards; use this to pick a "
+            "target for POST /tasks",
             "GET /calendars/events?calendar=<name>&start=<iso>&end=<iso> -> 200 "
             "{\"calendar\", \"events\": [{uid, summary, start, end, all_day, "
             "location, description, rrule, status, href, etag}]} — start/end "
@@ -79,10 +123,12 @@ class NextcloudBridge(BridgeService):
             "{\"ok\": true, \"uid\", \"calendar\"}",
             "GET /tasks?calendar=<name> -> 200 {\"calendar\", \"tasks\": [{uid, "
             "summary, due, status, percent_complete, priority, description, href, "
-            "etag}]} — CalDAV VTODO",
+            "etag}]} — CalDAV VTODO; calendar must be a VTODO-capable task list "
+            "(see GET /tasklists), defaulting to the configured task calendar",
             "POST /tasks {\"calendar\"?, \"uid\"?, \"summary\", \"due\"?, "
             "\"priority\"?, \"description\"?} -> 200 {\"ok\": true, \"uid\", "
-            "\"calendar\", \"etag\"}",
+            "\"calendar\", \"etag\"} — calendar must be a VTODO-capable task list "
+            "(see GET /tasklists); an event-only calendar is rejected with 400",
             "POST /tasks/update {\"calendar\"?, \"uid\", \"summary\"?, \"due\"?, "
             "\"priority\"?, \"description\"?, \"status\"?, \"percent_complete\"?} "
             "-> 200 {ok, uid}",
@@ -148,6 +194,7 @@ class NextcloudBridge(BridgeService):
         self.username = str(pick("username")).strip()
         self.app_password = str(pick("app_password"))
         self.default_calendar = str(pick("default_calendar")).strip()
+        self.default_task_calendar = str(pick("default_task_calendar")).strip()
         self.default_addressbook = str(pick("default_addressbook")).strip()
         self.verify_tls = bool(cfg.get("verify_tls", fb.get("verify_tls", True)))
         self.timeout = float(cfg.get("timeout", DEFAULT_TIMEOUT))
@@ -222,6 +269,8 @@ class NextcloudBridge(BridgeService):
             }
         if path == "/calendars":
             return 200, {"calendars": self.client.list_calendars()}
+        if path == "/tasklists":
+            return 200, {"tasklists": self._task_lists()}
         if path == "/calendars/events":
             calendar = self._resolve_calendar(self._q(query, "calendar"))
             return 200, {
@@ -233,7 +282,7 @@ class NextcloudBridge(BridgeService):
                 ),
             }
         if path == "/tasks":
-            calendar = self._resolve_calendar(self._q(query, "calendar"))
+            calendar = self._resolve_calendar(self._q(query, "calendar"), "VTODO")
             return 200, {"calendar": calendar, "tasks": self.client.list_tasks(calendar)}
         if path == "/addressbooks":
             return 200, {"addressbooks": self.client.list_addressbooks()}
@@ -287,10 +336,10 @@ class NextcloudBridge(BridgeService):
         if path == "/tasks/update":
             return 200, self._update_task(payload)
         if path == "/tasks/complete":
-            calendar = self._resolve_calendar(self._optional_str(payload, "calendar"))
+            calendar = self._resolve_calendar(self._optional_str(payload, "calendar"), "VTODO")
             return 200, self.client.complete_task(calendar, self._required(payload, "uid"))
         if path == "/tasks/delete":
-            calendar = self._resolve_calendar(self._optional_str(payload, "calendar"))
+            calendar = self._resolve_calendar(self._optional_str(payload, "calendar"), "VTODO")
             return 200, self.client.delete_object(calendar, self._required(payload, "uid"))
         if path == "/contacts":
             return 200, self._create_contact(payload)
@@ -348,7 +397,7 @@ class NextcloudBridge(BridgeService):
         return self.client.update_event(calendar, uid, **changes)
 
     def _create_task(self, payload: dict) -> dict:
-        calendar = self._resolve_calendar(self._optional_str(payload, "calendar"))
+        calendar = self._resolve_calendar(self._optional_str(payload, "calendar"), "VTODO")
         uid = self._optional_str(payload, "uid") or uuid.uuid4().hex
         return self.client.create_task(
             calendar,
@@ -360,7 +409,7 @@ class NextcloudBridge(BridgeService):
         )
 
     def _update_task(self, payload: dict) -> dict:
-        calendar = self._resolve_calendar(self._optional_str(payload, "calendar"))
+        calendar = self._resolve_calendar(self._optional_str(payload, "calendar"), "VTODO")
         uid = self._required(payload, "uid")
         changes = {
             key: payload[key]
@@ -410,17 +459,71 @@ class NextcloudBridge(BridgeService):
 
     # ---- default resolution ----
 
-    def _resolve_calendar(self, name) -> str:
-        name = str(name or self.default_calendar or "").strip()
-        if name:
-            return name
-        calendars = self.client.list_calendars()
+    def _resolve_calendar(self, name, component: str | None = None) -> str:
+        """Resolve a calendar name, honoring the CalDAV component it must accept.
+
+        An explicit name is validated when the collection's component set is
+        known: asking a task operation to write to an event-only calendar is a
+        real error (a `VTODO` PUT there is rejected), not a silent redirect. With
+        no name, a task operation falls back to the configured task calendar, then
+        the event default when it also accepts VTODO, then the sole user task
+        list. `component=None` (events, files) keeps the historical behavior.
+        """
+        requested = str(name or "").strip()
+        if requested:
+            if component:
+                calendars = self.client.list_calendars()
+                match = next((c for c in calendars if c.get("name") == requested), None)
+                if match is not None and not _supports(match, component):
+                    raise ValueError(
+                        f"{requested!r} is not a {_component_kind(component)} "
+                        f"(it accepts {_join_components(match)}); "
+                        f"{_task_list_hint(calendars)}"
+                    )
+            return requested
+
+        # The configured defaults, most specific first. For a task operation the
+        # event default is still consulted when it also accepts VTODO.
+        defaults = [self.default_task_calendar] if component == "VTODO" else []
+        defaults.append(self.default_calendar)
+        calendars = None
+        for default in defaults:
+            if not default:
+                continue
+            if not component:
+                return default
+            if calendars is None:
+                calendars = self.client.list_calendars()
+            match = next((c for c in calendars if c.get("name") == default), None)
+            if match is None or _supports(match, component):
+                return default
+
+        if calendars is None:
+            calendars = self.client.list_calendars()
+        if component:
+            calendars = [c for c in calendars if _supports(c, component)]
+            if component == "VTODO":
+                calendars = [c for c in calendars if not _is_deck_board(c)]
         if len(calendars) == 1:
             return calendars[0]["name"]
         raise ValueError(
-            "calendar is required (name one in the request, or set "
-            "bridges.nextcloud.default_calendar)"
+            f"calendar is required (name one in the request, or set "
+            f"bridges.nextcloud.default_calendar"
+            + (
+                " / default_task_calendar"
+                if component == "VTODO"
+                else ""
+            )
+            + ")"
         )
+
+    def _task_lists(self) -> list[dict]:
+        """The user's task lists: VTODO-capable calendars, minus Deck boards."""
+        return [
+            calendar
+            for calendar in self.client.list_calendars()
+            if _supports(calendar, "VTODO") and not _is_deck_board(calendar)
+        ]
 
     def _resolve_addressbook(self, name) -> str:
         name = str(name or self.default_addressbook or "").strip()

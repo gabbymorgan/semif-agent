@@ -124,6 +124,7 @@ def build_bridge(
                 "username": config.get("nextcloud_username"),
                 "app_password": config.get("nextcloud_app_password"),
                 "default_calendar": config.get("nextcloud_default_calendar"),
+                "default_task_calendar": config.get("nextcloud_default_task_calendar"),
                 "default_addressbook": config.get("nextcloud_default_addressbook"),
             },
         )

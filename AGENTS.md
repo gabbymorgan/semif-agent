@@ -1314,9 +1314,11 @@ CLI, unit tests (24) + integration tests (2).
   `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
   Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
   `/files/read` text-or-base64, `/files/search`, `/files/write|mkdir|delete|move|copy`),
-  calendars (`/calendars`, `/calendars/events` list, `POST /calendars/events` +
-  `/update` + `/delete`), tasks (`/tasks` list, `POST /tasks` + `/update` +
-  `/complete` + `/delete`), contacts (`/addressbooks`, `/contacts` list/search,
+  calendars (`/calendars` with each collection's `supported-calendar-component-set`
+  as `components`, `/tasklists` for VTODO-capable task lists, `/calendars/events`
+  list, `POST /calendars/events` + `/update` + `/delete`), tasks (`/tasks` list,
+  `POST /tasks` + `/update` + `/complete` + `/delete`; task routes only target a
+  VTODO-capable calendar and reject an event-only one), contacts (`/addressbooks`, `/contacts` list/search,
   `POST /contacts` + `/update` + `/delete`), notes (`/notes`, `/notes/get`,
   `POST /notes` + `/update` + `/delete`), and `/user` + `/capabilities` (OCS).
   A missing connection is `503`; a real failure (`NextcloudError` — transport,
