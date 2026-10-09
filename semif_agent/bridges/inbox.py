@@ -2,7 +2,7 @@
 
 The bridge owns the read cursor so a read skill stays stateless. Generic over
 transports: entries are normalized message dicts (`contact_id`, `display_name`,
-`text`), which is exactly what `semif_agent.simplex_ws` yields.
+`text`, `item_id`), which is exactly what `semif_agent.simplex_ws` yields.
 """
 
 from __future__ import annotations
@@ -28,6 +28,9 @@ class MessagingInbox:
             "contact_id": contact_id,
             "display_name": display_name,
             "text": message.get("text") or "",
+            # The transport's per-item id (SimpleX `itemId`), when known: lets a
+            # consumer mark exactly this message read on the daemon.
+            "item_id": str(message.get("item_id") or ""),
             "received_at": time.time(),
         }
         with self._lock:

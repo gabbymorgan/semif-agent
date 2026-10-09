@@ -186,10 +186,10 @@ def parse_chat(achat: dict) -> dict | None:
 def parse_direct_text_item(item: dict) -> InboundDict | None:
     """Normalize one `newChatItems` entry into a message dict, or None.
 
-    Returns `{text, contact_id, display_name, raw}` for a received direct text
-    message. Drops group chats, own echoes, non-text content, and items with no
-    resolvable contact id. Authorization is the caller's job — this layer is
-    deliberately policy-free.
+    Returns `{text, contact_id, display_name, item_id, raw}` for a received
+    direct text message. Drops group chats, own echoes, non-text content, and
+    items with no resolvable contact id. Authorization is the caller's job —
+    this layer is deliberately policy-free.
     """
     chat_info = item.get("chatInfo") or {}
     if chat_info.get("type") != "direct":
@@ -221,11 +221,15 @@ def parse_direct_text_item(item: dict) -> InboundDict | None:
     entry = contact_entry(contact)
     if entry is None:
         return None
+    item_id = (chat_item.get("meta") or {}).get("itemId")
     return {
         "text": text,
         "contact_id": entry["id"],
         "display_name": entry["display_name"],
         "local_name": entry.get("local_name", ""),
+        # Carried so a consumer can mark exactly this item read (the bridge's
+        # live inbox keeps it; the command gateway ignores it).
+        "item_id": str(item_id) if item_id is not None else "",
         "raw": item,
     }
 
@@ -279,6 +283,39 @@ def parse_send_response(resp: dict) -> dict:
         error = ((meta.get("itemStatus") or {}).get("agentError") or {}).get("type") or ""
         return {"item_id": str(item_id), "status": status, "error": error}
     return {"item_id": None, "status": "", "error": "daemon returned no message id"}
+
+
+def read_command(chat_id: str, item_ids=None) -> str:
+    """Structured command that marks a chat, or specific items, read.
+
+    v7 exposes `/_read chat @<id>` (the whole chat) and `/_read chat items @<id>
+    <comma-separated item ids>` (a precise subset). The item form is used so
+    consuming the next unread message clears exactly that message and leaves the
+    rest of the chat untouched. With no usable item ids it falls back to the
+    whole-chat form.
+    """
+    chat_ref = f"@{str(chat_id).strip().lstrip('@')}"
+    if item_ids:
+        ids = ",".join(str(i).strip() for i in item_ids if str(i).strip())
+        if ids:
+            return f"/_read chat items {chat_ref} {ids}"
+    return f"/_read chat {chat_ref}"
+
+
+def parse_read_response(resp: dict) -> dict:
+    """Normalize a `/_read chat` response into `{ok, type, error}`.
+
+    A successful item read comes back as `itemsReadForChat` and a whole-chat
+    read as the chat's `ok`; a rejected command comes back as `chatCmdError`.
+    `ok` is True only when the daemon did not report an error, so a caller never
+    treats a rejected (or empty) response as a consumed message.
+    """
+    if not isinstance(resp, dict) or not resp:
+        return {"ok": False, "type": "", "error": "empty daemon response"}
+    if resp.get("type") == "chatCmdError" or resp.get("error"):
+        detail = resp.get("chatError") or resp.get("error") or "read command failed"
+        return {"ok": False, "type": "chatCmdError", "error": str(detail)[:300]}
+    return {"ok": True, "type": resp.get("type") or "", "error": ""}
 
 
 class SimplexDaemon:
@@ -517,6 +554,42 @@ class SimplexDaemon:
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
             raise TimeoutError("simplex send request timed out") from exc
+
+    # ---- read ----
+
+    async def mark_read(
+        self, chat_id: str, item_ids=None, timeout: float = 20.0
+    ) -> dict:
+        """Mark a direct chat, or specific items, read on the daemon.
+
+        `/_read chat items @<id> <ids>` clears exactly the reported items'
+        `rcv_new` status (leaving other unread messages intact);
+        `/_read chat @<id>` clears the whole chat. Returns `{ok, type, error}`.
+        A transport failure raises (via `_roundtrip`) — never a fabricated
+        success.
+        """
+        resp = await self._roundtrip(read_command(chat_id, item_ids), timeout)
+        return parse_read_response(resp)
+
+    def request_mark_read(
+        self, chat_id: str, item_ids=None, timeout: float = 20.0
+    ) -> dict:
+        """Thread-safe read-mark for callers off the event loop.
+
+        Raises `RuntimeError` when no live connection exists and `TimeoutError`
+        when the daemon does not answer in time — never a fabricated success.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("simplex gateway is not connected")
+        future = asyncio.run_coroutine_threadsafe(
+            self.mark_read(chat_id, item_ids, timeout=timeout), loop
+        )
+        try:
+            return future.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("simplex read request timed out") from exc
 
     # ---- contacts ----
 

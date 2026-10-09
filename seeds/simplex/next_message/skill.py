@@ -11,8 +11,9 @@ oldest unread message for that conversation.
 
 When the live buffer is empty it falls back to the daemon's persistent unread
 (`/unread` + `/history`), so a message that arrived before the bridge started is
-still reported. (v7 has no mark-read command, so a persistent-unread message can
-be reported again until the user reads it in their own client.)
+still reported. After reporting a message, that single item is marked read on
+the daemon through the bridge (`POST /read`), so the next call advances to the
+next unread message instead of re-reporting the same one.
 
 The bridge owns the read cursor, so this skill keeps no state of its own. It
 never opens a WebSocket to the `simplex-chat` daemon — the bridge is the only
@@ -82,6 +83,41 @@ def _get(ctx, path):
         raise BridgeError(f"GET {path}: HTTP {exc.code} {detail}") from exc
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         raise BridgeError(f"GET {path}: {exc}") from exc
+
+
+def _post(ctx, path, payload):
+    data = json.dumps(payload).encode("utf-8")
+    headers = {**_headers(ctx), "Content-Type": "application/json"}
+    request = urllib.request.Request(
+        _base(ctx) + path, data=data, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()[:200]
+        raise BridgeError(f"POST {path}: HTTP {exc.code} {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise BridgeError(f"POST {path}: {exc}") from exc
+
+
+def _mark_read(ctx, contact, item_id):
+    """Mark one just-reported item read via the bridge.
+
+    Returns None on success, or a short honest reason string on failure. The
+    message was still reported, so a failed consume is surfaced as a note rather
+    than fabricated into a read failure.
+    """
+    item = str(item_id or "").strip()
+    if not item:
+        return None
+    try:
+        payload = _post(ctx, "/read", {"contact": contact, "item_ids": [item]})
+    except BridgeError as exc:
+        return str(exc)
+    if not payload.get("ok"):
+        return payload.get("error") or "the bridge did not mark it read"
+    return None
 
 
 # ---- conversation resolution ----
@@ -189,7 +225,13 @@ def _read_live(ctx, request, senders):
             new_state="no unread SimpleX messages",
             decisions=decisions,
         )
-    return _report(message.get("display_name") or contact, message.get("text"), decisions)
+    read_note = _mark_read(ctx, contact, message.get("item_id"))
+    return _report(
+        message.get("display_name") or contact,
+        message.get("text"),
+        decisions,
+        read_note,
+    )
 
 
 def _read_persistent(ctx, request):
@@ -250,9 +292,12 @@ def _read_persistent(ctx, request):
     sender = next(
         (s["display_name"] for s in senders if s["id"] == str(contact)), str(contact)
     )
-    return _report(sender, messages[0].get("text"), decisions)
+    read_note = _mark_read(ctx, contact, messages[0].get("item_id"))
+    return _report(sender, messages[0].get("text"), decisions, read_note)
 
 
-def _report(sender, body, decisions):
+def _report(sender, body, decisions, read_note=None):
     report = f"SimpleX message from {sender}: {str(body or '')}"
+    if read_note:
+        report += f" (could not mark it read: {read_note})"
     return ActionResult(action_log=report, new_state=report, decisions=decisions)

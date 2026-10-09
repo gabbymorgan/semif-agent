@@ -55,6 +55,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     history = {}
     requests = []
     tokens = []
+    read_calls = []
+    read_ok = True
 
     def _send(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
@@ -88,11 +90,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         else:
             self._send({"error": "not found"}, 404)
 
+    def do_POST(self):
+        url = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        if url.path != "/read":
+            self._send({"error": "not found"}, 404)
+            return
+        self.read_calls.append(payload)
+        if self.read_ok:
+            self._send(
+                {
+                    "ok": True,
+                    "contact_id": payload.get("contact"),
+                    "item_ids": payload.get("item_ids"),
+                    "status": "read",
+                }
+            )
+        else:
+            self._send({"ok": False, "error": "the daemon rejected the read"})
+
     def log_message(self, *args):
         pass
 
 
-def start_server(messages, unread_chats=None, history=None):
+def start_server(messages, unread_chats=None, history=None, read_ok=True):
     handler = type(
         "Handler",
         (BridgeHandler,),
@@ -102,6 +124,8 @@ def start_server(messages, unread_chats=None, history=None):
             "history": dict(history or {}),
             "requests": [],
             "tokens": [],
+            "read_calls": [],
+            "read_ok": read_ok,
         },
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -112,6 +136,7 @@ def start_server(messages, unread_chats=None, history=None):
 def message(identifier, contact, name, text):
     return {
         "id": identifier,
+        "item_id": str(identifier),
         "contact_id": contact,
         "display_name": name,
         "text": text,
@@ -148,6 +173,9 @@ def test_multiple_senders_uses_semif_decision():
         assert handler.requests[0] == "/inbox", handler.requests
         assert handler.requests[1] == "/inbox/next?contact=7", handler.requests
         assert [m["id"] for m in handler.messages] == ["m1"], "the popped message must be consumed"
+        assert handler.read_calls == [{"contact": "7", "item_ids": ["m2"]}], (
+            "the reported item must be marked read, and only it"
+        )
         print(action.action_log)
     finally:
         server.shutdown()
@@ -226,6 +254,7 @@ def test_single_sender_needs_no_decision():
         action = skill.act(ctx, request)
         assert engine.decisions == []
         assert "hi" in action.action_log, action.action_log
+        assert handler.read_calls == [{"contact": "4", "item_ids": ["m1"]}]
         print(action.action_log)
     finally:
         server.shutdown()
@@ -279,6 +308,7 @@ def test_empty_live_inbox_falls_back_to_persistent_unread():
         assert handler.requests == ["/inbox", "/unread", "/history?contact=3&count=50"], (
             handler.requests
         )
+        assert handler.read_calls == [{"contact": "3", "item_ids": ["8"]}]
         print(action.action_log)
     finally:
         server.shutdown()
@@ -322,6 +352,7 @@ def test_persistent_unread_prefers_a_healthy_conversation():
         assert handler.requests == ["/inbox", "/unread", "/history?contact=4&count=50"], (
             handler.requests
         )
+        assert handler.read_calls == [{"contact": "4", "item_ids": ["20"]}]
         print(action.action_log)
     finally:
         server.shutdown()
@@ -353,6 +384,24 @@ def test_auth_token_is_sent_when_configured():
         server.server_close()
 
 
+def test_failed_read_marking_is_surfaced_honestly():
+    """A message is still reported when consuming it fails, with an honest note
+    instead of a fabricated failure of the read."""
+    server, handler, url = start_server(
+        [message("m1", "4", "Alice", "hi")], read_ok=False
+    )
+    try:
+        ctx = ActionContext(engine=FakeEngine(), config=config(url))
+        action = skill.act(ctx, Request("read my next simplex message"))
+        assert "hi" in action.action_log, action.action_log
+        assert "could not mark it read" in action.action_log, action.action_log
+        assert handler.read_calls == [{"contact": "4", "item_ids": ["m1"]}]
+        print(action.action_log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main():
     test_multiple_senders_uses_semif_decision()
     test_strong_winner_overrides_default_contact()
@@ -364,6 +413,7 @@ def main():
     test_persistent_unread_prefers_a_healthy_conversation()
     test_unreachable_bridge_fails_honestly()
     test_auth_token_is_sent_when_configured()
+    test_failed_read_marking_is_surfaced_honestly()
     print("ok")
 
 

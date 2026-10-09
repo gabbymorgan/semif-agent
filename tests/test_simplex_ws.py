@@ -19,13 +19,15 @@ from semif_agent.simplex_ws import (
     parse_chat,
     parse_chat_item,
     parse_direct_text_item,
+    parse_read_response,
+    read_command,
     send_text_command,
 )
 
 
 # ---- parsing ----
 
-def direct_item(text="hello", contact_id="4", display="alice", direction="directRcv", kind="text"):
+def direct_item(text="hello", contact_id="4", display="alice", direction="directRcv", kind="text", item_id=7):
     # v7 wire shape: the Contact's `displayName` is null and the peer name lives
     # in `profile.displayName`; `localDisplayName` is auto-suffixed on collision.
     # Received text is tagged `rcvMsgContent` with the message under `msgContent`.
@@ -41,6 +43,7 @@ def direct_item(text="hello", contact_id="4", display="alice", direction="direct
             },
         },
         "chatItem": {
+            "meta": {"itemId": item_id},
             "chatDir": {"type": direction},
             "content": {
                 "type": "rcvMsgContent",
@@ -56,6 +59,7 @@ def test_parse_direct_text():
     assert message["text"] == "hello"
     assert message["contact_id"] == "4"
     assert message["display_name"] == "alice"
+    assert message["item_id"] == "7"
 
 
 def test_parse_filters_echo_group_and_non_text():
@@ -658,3 +662,61 @@ def test_request_chat_history_without_connection_raises():
     daemon = SimplexDaemon("ws://x")
     with pytest.raises(RuntimeError):
         daemon.request_chat_history("4", timeout=1)
+
+
+# ---- daemon: read marking ----
+
+def test_read_command_targets_specific_items():
+    assert read_command("7", ["8", "9"]) == "/_read chat items @7 8,9"
+
+
+def test_read_command_without_items_reads_the_whole_chat():
+    assert read_command("@7") == "/_read chat @7"
+
+
+def test_read_command_ignores_blank_item_ids():
+    assert read_command("7", [" ", ""]) == "/_read chat @7"
+
+
+def test_parse_read_response_ok_and_error():
+    assert parse_read_response({"type": "itemsReadForChat"})["ok"] is True
+    rejected = parse_read_response(
+        {"type": "chatCmdError", "chatError": {"type": "error"}}
+    )
+    assert rejected["ok"] is False
+    assert rejected["error"]
+    assert parse_read_response({})["ok"] is False
+
+
+def test_mark_read_sends_item_command_and_parses_ok():
+    daemon = SimplexDaemon("ws://x")
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(daemon, [{"type": "itemsReadForChat"}])
+        daemon._ws = ws
+        return await daemon.mark_read("7", ["11", "12"], timeout=5), ws
+
+    result, ws = asyncio.run(scenario())
+    assert result["ok"] is True
+    assert [m["cmd"] for m in ws.sent] == ["/_read chat items @7 11,12"]
+
+
+def test_mark_read_reports_a_rejected_command():
+    daemon = SimplexDaemon("ws://x")
+
+    async def scenario():
+        daemon._loop = asyncio.get_running_loop()
+        ws = FakeWS(
+            daemon, [{"type": "chatCmdError", "chatError": {"type": "error"}}]
+        )
+        daemon._ws = ws
+        return await daemon.mark_read("7", ["11"], timeout=5)
+
+    assert asyncio.run(scenario())["ok"] is False
+
+
+def test_request_mark_read_without_connection_raises():
+    daemon = SimplexDaemon("ws://x")
+    with pytest.raises(RuntimeError):
+        daemon.request_mark_read("7", ["1"], timeout=1)

@@ -80,6 +80,13 @@ class SimplexBridge(BridgeService):
             "sndSent/sndRcvd, and a failed send (e.g. an auth error on a dead "
             "connection) returns ok:false with the reason — never a false "
             "success. 400 on a missing/invalid field or an unknown recipient",
+            "POST /read {\"contact\": \"<id>\", \"item_ids\": [\"<id>\", ...]} -> "
+            "200 {\"ok\": bool, \"contact_id\": \"<id>\", \"item_ids\": [...], "
+            "\"status\": \"read|rejected|error|unavailable\", \"error\": "
+            "\"...\"?} — mark the given received items read on the daemon so they "
+            "leave its persistent unread state; only the listed ids are consumed. "
+            "`ok` is true only when the daemon accepted it — never a fabricated "
+            "success. 400 on a missing contact or empty item_ids",
             "any request -> 401 {\"error\": \"unauthorized\"} when the token is "
             "configured and the auth header is missing or wrong",
         ),
@@ -181,6 +188,8 @@ class SimplexBridge(BridgeService):
         return 404, {"error": "not found"}
 
     def handle_post(self, path: str, payload: dict) -> tuple[int, dict]:
+        if path == "/read":
+            return self._read(payload)
         if path != "/send":
             return 404, {"error": "not found"}
         recipient = payload.get("recipient")
@@ -196,6 +205,63 @@ class SimplexBridge(BridgeService):
         return 200, result
 
     # ---- actions ----
+
+    def _read(self, payload: dict) -> tuple[int, dict]:
+        contact = payload.get("contact")
+        item_ids = payload.get("item_ids")
+        if not isinstance(contact, str) or not contact.strip():
+            return 400, {"error": "contact is required"}
+        if not isinstance(item_ids, list) or not item_ids:
+            return 400, {"error": "item_ids is required"}
+        try:
+            result = self.mark_read(contact, item_ids)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        return 200, result
+
+    def mark_read(self, contact: str, item_ids) -> dict:
+        """Mark the given received items read on the bridge's own daemon.
+
+        Returns `{ok, contact_id, item_ids, status, error?}`. `ok` is True only
+        when the daemon accepted the command; a disconnected or failing daemon
+        reports the reason (never a false success). Reading is precise: only the
+        listed item ids are consumed, so the rest of the chat stays unread.
+        """
+        contact_id = str(contact or "").strip()
+        ids = [str(i).strip() for i in (item_ids or []) if str(i).strip()]
+        if not contact_id:
+            raise ValueError("contact is required")
+        if not ids:
+            raise ValueError("item_ids is required")
+        try:
+            response = self.daemon.request_mark_read(contact_id, ids)
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "contact_id": contact_id,
+                "item_ids": ids,
+                "status": "unavailable",
+                "error": str(exc)[:300],
+            }
+        except Exception as exc:  # TimeoutError, daemon error
+            return {
+                "ok": False,
+                "contact_id": contact_id,
+                "item_ids": ids,
+                "status": "error",
+                "error": str(exc)[:300],
+            }
+        ok = bool(response.get("ok")) if isinstance(response, dict) else False
+        result = {
+            "ok": ok,
+            "contact_id": contact_id,
+            "item_ids": ids,
+            "status": "read" if ok else "rejected",
+        }
+        if not ok:
+            detail = response.get("error") if isinstance(response, dict) else ""
+            result["error"] = detail or "the daemon did not mark the items read"
+        return result
 
     def refresh_contacts(self) -> list[dict]:
         """Best-effort refresh of the daemon's contact list into the inbox.

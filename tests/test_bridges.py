@@ -38,6 +38,8 @@ class FakeDaemon:
         history_error=None,
         send_response=None,
         send_error=None,
+        read_response=None,
+        read_error=None,
     ):
         self.link = link
         self.error = error
@@ -49,9 +51,12 @@ class FakeDaemon:
         self.history_error = history_error
         self.send_response = send_response
         self.send_error = send_error
+        self.read_response = read_response
+        self.read_error = read_error
         self.refresh_count = 0
         self.chat_calls = []
         self.history_calls = []
+        self.read_calls = []
         self.sent = []
         self.closed = False
         self.on_message = None
@@ -105,6 +110,14 @@ class FakeDaemon:
             raise self.history_error
         return list(self.history_list)
 
+    def request_mark_read(self, chat_id, item_ids=None, timeout=20.0):
+        self.read_calls.append((str(chat_id), list(item_ids or [])))
+        if self.read_error is not None:
+            raise self.read_error
+        if self.read_response is not None:
+            return self.read_response
+        return {"ok": True, "type": "itemsReadForChat", "error": ""}
+
     def close(self):
         self.closed = True
 
@@ -116,8 +129,13 @@ def start_bridge(daemon=None, **config):
     return bridge, daemon, f"http://127.0.0.1:{port}"
 
 
-def inbound(text, contact_id="4", display_name="Alice"):
-    return {"text": text, "contact_id": contact_id, "display_name": display_name}
+def inbound(text, contact_id="4", display_name="Alice", item_id=""):
+    return {
+        "text": text,
+        "contact_id": contact_id,
+        "display_name": display_name,
+        "item_id": item_id,
+    }
 
 
 def get(url, token=None):
@@ -722,3 +740,74 @@ def test_describe_bridges_renders_service_auth_and_endpoints():
     assert "/unread" in text
     assert "/history" in text
     assert "never speak" in text
+
+
+def test_read_marks_given_items_only():
+    daemon = FakeDaemon()
+    bridge, _, base = start_bridge(daemon=daemon)
+    try:
+        result = post(f"{base}/read", {"contact": "4", "item_ids": ["8", "9"]})
+        assert result == {
+            "ok": True,
+            "contact_id": "4",
+            "item_ids": ["8", "9"],
+            "status": "read",
+        }
+        assert daemon.read_calls == [("4", ["8", "9"])], "only the listed items"
+    finally:
+        bridge.stop()
+
+
+def test_read_validates_body():
+    bridge, daemon, base = start_bridge()
+    try:
+        payloads = (
+            {"item_ids": ["8"]},
+            {"contact": "4"},
+            {"contact": "4", "item_ids": []},
+            {"contact": " ", "item_ids": ["8"]},
+        )
+        for payload in payloads:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                post(f"{base}/read", payload)
+            assert exc.value.code == 400
+        assert daemon.read_calls == []
+    finally:
+        bridge.stop()
+
+
+def test_read_without_connection_is_unavailable():
+    bridge, _, base = start_bridge(
+        daemon=FakeDaemon(read_error=RuntimeError("not connected"))
+    )
+    try:
+        result = post(f"{base}/read", {"contact": "4", "item_ids": ["8"]})
+        assert result["ok"] is False
+        assert result["status"] == "unavailable"
+        assert "not connected" in result["error"]
+    finally:
+        bridge.stop()
+
+
+def test_read_reports_a_rejected_read():
+    bridge, _, base = start_bridge(
+        daemon=FakeDaemon(read_response={"ok": False, "error": "agent error"})
+    )
+    try:
+        result = post(f"{base}/read", {"contact": "4", "item_ids": ["8"]})
+        assert result["ok"] is False
+        assert result["status"] == "rejected"
+        assert result["error"] == "agent error"
+    finally:
+        bridge.stop()
+
+
+def test_inbox_carries_item_id_for_consumption():
+    bridge, _, base = start_bridge()
+    try:
+        bridge._on_message(inbound("hi", contact_id="4", item_id="33"))
+        popped = get(f"{base}/inbox/next")["message"]
+        assert popped["item_id"] == "33"
+    finally:
+        bridge.stop()
+

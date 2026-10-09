@@ -1316,22 +1316,25 @@ CLI, unit tests (24) + integration tests (2).
   localhost-bound, optional shared-secret `X-Semif-Token` header. `SimplexBridge`
   buffers **every** inbound DM (no allowlist — the user wants to see who reached
   the bot through its invite link) in a bounded `MessagingInbox` that owns the
-  read cursor, and serves `GET /health`, `GET /contacts` (the daemon's contact
-  list, refreshed on (re)connect and on demand — best-effort, falling back to
-  the cached/inbound-learned set when the daemon is unavailable), `GET /inbox`
-  (peek), `GET /inbox/next?contact=<id>` (pop oldest), `GET /unread` (the
-  daemon's persistent unread chats via `/_get chats` + `ChatListQuery` unread
-  filter — `chatStats{unreadCount, minUnreadItemId}` plus each previewed
-  `meta.itemStatus`; read-only), `GET /history?contact=<id>&count=<n>` (recent
-  messages for one chat via `/_get chat @<id>`; read-only), `GET /address`
-  (show/create the forwarding bot's contact link; 503 when the daemon is not
-  connected, 502 when the lookup fails), and `POST /send`
-  `{"recipient","text"}` (resolves a numeric id or a known display name —
-  refreshing the daemon contact list once on a miss — and enqueues on the
-  bridge's own daemon). `/unread` and `/history` read the daemon's own state
-  (surviving bridge restarts), unlike the live `/inbox` buffer; both are
-  read-only because v7 has no mark-read command (acking is a client-side read
-  receipt).
+  read cursor (each buffered entry keeps the daemon `item_id` so a consumer can
+  consume exactly that item), and serves `GET /health`, `GET /contacts` (the
+  daemon's contact list, refreshed on (re)connect and on demand — best-effort,
+  falling back to the cached/inbound-learned set when the daemon is unavailable),
+  `GET /inbox` (peek), `GET /inbox/next?contact=<id>` (pop oldest), `GET /unread`
+  (the daemon's persistent unread chats via `/_get chats` + `ChatListQuery`
+  unread filter — `chatStats{unreadCount, minUnreadItemId}` plus each previewed
+  `meta.itemStatus`), `GET /history?contact=<id>&count=<n>` (recent messages for
+  one chat via `/_get chat @<id>`), `GET /address` (show/create the forwarding
+  bot's contact link; 503 when the daemon is not connected, 502 when the lookup
+  fails), `POST /send` `{"recipient","text"}` (resolves a numeric id or a known
+  display name — refreshing the daemon contact list once on a miss — and
+  enqueues on the bridge's own daemon), and `POST /read` `{"contact","item_ids"}`
+  (marks exactly the listed received items read on the daemon via `/_read chat
+  items @<id> <ids>`, so they leave its persistent unread state; `ok` only when
+  the daemon accepted it). `/unread` and `/history` read the daemon's own state
+  (surviving bridge restarts), unlike the live `/inbox` buffer; `/read` is a real
+  local write on the bridge's own profile (v7 `/_read chat` updates the local
+  `item_status` only; no wire read receipt).
 - **Skill-facing config.** A body calls a bridge at the address derived from that
   bridge's own `bridges.<name>` block (`host`/`port`/`token`) — the
   `simplex_bridge_url` / `llm_bridge_url` / `nextcloud_bridge_url` var (+ `_token`)
@@ -1443,10 +1446,14 @@ covered. Deferred follow-ups:
   count)` / `request_chat_history()` query `/_get chat @<id> count=<n>` and
   parse `apiChat`. `SimplexBridge` exposes `GET /unread` (persistent unread
   chats, summaries + previewed messages) and `GET /history?contact=<id>&count=<n>`
-  (recent messages with per-item status), both read-only and degrading like
-  `/address` (503 not connected / 502 lookup failure; `/history` 400 without a
-  contact). The live `/inbox` buffer is unchanged. Note: v7 has **no mark-read
-  command**, so acking is via read receipts, not an API call.
+  (recent messages with per-item status), degrading like `/address` (503 not
+  connected / 502 lookup failure; `/history` 400 without a contact), plus
+  `POST /read` `{"contact","item_ids"}` which marks exactly the listed items read
+  on the daemon (`/_read chat items @<id> <ids>`), so a reported message is
+  consumed and not re-reported. The live `/inbox` buffer is unchanged. (The
+  pinned v7.0.3 **does** have `/_read chat @<id>`, `/_read chat items @<id>
+  <ids>`, and `/_read user <uid>`; an earlier note claiming v7 had no mark-read
+  command was wrong.)
 - [x] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
   outbound counterpart to `simplex.next_message`: resolves the recipient with a
   SemIf sub-decision over the bridge's `/contacts` (falling back to the
