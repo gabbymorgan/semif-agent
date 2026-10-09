@@ -334,6 +334,43 @@ def _tone_pcm(frequency: float, duration_ms: int, sample_rate: int, volume: floa
     return bytes(frames)
 
 
+def _tone_sequence(notes, sample_rate: int, volume: float, gap_ms: int = 0) -> bytes:
+    """Concatenate `_tone_pcm` notes (each `[frequency_hz, duration_ms]`).
+
+    A short inter-note silence (`gap_ms`) makes a multi-note chime read as
+    distinct notes rather than one warble. Each note already fades in and out,
+    so there is no click at a boundary whether or not a gap is used.
+    """
+    gap = b"\x00\x00" * int(sample_rate * max(0, gap_ms) / 1000)
+    parts: list[bytes] = []
+    for frequency, duration in notes:
+        tone = _tone_pcm(frequency, duration, sample_rate, volume)
+        if not tone:
+            continue
+        if parts and gap:
+            parts.append(gap)
+        parts.append(tone)
+    return b"".join(parts)
+
+
+def _parse_notes(value) -> list[tuple[float, int]]:
+    """Parse a cue note list (`[[frequency_hz, duration_ms], ...]`).
+
+    Bad entries are dropped rather than raising: this is cosmetic audio config,
+    not a contract. An empty/absent list yields `[]` (the single-beep fallback).
+    """
+    notes: list[tuple[float, int]] = []
+    for item in value or []:
+        try:
+            frequency, duration = item
+            frequency, duration = float(frequency), int(duration)
+        except (TypeError, ValueError):
+            continue
+        if frequency > 0 and duration > 0:
+            notes.append((frequency, duration))
+    return notes
+
+
 def _device_arg(value):
     """Coerce a config device value to a PortAudio argument.
 
@@ -644,6 +681,11 @@ class VoiceDaemon:
         self.cue_volume = float(cue.get("volume", 0.25) or 0)
         self.cue_submit_frequency = float(cue.get("submit_frequency", 0) or 0)
         self.cue_submit_duration_ms = int(cue.get("submit_duration_ms", 100) or 0)
+        #: A short multi-note "bling" played once a transcription lands (each
+        #: entry `[frequency_hz, duration_ms]`). When empty, the single
+        #: `submit_frequency` beep is used instead (silent when that is 0).
+        self.cue_submit_notes = _parse_notes(cue.get("submit_notes"))
+        self.cue_note_gap_ms = int(cue.get("note_gap_ms", 20) or 0)
 
         self._engines = engines
         self._engines_lock = threading.Lock()
@@ -756,7 +798,7 @@ class VoiceDaemon:
                 self._event("voice_stt_empty", samples=len(utterance) // BYTES_PER_SAMPLE)
                 continue
             self._event("voice_transcribed", chars=len(text))
-            self._cue(self.cue_submit_frequency, self.cue_submit_duration_ms)
+            self._bling()
             if self._on_utterance is not None:
                 self._on_utterance(text)
 
@@ -904,6 +946,36 @@ class VoiceDaemon:
                 engines.audio.open_output(self.sample_rate)
                 engines.audio.write(pcm, self.sample_rate)
                 self._event("voice_cue", frequency=frequency, duration_ms=duration_ms)
+            except Exception as exc:
+                self._event("voice_cue_failed", message=str(exc)[:200])
+
+    def _bling(self) -> None:
+        """Play the post-transcription chime.
+
+        A configured `submit_notes` sequence (a short multi-note "bling") wins;
+        otherwise it falls back to the single `submit_frequency` beep (silent at
+        the shipped default of 0).
+        """
+        if self.cue_submit_notes:
+            self._play_tones(self.cue_submit_notes)
+        else:
+            self._cue(self.cue_submit_frequency, self.cue_submit_duration_ms)
+
+    def _play_tones(self, notes) -> None:
+        """Play a note sequence (the multi-note submit cue); silent on failure."""
+        if not self.cue_enabled:
+            return
+        engines = self._engines
+        if engines is None:
+            return
+        pcm = _tone_sequence(notes, self.sample_rate, self.cue_volume, self.cue_note_gap_ms)
+        if not pcm:
+            return
+        with self._audio_lock:
+            try:
+                engines.audio.open_output(self.sample_rate)
+                engines.audio.write(pcm, self.sample_rate)
+                self._event("voice_cue", notes=[[float(f), int(d)] for f, d in notes])
             except Exception as exc:
                 self._event("voice_cue_failed", message=str(exc)[:200])
 

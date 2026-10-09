@@ -454,6 +454,52 @@ def test_cue_disabled_suppresses_beep():
     assert engines.audio.writes == []
 
 
+def test_submit_plays_bling_after_transcription():
+    # A configured `submit_notes` chime plays once the utterance is transcribed,
+    # as a single write (the notes are concatenated) at the processing rate.
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"],
+        config={"cue": {"submit_notes": [[1046.5, 70], [1568.0, 90]], "note_gap_ms": 20}},
+    )
+    daemon.run(lambda text: None)
+    # The wake beep, then the bling.
+    assert len(engines.audio.writes) == 2
+    pcm, rate = engines.audio.writes[1]
+    assert rate == 16000
+    expected = int(16000 * (70 + 90) / 1000) * 2 + int(16000 * 20 / 1000) * 2
+    assert len(pcm) == expected
+
+
+def test_submit_bling_falls_back_to_single_beep():
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"],
+        config={"cue": {"submit_frequency": 1320, "submit_duration_ms": 80}},
+    )
+    daemon.run(lambda text: None)
+    assert len(engines.audio.writes) == 2
+    pcm, rate = engines.audio.writes[1]
+    assert len(pcm) == int(16000 * 80 / 1000) * 2
+
+
+def test_submit_bling_disabled_suppresses():
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"],
+        config={"cue": {"enabled": False, "submit_notes": [[1046.5, 70]]}},
+    )
+    daemon.run(lambda text: None)
+    assert engines.audio.writes == []
+
+
+def test_parse_notes_drops_bad_entries():
+    from semif_agent.voice_transport import _parse_notes
+
+    assert _parse_notes([[880, 100], "nope", [0, 50], [440, 0], [660.0, 30.9]]) == [
+        (880.0, 100),
+        (660.0, 30),
+    ]
+    assert _parse_notes(None) == []
+
+
 # ---- resampling (numpy is a voice-stack dep; skip without it) --------------
 
 

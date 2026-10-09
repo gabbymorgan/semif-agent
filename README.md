@@ -683,9 +683,11 @@ python -m semif_agent.cli gateway --platform voice
   official models score ~0.99 and use `0.5`).
 - **Behavior.** Half-duplex — capture is discarded while a reply is speaking, so
   the agent never transcribes itself (no barge-in yet). A short beep plays when
-  the wake word fires (`gateway.voice.cue`), so you know you're being heard; set
-  `cue.submit_frequency > 0` for a second beep once the utterance is
-  transcribed. After a reply, the next
+  the wake word fires (`gateway.voice.cue`), so you know you're being heard; a
+  short multi-note "bling" (`cue.submit_notes`, each entry
+  `[frequency_hz, duration_ms]`, spaced by `cue.note_gap_ms`) plays once the
+  utterance is transcribed. (Set `cue.submit_notes` to `[]` and
+  `cue.submit_frequency > 0` for the older single submit beep.) After a reply, the next
   utterance is accepted **without** the wake word for `follow_up_window_s`, so
   answering a question is conversational. After the wake word, capture waits
   `listen_timeout_s` for the command to begin, so a pause before speaking
