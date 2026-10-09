@@ -1,0 +1,7 @@
+{
+  "simplex_bridge_url": "Base URL of the local SimpleX forwarding bridge that fronts the user's simplex daemon, e.g. http://127.0.0.1:5227 (no trailing slash needed).",
+  "simplex_bridge_token": "Shared secret for the SimpleX bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth.",
+  "simplex_default_contact": "Default SimpleX contact (contact id or display name) used when the request does not clearly name a recipient; leave blank to always use the strongest candidate.",
+  "llm_bridge_url": "Base URL of the local LLM bridge, e.g. http://127.0.0.1:5229 (no trailing slash needed); used to write the message text when the request does not state it.",
+  "llm_bridge_token": "Shared secret for the LLM bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth."
+}

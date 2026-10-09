@@ -539,6 +539,7 @@ def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
     assert [s.name for s in scheduler.tree["simplex"]] == [
         "connect_link",
         "next_message",
+        "send_message",
     ]
     assert [s.name for s in scheduler.tree["nextcloud"]] == [
         "create_event",

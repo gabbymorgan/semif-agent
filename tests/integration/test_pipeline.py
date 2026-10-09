@@ -583,7 +583,7 @@ def test_create_simplex_send_skill(tmp_path):
     scheduler, config = build_scheduler(config)
 
     seeded = {s.name for s in scheduler.tree.get("simplex", [])}
-    assert {"next_message", "connect_link"} <= seeded, (
+    assert {"next_message", "send_message", "connect_link"} <= seeded, (
         f"the simplex seeds must be loaded, got {seeded}"
     )
 

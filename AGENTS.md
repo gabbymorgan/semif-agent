@@ -869,8 +869,9 @@ CLI, unit tests (24) + integration tests (2).
   adds a task to a Nextcloud task list through the Nextcloud bridge (`GET
   /tasklists` for a VTODO-capable target, `POST /tasks` to create it, the LLM
   bridge to phrase the summary/description); `simplex.next_message` (read via the
-  forwarding bridge) and `simplex.connect_link` (show/create the forwarding bot's
-  contact link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
+  forwarding bridge), `simplex.send_message` (send to a contact resolved over the
+  bridge's contact list), and `simplex.connect_link` (show/create the forwarding
+  bot's contact link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
   `time.set_alarm` are the local time utilities (`compute` transport, empty
   contract) — they read the host clock and schedule on `ctx.timers`. Local time
   is the top-level `timezone` config value (an IANA name such as
@@ -1248,7 +1249,8 @@ CLI, unit tests (24) + integration tests (2).
   resolution, outbound routing, token/body validation, `/address` success/503/502,
   daemon close on stop, catalog/`describe_bridges()`).
   `tests/test_seed_skills.py` hermetically tests every
-  `seeds/<category>/<name>/` package, including `simplex.next_message` and
+  `seeds/<category>/<name>/` package, including `simplex.next_message`,
+  `simplex.send_message`, and
   `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
   follow-up window, `speak` truncation/failure, adapter + CLI wiring) — no
@@ -1319,7 +1321,8 @@ CLI, unit tests (24) + integration tests (2).
   keep in sync and the data-contract config search finds it and auto-populates the
   skill config. Skills reach a bridge with the ordinary `http`
   transport, so their hermetic tests are loopback HTTP like any other HTTP body.
-  `simplex.next_message` and `simplex.connect_link` are the seeds.
+  `simplex.next_message`, `simplex.send_message`, and `simplex.connect_link` are
+  the seeds.
 - **LLM bridge** (`bridges/llm.py`). A generic `POST /chat`
   `{"messages": [{"role","content"}, ...], "max_tokens"?: int}` ->
   `{"text": "<model reply>"}` (plus `GET /health`, `400` bad body, `502` model
@@ -1399,8 +1402,9 @@ CLI, unit tests (24) + integration tests (2).
 
 ## Bridge backlog (one session per item)
 
-The bridge read path (`simplex.next_message`) and contact-link lookup
-(`simplex.connect_link`) are covered. Deferred follow-ups:
+The bridge read path (`simplex.next_message`), outbound send
+(`simplex.send_message`), and contact-link lookup (`simplex.connect_link`) are
+covered. Deferred follow-ups:
 
 - [x] **1. Contact-list refresh from the daemon** (`bridges/simplex.py`,
   `simplex_ws.py`). Shipped: `SimplexDaemon.contacts()` /
@@ -1424,10 +1428,12 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   `/address` (503 not connected / 502 lookup failure; `/history` 400 without a
   contact). The live `/inbox` buffer is unchanged. Note: v7 has **no mark-read
   command**, so acking is via read receipts, not an API call.
-- [ ] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
-  outbound counterpart to `simplex.next_message`: resolve the recipient with a
-  SemIf sub-decision over `/contacts`, send only on explicit user intent, and
-  report the bridge's `contact_id` / errors honestly.
+- [x] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
+  outbound counterpart to `simplex.next_message`: resolves the recipient with a
+  SemIf sub-decision over the bridge's `/contacts` (falling back to the
+  configured default contact), writes the message from the request or the LLM
+  bridge when no literal text is given, sends via `POST /send`, and reports the
+  bridge's `contact_id` / errors honestly.
 - [x] **4. LLM bridge** (`bridges/llm.py`). Shipped: `LLMBridge` exposes a
   generic `POST /chat` in front of the scheduler's configured `llm` client
   (threaded through `run_bridges`/`build_bridge`, never re-configured), registered

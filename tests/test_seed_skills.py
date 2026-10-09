@@ -33,6 +33,7 @@ def test_expected_seeds_exist():
     assert "nextcloud.next_event" in ids
     assert "nextcloud.create_event" in ids
     assert "simplex.next_message" in ids
+    assert "simplex.send_message" in ids
     assert "simplex.connect_link" in ids
     assert "time.now" in ids
     assert "time.date" in ids
