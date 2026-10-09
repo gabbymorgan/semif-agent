@@ -128,7 +128,7 @@ def _default_sender(ctx, senders):
 
 
 def _resolve_contact(ctx, request, senders, decisions):
-    """Resolve which conversation to read, mirroring calendar.create_event.
+    """Resolve which conversation to read, mirroring nextcloud.create_event.
 
     A strong SemIf winner is used; a weak winner falls back to the configured
     default contact, and with no configured default the weak winner stands.

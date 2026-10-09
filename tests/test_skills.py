@@ -168,7 +168,7 @@ def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
 
     skill = Skill(
         name="next_event",
-        category="calendar",
+        category="nextcloud",
         description="Report the next event.",
                 act=act,
     )
@@ -177,7 +177,7 @@ def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
     assert result.kind == "ran"
 
     expected = (
-        "calendar.next_event: ok — Next event on 'personal': Team sync — 2026-09-27 10:00 CEST"
+        "nextcloud.next_event: ok — Next event on 'personal': Team sync — 2026-09-27 10:00 CEST"
     )
     assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
     assert assessed, "the run must be traced"
@@ -433,13 +433,13 @@ def test_merge_seed_store_loads_skill_with_runtime_config(tmp_path):
     the runtime store, never in the seed folder."""
     seed_store = SkillStore(str(tmp_path / "seeds"))
     config_store = SkillStore(str(tmp_path / "skills"))
-    _write_seed(seed_store, "calendar", "probe", description="Probe a service.")
-    config_store.write_config("calendar", "probe", {"probe_url": "https://example.test"})
+    _write_seed(seed_store, "nextcloud", "probe", description="Probe a service.")
+    config_store.write_config("nextcloud", "probe", {"probe_url": "https://example.test"})
 
     tree = build_tree(build_skills({"skills": {}}))
     loaded = merge_seed_store(tree, seed_store, config_store)
     assert loaded == 1
-    skill = tree["calendar"][0]
+    skill = tree["nextcloud"][0]
     assert skill.status == "ready"
     assert skill.description == "Probe a service."
     assert skill.contract == {"probe_url": "Where to probe."}
@@ -450,16 +450,16 @@ def test_merge_seed_store_loads_skill_with_runtime_config(tmp_path):
 def test_merge_seed_store_falls_back_to_name_and_body_store_wins(tmp_path):
     seed_store = SkillStore(str(tmp_path / "seeds"))
     body_store = SkillStore(str(tmp_path / "skills"))
-    _write_seed(seed_store, "calendar", "probe")
+    _write_seed(seed_store, "nextcloud", "probe")
 
     tree = build_tree(build_skills({"skills": {}}))
     merge_seed_store(tree, seed_store, body_store)
-    assert tree["calendar"][0].description == "probe"
+    assert tree["nextcloud"][0].description == "probe"
 
-    body_store.write_body("calendar", "probe", GOOD_BODY)
+    body_store.write_body("nextcloud", "probe", GOOD_BODY)
     merge_skill_store(tree, body_store, {})
-    assert tree["calendar"][0].description == "probe", "the generated body replaces the seed"
-    assert len(tree["calendar"]) == 1
+    assert tree["nextcloud"][0].description == "probe", "the generated body replaces the seed"
+    assert len(tree["nextcloud"]) == 1
 
 
 def test_scheduler_loads_committed_seed_skills(tmp_path):
@@ -477,13 +477,13 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )
-    calendar = scheduler.tree["calendar"]
-    assert [s.name for s in calendar] == ["create_event", "next_event"]
-    next_event = next(s for s in calendar if s.name == "next_event")
+    nextcloud = scheduler.tree["nextcloud"]
+    assert [s.name for s in nextcloud] == ["create_event", "create_task", "next_event"]
+    next_event = next(s for s in nextcloud if s.name == "next_event")
     assert next_event.description.startswith("Report the next")
     assert next_event.status == "ready"
     assert next_event.integration["transport"] == "caldav"
-    create_event = next(s for s in calendar if s.name == "create_event")
+    create_event = next(s for s in nextcloud if s.name == "create_event")
     assert create_event.description.startswith("Create a calendar event")
     assert create_event.integration["transport"] == "caldav"
 
@@ -540,8 +540,9 @@ def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
         "connect_link",
         "next_message",
     ]
-    assert [s.name for s in scheduler.tree["calendar"]] == [
+    assert [s.name for s in scheduler.tree["nextcloud"]] == [
         "create_event",
+        "create_task",
         "next_event",
     ]
 
@@ -828,7 +829,7 @@ def test_confirm_category_fit_threshold(tmp_path):
     engine = ScriptedEngine(choices={"Does the scope": "covers"})
     assert (
         confirm_category_fit(
-            engine, log, trace, Request("check my calendar"), "calendar", "Calendars.", tau=0.5
+            engine, log, trace, Request("check my calendar"), "nextcloud", "Nextcloud.", tau=0.5
         )
         is True
     )
@@ -837,7 +838,7 @@ def test_confirm_category_fit_threshold(tmp_path):
     engine = ScriptedEngine(choices={"Does the scope": "none"})
     assert (
         confirm_category_fit(
-            engine, log, trace, Request("order pizza"), "calendar", "Calendars.", tau=0.5
+            engine, log, trace, Request("order pizza"), "nextcloud", "Nextcloud.", tau=0.5
         )
         is False
     )

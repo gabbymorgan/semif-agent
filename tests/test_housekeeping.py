@@ -110,15 +110,15 @@ def test_build_housekeeping_skills():
 
 def test_parse_meta_command_forms():
     assert parse_meta_command("delete skill") == "delete_skill"
-    assert parse_meta_command("delete skill calendar.foo") == "delete_skill"
+    assert parse_meta_command("delete skill nextcloud.foo") == "delete_skill"
     assert parse_meta_command("remove skill simplex.next_message") == "delete_skill"
     assert parse_meta_command("clear config variables") == "clear_config"
-    assert parse_meta_command("clear the config variables for calendar.foo") == "clear_config"
+    assert parse_meta_command("clear the config variables for nextcloud.foo") == "clear_config"
     assert parse_meta_command("clear the settings for simplex.next_message") == "clear_config"
     assert parse_meta_command("reset a skill's settings") == "clear_config"
     assert parse_meta_command("regen skill") == "regen_skill"
     assert parse_meta_command("regenerate the simplex skill") == "regen_skill"
-    assert parse_meta_command("rewrite the code for calendar.foo") == "regen_skill"
+    assert parse_meta_command("rewrite the code for nextcloud.foo") == "regen_skill"
     assert parse_meta_command("cancel skill build") == "cancel_build"
     assert parse_meta_command("cancel the skill build") == "cancel_build"
     assert parse_meta_command("abort the build") == "cancel_build"
@@ -141,19 +141,19 @@ def test_parse_meta_command_leaves_normal_requests_alone():
 
 def test_dispatch_routes_meta_command_deterministically(tmp_path):
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
 
     # clear config runs immediately (no confirmation).
-    result = scheduler._dispatch(Request("clear config variables for calendar.foo"))
+    result = scheduler._dispatch(Request("clear config variables for nextcloud.foo"))
     assert result.kind == "ran"
     assert result.skill == "clear_config"
 
     # delete routes to the meta skill and pauses for confirmation.
-    delete = scheduler._dispatch(Request("delete skill calendar.foo"))
+    delete = scheduler._dispatch(Request("delete skill nextcloud.foo"))
     assert delete.kind == "needs_input"
     assert delete.skill == "delete_skill"
     assert any(e["kind"] == "meta_command" for e in scheduler.trace.read())
-    assert any(s.name == "foo" for s in scheduler.tree["calendar"])
+    assert any(s.name == "foo" for s in scheduler.tree["nextcloud"])
 
 
 # ---- name resolution ----
@@ -161,8 +161,8 @@ def test_dispatch_routes_meta_command_deterministically(tmp_path):
 
 def _tree():
     return {
-        "calendar": [
-            Skill(name="next_event", category="calendar", description="d"),
+        "nextcloud": [
+            Skill(name="next_event", category="nextcloud", description="d"),
         ],
         "simplex": [
             Skill(name="next_message", category="simplex", description="d"),
@@ -172,8 +172,8 @@ def _tree():
 
 def test_resolve_skill_ref_dotted_and_bare():
     tree = _tree()
-    assert resolve_skill_ref(tree, "delete skill calendar.next_event") == (
-        "calendar",
+    assert resolve_skill_ref(tree, "delete skill nextcloud.next_event") == (
+        "nextcloud",
         "next_event",
     )
     assert resolve_skill_ref(tree, "delete skill next_message") == (
@@ -208,9 +208,9 @@ def test_registry_unregister_skill(tmp_path):
 
 def test_skill_store_delete_and_path_guard(tmp_path):
     store = SkillStore(str(tmp_path / "skills"))
-    store.write_body("calendar", "foo", "x = 1\n")
-    assert store.delete("calendar", "foo") is True
-    assert not store.dir("calendar", "foo").exists()
+    store.write_body("nextcloud", "foo", "x = 1\n")
+    assert store.delete("nextcloud", "foo") is True
+    assert not store.dir("nextcloud", "foo").exists()
     with pytest.raises(ValueError):
         store.delete("..", "escape")
 
@@ -218,36 +218,36 @@ def test_skill_store_delete_and_path_guard(tmp_path):
 def test_deleted_skills_roundtrip(tmp_path):
     deleted = DeletedSkills(str(tmp_path / "deleted.json"))
     assert deleted.read() == set()
-    deleted.add("calendar", "foo")
-    assert deleted.contains("calendar", "foo")
-    deleted.remove("calendar", "foo")
+    deleted.add("nextcloud", "foo")
+    assert deleted.contains("nextcloud", "foo")
+    deleted.remove("nextcloud", "foo")
     assert deleted.read() == set()
 
 
 def test_apply_tombstones():
     tree = {
-        "calendar": [Skill(name="foo", category="calendar", description="d")],
+        "nextcloud": [Skill(name="foo", category="nextcloud", description="d")],
         "simplex": [Skill(name="bar", category="simplex", description="d")],
     }
     deleted = DeletedSkills("/nonexistent/deleted.json")
-    deleted.read = lambda: {"calendar.foo"}  # type: ignore[assignment]
+    deleted.read = lambda: {"nextcloud.foo"}  # type: ignore[assignment]
     removed = apply_tombstones(tree, deleted)
     assert removed == 1
-    assert tree["calendar"] == []
+    assert tree["nextcloud"] == []
     assert [s.name for s in tree["simplex"]] == ["bar"]
 
 
 def test_delete_seed_is_durable(tmp_path):
-    _write_seed(tmp_path / "seeds", "calendar", "probe")
+    _write_seed(tmp_path / "seeds", "nextcloud", "probe")
     scheduler = _scheduler(tmp_path)
-    assert any(s.name == "probe" for s in scheduler.tree["calendar"])
-    assert scheduler.tree["calendar"][0].origin == "seed"
+    assert any(s.name == "probe" for s in scheduler.tree["nextcloud"])
+    assert scheduler.tree["nextcloud"][0].origin == "seed"
 
-    status, _ = scheduler.delete_skill("calendar", "probe")
+    status, _ = scheduler.delete_skill("nextcloud", "probe")
     assert status == "ok"
 
     reloaded = _scheduler(tmp_path)
-    assert all(s.name != "probe" for s in reloaded.tree.get("calendar", []))
+    assert all(s.name != "probe" for s in reloaded.tree.get("nextcloud", []))
 
 
 # ---- locks ----
@@ -304,17 +304,17 @@ def test_restart_skill_blocked_when_locked(tmp_path):
 
 def test_delete_skill_removes_tree_registry_and_folder(tmp_path):
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
-    status, detail = scheduler.delete_skill("calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
+    status, detail = scheduler.delete_skill("nextcloud", "foo")
     assert status == "ok"
-    assert all(s.name != "foo" for s in scheduler.tree["calendar"])
-    assert scheduler.body_store.read_contract("calendar", "foo") == {}
-    assert not scheduler.body_store.dir("calendar", "foo").exists()
+    assert all(s.name != "foo" for s in scheduler.tree["nextcloud"])
+    assert scheduler.body_store.read_contract("nextcloud", "foo") == {}
+    assert not scheduler.body_store.dir("nextcloud", "foo").exists()
     assert all(
         s.get("name") != "foo"
-        for s in scheduler.registry.read()["calendar"]["skills"]
+        for s in scheduler.registry.read()["nextcloud"]["skills"]
     )
-    assert scheduler.deleted.contains("calendar", "foo")
+    assert scheduler.deleted.contains("nextcloud", "foo")
     assert any(e["kind"] == "skill_deleted" for e in scheduler.trace.read())
 
 
@@ -328,14 +328,14 @@ def test_delete_refuses_builtin(tmp_path):
 
 def test_clear_skill_config(tmp_path):
     scheduler = _scheduler(tmp_path)
-    skill = _add_skill(scheduler, "calendar", "foo")
+    skill = _add_skill(scheduler, "nextcloud", "foo")
     skill.config = {"api_key": "x"}
-    scheduler.body_store.write_config("calendar", "foo", {"api_key": "x"})
+    scheduler.body_store.write_config("nextcloud", "foo", {"api_key": "x"})
 
-    status, detail = scheduler.clear_skill_config("calendar", "foo")
+    status, detail = scheduler.clear_skill_config("nextcloud", "foo")
     assert status == "ok"
     assert "api_key" in detail
-    assert scheduler.body_store.read_config("calendar", "foo") == {}
+    assert scheduler.body_store.read_config("nextcloud", "foo") == {}
     assert skill.config == {}
     assert any(e["kind"] == "config_cleared" for e in scheduler.trace.read())
 
@@ -343,7 +343,7 @@ def test_clear_skill_config(tmp_path):
 def test_regen_skill_rewrites_existing_body(tmp_path, monkeypatch):
     scheduler = _scheduler(tmp_path)
     scheduler.codegen = object()
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
     captured = {}
 
     def fake_start(request, category, draft, repair_evidence=None, reason_kind="run_failure"):
@@ -354,7 +354,7 @@ def test_regen_skill_rewrites_existing_body(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(scheduler, "_start_skill_write", fake_start)
-    status, _ = scheduler.regen_skill("calendar", "foo", "it crashes")
+    status, _ = scheduler.regen_skill("nextcloud", "foo", "it crashes")
     assert status == "running"
     assert captured["reason_kind"] == "manual"
     assert captured["repair_evidence"]["guidance"] == "it crashes"
@@ -366,8 +366,8 @@ def test_regen_skill_rewrites_existing_body(tmp_path, monkeypatch):
 def test_regen_skill_stub_has_no_evidence(tmp_path, monkeypatch):
     scheduler = _scheduler(tmp_path)
     scheduler.codegen = object()
-    scheduler.tree["calendar"] = [
-        Skill(name="stub", category="calendar", description="d")
+    scheduler.tree["nextcloud"] = [
+        Skill(name="stub", category="nextcloud", description="d")
     ]
     captured = {}
 
@@ -375,30 +375,30 @@ def test_regen_skill_stub_has_no_evidence(tmp_path, monkeypatch):
         captured.update(repair_evidence=repair_evidence, reason_kind=reason_kind)
 
     monkeypatch.setattr(scheduler, "_start_skill_write", fake_start)
-    status, _ = scheduler.regen_skill("calendar", "stub", "make it work")
+    status, _ = scheduler.regen_skill("nextcloud", "stub", "make it work")
     assert status == "running"
     assert captured["repair_evidence"] is None
 
 
 def test_cancel_skill_build_discards_and_deletes(tmp_path):
     scheduler = _scheduler(tmp_path)
-    skill = _add_skill(scheduler, "calendar", "foo")
+    skill = _add_skill(scheduler, "nextcloud", "foo")
     skill.writing = True
     scheduler._writes.append(
         SkillWrite(
             request=Request("build foo"),
-            category="calendar",
+            category="nextcloud",
             draft=SkillDraft(name="foo", description="d"),
         )
     )
 
-    status, detail = scheduler.cancel_skill_build("calendar", "foo")
+    status, detail = scheduler.cancel_skill_build("nextcloud", "foo")
     assert status == "ok"
     assert "cancelled" in detail
-    assert ("calendar", "foo") in scheduler._cancelled
+    assert ("nextcloud", "foo") in scheduler._cancelled
     assert not any(w.draft.name == "foo" for w in scheduler._writes)
-    assert all(s.name != "foo" for s in scheduler.tree["calendar"])
-    assert not scheduler.body_store.dir("calendar", "foo").exists()
+    assert all(s.name != "foo" for s in scheduler.tree["nextcloud"])
+    assert not scheduler.body_store.dir("nextcloud", "foo").exists()
     assert any(
         e["kind"] == "skill_build_cancelled" for e in scheduler.trace.read()
     )
@@ -408,12 +408,12 @@ def test_consume_cancelled_discards_queued_write(tmp_path):
     scheduler = _scheduler(tmp_path)
     job = SkillWrite(
         request=Request("build foo"),
-        category="calendar",
+        category="nextcloud",
         draft=SkillDraft(name="foo", description="d"),
     )
-    scheduler._cancelled.add(("calendar", "foo"))
+    scheduler._cancelled.add(("nextcloud", "foo"))
     assert scheduler._consume_cancelled(job) is True
-    assert ("calendar", "foo") not in scheduler._cancelled
+    assert ("nextcloud", "foo") not in scheduler._cancelled
     assert any(
         e["kind"] == "skill_write_cancelled" for e in scheduler.trace.read()
     )
@@ -424,57 +424,57 @@ def test_consume_cancelled_discards_queued_write(tmp_path):
 
 def test_delete_skill_act_confirms_then_deletes(tmp_path):
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
     ctx = ActionContext(engine=None, config={}, admin=scheduler)
-    request = Request("delete skill calendar.foo")
+    request = Request("delete skill nextcloud.foo")
 
     first = _delete_skill_act(ctx, request)
     assert first.needs_input and "confirm" in first.needs_input.lower()
-    assert any(s.name == "foo" for s in scheduler.tree["calendar"])
+    assert any(s.name == "foo" for s in scheduler.tree["nextcloud"])
 
     request.user_input = "yes"
     second = _delete_skill_act(ctx, request)
     assert second.needs_input is None
-    assert all(s.name != "foo" for s in scheduler.tree["calendar"])
+    assert all(s.name != "foo" for s in scheduler.tree["nextcloud"])
 
 
 def test_delete_skill_act_asks_for_target_when_absent(tmp_path):
     """A name-free request ("delete skill") asks for the target as an input
     variable, then confirms, then deletes."""
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
     ctx = ActionContext(engine=None, config={}, admin=scheduler)
     request = Request("delete skill")
 
     first = _delete_skill_act(ctx, request)
     assert first.needs_input and "which skill" in first.needs_input.lower()
 
-    request.user_input = "calendar.foo"
+    request.user_input = "nextcloud.foo"
     second = _delete_skill_act(ctx, request)
     assert second.needs_input and "confirm" in second.needs_input.lower()
 
     request.user_input = "yes"
     third = _delete_skill_act(ctx, request)
     assert third.needs_input is None
-    assert all(s.name != "foo" for s in scheduler.tree["calendar"])
+    assert all(s.name != "foo" for s in scheduler.tree["nextcloud"])
 
 
 def test_delete_skill_act_declined_keeps_skill(tmp_path):
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
     ctx = ActionContext(engine=None, config={}, admin=scheduler)
-    request = Request("delete skill calendar.foo")
+    request = Request("delete skill nextcloud.foo")
     _delete_skill_act(ctx, request)
     request.user_input = "no"
     result = _delete_skill_act(ctx, request)
     assert result.needs_input is None
     assert "cancelled" in result.action_log
-    assert any(s.name == "foo" for s in scheduler.tree["calendar"])
+    assert any(s.name == "foo" for s in scheduler.tree["nextcloud"])
 
 
 def test_cancel_build_act_targets_writing_skill(tmp_path):
     scheduler = _scheduler(tmp_path)
-    skill = _add_skill(scheduler, "calendar", "foo")
+    skill = _add_skill(scheduler, "nextcloud", "foo")
     skill.writing = True
     ctx = ActionContext(engine=None, config={}, admin=scheduler)
 
@@ -484,12 +484,12 @@ def test_cancel_build_act_targets_writing_skill(tmp_path):
     request.user_input = "yes"
     second = _cancel_build_act(ctx, request)
     assert second.needs_input is None
-    assert all(s.name != "foo" for s in scheduler.tree["calendar"])
+    assert all(s.name != "foo" for s in scheduler.tree["nextcloud"])
 
 
 def test_cancel_build_act_reports_when_nothing_writing(tmp_path):
     scheduler = _scheduler(tmp_path)
-    _add_skill(scheduler, "calendar", "foo")
+    _add_skill(scheduler, "nextcloud", "foo")
     ctx = ActionContext(engine=None, config={}, admin=scheduler)
     result = _cancel_build_act(ctx, Request("cancel the skill build"))
     assert result.needs_input is None

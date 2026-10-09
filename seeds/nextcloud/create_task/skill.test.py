@@ -1,4 +1,4 @@
-"""Hermetic mechanics test for productivity_management.create_nextcloud_task.
+"""Hermetic mechanics test for nextcloud.create_task.
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
 http.server plays the Nextcloud bridge (`GET /tasklists`, `POST /tasks`) and the

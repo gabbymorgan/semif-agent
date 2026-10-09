@@ -212,7 +212,7 @@ def _default_calendar(ctx, calendars):
 
 
 def _resolve_calendar(ctx, request, calendars, decisions):
-    """Resolve which calendar the request means, mirroring calendar.create_event.
+    """Resolve which calendar the request means, mirroring nextcloud.create_event.
 
     A strong SemIf winner is used; a weak winner falls back to the configured
     default calendar, and with no configured default the weak winner stands.

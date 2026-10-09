@@ -21,7 +21,7 @@ A skill is three things:
    talks to and how) and the `CONTRACT` constant (the values the runner must
    provide).
 
-The committed seed `seeds/calendar/create_event/` is the **authoritative worked
+The committed seed `seeds/nextcloud/create_event/` is the **authoritative worked
 example** of all three. Read its `manifest.json`, its `skill.py` (which declares
 `INTEGRATION` and `CONTRACT`), and its `skill.test.py` alongside this file; a new
 body should look and behave like it.
@@ -162,12 +162,12 @@ Rules:
   real candidate set (fetched from the service), include any configured default as
   one of the options, and threshold the winner: use it when its probability clears
   the skill's confidence threshold, otherwise fall back to the configured default
-  (see `calendar.create_event` and `simplex.next_message`).
+  (see `nextcloud.create_event` and `simplex.next_message`).
 - **Use the LLM bridge for text, not for routing or assessment.** Generated text
   goes through the LLM bridge — a generic `POST /chat` whose base URL, token,
   and endpoint shapes are in the bridge catalog injected below — never by
   speaking a model's protocol directly. Keep the model extractive and bounded
-  (see how `calendar.create_event` asks only for a title and description), and
+  (see how `nextcloud.create_event` asks only for a title and description), and
   report a real failure when the bridge is down rather than guessing the text.
 - **Never blur the boundaries.** SemIf never generates; an LLM never routes,
   selects, or assesses; deterministic code never invents a value it cannot
@@ -422,7 +422,7 @@ return ActionResult(..., decisions=[(decision, result)])
   options, so the request can override the stored default.
 - When the winner is weak (its probability is below the skill's confidence
   threshold), fall back to the configured default; with no configured default,
-  keep the weak winner. See how `calendar.create_event` resolves its calendar.
+  keep the weak winner. See how `nextcloud.create_event` resolves its calendar.
 
 ### Producing the result (output)
 
@@ -515,7 +515,7 @@ Rules:
   for. `request.meta` is a scratch dict carried on the same request across the
   pause, so a body can cache a computed value or an already-collected answer
   there and reuse it on the resume pass instead of recomputing or re-asking —
-  see how `calendar.create_event` caches the extracted title/description and the
+  see how `nextcloud.create_event` caches the extracted title/description and the
   answers it collected.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.
 - **The function is `act` exactly.** The module is imported under its registered
@@ -557,7 +557,7 @@ Rules:
 - **Resolve the recipient/target with a SemIf sub-decision.** When more than one
   conversation or target is relevant, resolve which one with a
   `ctx.engine.call(...)` sub-decision over the catalog's list endpoint (e.g.
-  contacts or buffered senders), mirroring how `calendar.create_event` picks a
+  contacts or buffered senders), mirroring how `nextcloud.create_event` picks a
   calendar. Use the catalog's default config var as the configured option when
   the request does not already make it clear.
 - **Sending requires user intent.** Send only because the request (or the
@@ -576,7 +576,7 @@ Rules:
 - Single purpose, single file, single module.
 - Avoid duplicating an existing skill in the same category.
 - `act` resolves ambiguity (arguments, recipients, targets) with SemIf
-  sub-decisions, mirroring how `calendar.create_event` resolves which calendar
+  sub-decisions, mirroring how `nextcloud.create_event` resolves which calendar
   to write to.
 - `act` performs the concrete real action and writes a human-readable
   `action_log` that the SemIf assessment step can judge. Include what the

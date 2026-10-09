@@ -1,4 +1,4 @@
-"""Hermetic mechanics test for calendar.next_event.
+"""Hermetic mechanics test for nextcloud.next_event.
 
 Run from this folder: `python skill.test.py`. No external network: a loopback
 http.server plays the Nextcloud CalDAV endpoint. This proves the body builds

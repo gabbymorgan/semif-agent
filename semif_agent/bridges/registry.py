@@ -112,7 +112,7 @@ def build_bridge(
     `llm` is the scheduler's configured language-model client, handed to the LLM
     bridge so it reuses the top-level `llm` endpoint/model instead of duplicating
     that config. The Nextcloud bridge gets the top-level `nextcloud_*` values as a
-    fallback, so the same account the calendar seeds use is configured once. Other
+    fallback, so the same account the nextcloud seeds use is configured once. Other
     bridges ignore both.
     """
     bridge_class = _class_for(name)

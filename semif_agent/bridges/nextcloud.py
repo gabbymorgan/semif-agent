@@ -11,7 +11,7 @@ There is no service daemon: Nextcloud is plain HTTPS, so the bridge is stdlib-on
 (`urllib` + `xml.etree`) and starts instantly. The connection comes from
 `bridges.nextcloud` (url/username/app_password/default_calendar/default_addressbook),
 falling back to the top-level `nextcloud_url`/`nextcloud_username`/
-`nextcloud_app_password`/`nextcloud_default_calendar` values the calendar seeds
+`nextcloud_app_password`/`nextcloud_default_calendar` values the nextcloud seeds
 already use, so the same account is configured in one place.
 
 The actual DAV/OCS work lives in `nextcloud_client.py`; the routes here validate

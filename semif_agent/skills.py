@@ -656,9 +656,10 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
         "Anything that is not a request to perform an action or produce a result: "
         "greetings, thanks, acknowledgements, chit-chat, and off-topic statements."
     ),
-    "calendar": (
-        "Calendar and scheduling: reading or changing the user's calendar "
-        "events and reminders."
+    "nextcloud": (
+        "Nextcloud productivity: the user's calendar events and scheduling "
+        "(reading or changing events and reminders) and the user's to-do tasks "
+        "and task lists."
     ),
     "simplex": (
         "SimpleX messaging: reading incoming messages, sending messages to "
@@ -667,10 +668,6 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "time": (
         "Time and date utilities: telling the current time or date, setting "
         "countdown timers, and setting alarms."
-    ),
-    "productivity_management": (
-        "Personal productivity: creating and managing the user's to-do tasks "
-        "and task lists."
     ),
     "housekeeping": (
         "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
@@ -724,7 +721,7 @@ _TARGET_QUESTION = (
 # Explicit housekeeping command forms. They are routed deterministically to the
 # housekeeping skill (see parse_meta_command) because the generic SemIf guards
 # read a task-like skill name in the request as the task itself (e.g.
-# "regen skill calendar.create_event" scores as a calendar task). The skill name
+# "regen skill nextcloud.create_event" scores as a nextcloud task). The skill name
 # is just a variable the skill resolves — or asks for.
 _META_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     (
@@ -785,10 +782,10 @@ def parse_meta_command(text: str) -> str | None:
 def _resolve_target(admin, request: Request):
     """Resolve the skill a housekeeping request targets.
 
-    The target may be named in the request ("delete skill calendar.foo") or
+    The target may be named in the request ("delete skill nextcloud.foo") or
     supplied as an input variable when the request is name-free ("delete
     skill") — in which case the skill asks for it. Keeping the name out of the
-    routed request is deliberate: a skill name like `calendar.create_event`
+    routed request is deliberate: a skill name like `nextcloud.create_event`
     reads as a task and pulls navigation to the wrong category. Returns a
     `(category, name)` tuple, or an `ActionResult` (needs_input / not-found /
     ambiguous) to return as-is.

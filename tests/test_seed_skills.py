@@ -30,15 +30,15 @@ def seed_id(seed: Path) -> str:
 
 def test_expected_seeds_exist():
     ids = {seed_id(seed) for seed in SEED_DIRS}
-    assert "calendar.next_event" in ids
-    assert "calendar.create_event" in ids
+    assert "nextcloud.next_event" in ids
+    assert "nextcloud.create_event" in ids
     assert "simplex.next_message" in ids
     assert "simplex.connect_link" in ids
     assert "time.now" in ids
     assert "time.date" in ids
     assert "time.set_timer" in ids
     assert "time.set_alarm" in ids
-    assert "productivity_management.create_nextcloud_task" in ids
+    assert "nextcloud.create_task" in ids
 
 
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])

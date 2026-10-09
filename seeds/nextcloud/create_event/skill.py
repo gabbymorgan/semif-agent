@@ -481,7 +481,7 @@ def _build_ics(uid, summary, start, end, all_day, stamp, description=""):
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//semif-agent//calendar.create_event//EN",
+        "PRODID:-//semif-agent//nextcloud.create_event//EN",
         "CALSCALE:GREGORIAN",
         "BEGIN:VEVENT",
         f"UID:{uid}",

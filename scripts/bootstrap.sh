@@ -629,7 +629,7 @@ Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
   - Runs inside the same 'semif-bridge' process (Nextcloud is plain HTTPS, so
     there is no separate daemon). Configure the account once in config.json under
     bridges.nextcloud (url/username/app_password) — or reuse the top-level
-    nextcloud_* values the calendar seeds collect. Skills call it at the address
+    nextcloud_* values the nextcloud seeds collect. Skills call it at the address
     derived from bridges.nextcloud (default http://127.0.0.1:5230).
 EOF
 

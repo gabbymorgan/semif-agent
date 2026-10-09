@@ -215,7 +215,7 @@ def test_navigation_routes_noise_into_the_response_tree(tmp_path):
             scheduler.engine, scheduler.log, scheduler.trace, Request(text), scheduler.tree
         )
         print(f"[lookup] {text!r} -> {result!r}")
-        assert getattr(result, "category", None) == "calendar", f"lookup misrouted: {text!r}"
+        assert getattr(result, "category", None) == "nextcloud", f"lookup misrouted: {text!r}"
     for text in noise:
         result = navigate(
             scheduler.engine, scheduler.log, scheduler.trace, Request(text), scheduler.tree

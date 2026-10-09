@@ -262,7 +262,7 @@ bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
                 and Notes (OCS) behind one JSON surface, so bodies never speak
                 DAV/OCS; no service daemon (stdlib-only), connection from
                 `bridges.nextcloud` with a fallback to the top-level
-                `nextcloud_*` values the calendar seeds use.
+                `nextcloud_*` values the nextcloud seeds use.
                 outlook.py + outlook_client.py: OutlookBridge — the user's
                 Microsoft account (Outlook / Microsoft 365) over Microsoft Graph:
                 mail, calendar events, Microsoft To Do tasks, contacts, and
@@ -383,7 +383,7 @@ CLI, unit tests (24) + integration tests (2).
   model sent "book a flight to japan" to `simplex` (0.49 vs create_category
   0.12); with descriptions it picks `create_category` 0.87. `Skill` carries
   `category_description`, seeded by `CATEGORY_DESCRIPTIONS` for the built-ins
-  (response/calendar/simplex) and read from the registry for authored
+  (response/nextcloud/simplex) and read from the registry for authored
   categories; `category_descriptions(tree)` collapses it per category so an
   empty bucket is never offered bare. The old category threshold gate
   (`create_tau`/`create_margin`) is **retired**. Leaf level: the softmax
@@ -460,13 +460,13 @@ CLI, unit tests (24) + integration tests (2).
   path with `reason_kind="manual"`), and `cancel_build` (confirm, then discard a
   queued/in-flight write and delete the half-built leaf). The target skill is an
   **input variable**: the skill resolves it from the request if named
-  ("delete skill calendar.foo") and otherwise **asks** for it ("delete skill" →
+  ("delete skill nextcloud.foo") and otherwise **asks** for it ("delete skill" →
   "Which skill?"), so the routed request never has to carry a task-like skill
   name. Explicit command forms ("delete skill", "clear config variables for X",
   "regen skill X", "cancel skill build") are recognized deterministically by
   `parse_meta_command` and routed straight to the housekeeping leaf (trace
   `meta_command`): the pinned 4B decision model reads a task-like name
-  (`calendar.create_event`) as the task itself and misroutes the generic guards,
+  (`nextcloud.create_event`) as the task itself and misroutes the generic guards,
   so the explicit command is deterministic while natural-language phrasings
   still go through navigation (the actionability guard's `action` option now
   names skill-management commands). They are built-ins
@@ -860,12 +860,12 @@ CLI, unit tests (24) + integration tests (2).
   loads them into every tree at startup; recorded config (credentials collected
   at first fire) is written to the runtime store `data/skills/`, so the committed
   seed never holds secrets, and a generated body with the same name replaces the
-  seed. `calendar.create_event` is the authoritative worked example (CalDAV PUT;
+  seed. `nextcloud.create_event` is the authoritative worked example (CalDAV PUT;
   derives the title/date/time from the query, asks for missing fields and
   resumes, resolves the target calendar with a SemIf choice over the owned
   calendars — a strong winner is used, otherwise the configured default);
-  `calendar.next_event` is the read counterpart (Nextcloud CalDAV, recurring
-  events expanded server-side); `productivity_management.create_nextcloud_task`
+  `nextcloud.next_event` is the read counterpart (Nextcloud CalDAV, recurring
+  events expanded server-side); `nextcloud.create_task`
   adds a task to a Nextcloud task list through the Nextcloud bridge (`GET
   /tasklists` for a VTODO-capable target, `POST /tasks` to create it, the LLM
   bridge to phrase the summary/description); `simplex.next_message` (read via the
@@ -876,7 +876,7 @@ CLI, unit tests (24) + integration tests (2).
   is the top-level `timezone` config value (an IANA name such as
   `America/Chicago`; `timers.local_now`/`resolve_timezone` resolve it via
   `zoneinfo`), falling back to the host's own timezone when it is empty or
-  unknown; `TimerService` formats due/fired times in that zone too. The calendar
+  unknown; `TimerService` formats due/fired times in that zone too. The nextcloud
   seeds derive "now" the same way, so a request time is parsed in the user's
   zone rather than the host's;
   `tests/test_seed_skills.py` keeps them honest.
@@ -1332,7 +1332,7 @@ CLI, unit tests (24) + integration tests (2).
   (`enabled`/`host`/`port`/`token`). Bodies reach it via the derived
   `llm_bridge_url` (+ optional `llm_bridge_token`). It runs inside the existing
   `semif-bridge.service` process (all enabled bridges start together); with no
-  client it reports `502`, never a fabricated reply. `calendar.create_event` is
+  client it reports `502`, never a fabricated reply. `nextcloud.create_event` is
   the first consumer (title + description extraction, cached in `request.meta`
   across a `needs_input` resume).
 - **Nextcloud bridge** (`bridges/nextcloud.py` + `bridges/nextcloud_client.py`).
@@ -1347,7 +1347,7 @@ CLI, unit tests (24) + integration tests (2).
   and `verify_tls`/`timeout`); `build_bridge` passes the top-level
   `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
   `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
-  the same account the calendar seeds collect is configured once and a block value
+  the same account the nextcloud seeds collect is configured once and a block value
   wins. Bodies reach it via the derived `nextcloud_bridge_url` (+ optional
   `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
   Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
@@ -1432,7 +1432,7 @@ The bridge read path (`simplex.next_message`) and contact-link lookup
   generic `POST /chat` in front of the scheduler's configured `llm` client
   (threaded through `run_bridges`/`build_bridge`, never re-configured), registered
   in `CATALOG` and seeded under `bridges.llm` (its URL is derived from that block).
-  `calendar.create_event` extracts its title + description through it.
+  `nextcloud.create_event` extracts its title + description through it.
 - [x] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
   + config block + `CATALOG` entry; the codegen prompts pick it up automatically
   through `describe_bridges()`. Nextcloud shipped (`bridges/nextcloud.py` +

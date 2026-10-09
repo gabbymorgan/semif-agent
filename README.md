@@ -343,8 +343,9 @@ fine-tuning loop — it is not yet the fine-tune itself.
   text-to-speech, all local (openWakeWord / faster-whisper / Piper).
 - **Standalone bridge services** — a token-guarded localhost HTTP layer in front
   of third-party systems, so generated bodies never speak native protocols.
-- **Seeds** — shipped real starter skills: `calendar.create_event` (the
-  authoritative worked example), `calendar.next_event` (Nextcloud CalDAV), and
+- **Seeds** — shipped real starter skills: `nextcloud.create_event` (the
+  authoritative worked example), `nextcloud.next_event` (Nextcloud CalDAV),
+  `nextcloud.create_task` (Nextcloud task list), and
   `simplex.next_message` / `simplex.connect_link`.
 - **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
 - **Stdlib-only core** — SemIf/llama.cpp are lazy imports, so the package stays
@@ -385,7 +386,7 @@ semif_agent/
                     speech-to-text (faster-whisper), text-to-speech (Piper)
   gateway/          messenger COMMAND intake/reply (SimpleX, LXMF, voice)
   bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud)
-seeds/              committed starter skills (calendar, simplex)
+seeds/              committed starter skills (nextcloud, simplex)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
@@ -745,7 +746,7 @@ plain HTTPS) and is stdlib-only (`urllib` + `xml.etree`), so it starts instantly
 in the same `semif-bridge` process. The connection (base URL, username, app
 password) is configured in `bridges.nextcloud` and falls back to the top-level
 `nextcloud_url` / `nextcloud_username` / `nextcloud_app_password` /
-`nextcloud_default_calendar` the calendar seeds use, so the account is
+`nextcloud_default_calendar` the nextcloud seeds use, so the account is
 configured once. Skills call it at the address derived from `bridges.nextcloud`
 (`nextcloud_bridge_url`, + optional `nextcloud_bridge_token`). Its HTTP surface:
 
@@ -856,15 +857,19 @@ folder format, plus a `manifest.json`. `merge_seed_store` loads them into every
 tree at startup; recorded config is written to the runtime store, so the
 committed seed never holds secrets.
 
-- `calendar.create_event` — create an event on Nextcloud CalDAV (the
+- `nextcloud.create_event` — create an event on Nextcloud CalDAV (the
   authoritative worked example); resolves the target calendar with a SemIf
   choice over the owned calendars (strong winner, else the configured default);
   config vars `nextcloud_url`, `nextcloud_username`, `nextcloud_app_password`,
   `nextcloud_default_calendar`, plus the LLM bridge (`llm_bridge_url`,
   `llm_bridge_token`).
-- `calendar.next_event` — next upcoming event from Nextcloud CalDAV (recurring
+- `nextcloud.next_event` — next upcoming event from Nextcloud CalDAV (recurring
   events expanded server-side); config vars `nextcloud_url`,
   `nextcloud_username`, `nextcloud_app_password`, `nextcloud_default_calendar`.
+- `nextcloud.create_task` — add a task to a Nextcloud task list through the
+  Nextcloud bridge (`GET /tasklists`, `POST /tasks`); config vars
+  `nextcloud_bridge_url`, `nextcloud_bridge_token`, `llm_bridge_url`,
+  `llm_bridge_token`.
 - `simplex.next_message` — read the next unread message via the forwarding
   bridge; config vars `simplex_bridge_url`, `simplex_bridge_token`,
   `simplex_default_contact`.
