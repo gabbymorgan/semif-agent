@@ -558,7 +558,9 @@ CLI, unit tests (24) + integration tests (2).
   `voice:<chat_id>`, and every reply is spoken. No remote peer and no allowlist
   (physical mic access is the authorization). Half-duplex: capture is discarded
   while a reply is speaking (no barge-in yet); the wake word is required before
-  every command. The
+  every command and is held while the scheduler's single slot is still running
+  the current request (`GatewayService.input_ready`), so a second command cannot
+  start until the first reaches a result (or pauses for the user's answer). The
   whole voice stack is optional and lazy-imported (`requirements/voice.txt`,
   pinned separately from the engine set since it is hardware-dependent); the
   gateway refuses to start with an install hint. `bootstrap.sh --voice`
@@ -1173,7 +1175,11 @@ CLI, unit tests (24) + integration tests (2).
   pause before the command does not end the capture (then `vad.silence_ms`).
   **Half-duplex**: capture frames are discarded while a
   reply is speaking, so the agent never transcribes itself (no barge-in yet);
-  the wake word is required before every command. `max_speak_chars`
+  the wake word is required before every command, and is **held while the
+  scheduler slot is busy** (`GatewayService.input_ready`): a wake that fires
+  while the current request is still running is ignored (traced
+  `voice_wake_blocked`), so a second command cannot start until the first
+  reaches a result. `max_speak_chars`
   truncates long replies before speaking, and a short sine `cue` beep plays on
   wake (optionally again on transcription) so the user knows they were heard.
   **Result-only output**: `VoiceAdapter.result_only` (default true; per-platform

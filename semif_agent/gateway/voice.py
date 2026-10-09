@@ -53,6 +53,16 @@ class VoiceAdapter(GatewayAdapter):
     def check_requirements(self) -> tuple[bool, str | None]:
         return self.daemon.check_requirements()
 
+    def set_input_ready(self, ready) -> None:
+        """Gate the wake word on the scheduler being able to accept a command.
+
+        `ready` is a callable returning whether a new command may start now
+        (`GatewayService.input_ready`). While it returns False the wake word is
+        ignored, so a second command cannot be started before the current
+        request has reached a result.
+        """
+        self.daemon.input_ready = ready
+
     # ---- transport ----
 
     def run(

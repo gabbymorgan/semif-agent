@@ -633,11 +633,16 @@ class VoiceDaemon:
     """
 
     def __init__(self, cfg: dict | None = None, trace=None, engines: VoiceEngines | None = None,
-                 name: str = "voice"):
+                 name: str = "voice", input_ready=None):
         cfg = cfg or {}
         self.config = cfg
         self.trace = trace
         self.name = name
+        #: Optional predicate: whether a new command may start now. While it
+        #: returns False the wake word is ignored (the scheduler's single slot
+        #: is still running the current request), so a second command cannot be
+        #: started before the first reaches a result. None = always ready.
+        self.input_ready = input_ready
         self.wake_threshold = float((cfg.get("wake", {}) or {}).get("threshold", 0.2))
         #: After the wake word, how long to wait for the command's speech to
         #: begin before giving up (a natural pause after "hey <word>" — e.g.
@@ -765,6 +770,18 @@ class VoiceDaemon:
                 continue
             score = engines.wake.score(pcm)
             if score < self.wake_threshold:
+                continue
+            if self.input_ready is not None and not self.input_ready():
+                # The single scheduler slot is still running the current
+                # request: hold the wake word until it reaches a result (or
+                # pauses for the user's answer), so a new command cannot start
+                # while one is in flight. Reset the detector so the same wake
+                # phrase does not immediately re-fire once the slot frees.
+                try:
+                    engines.wake.reset()
+                except Exception:
+                    pass
+                self._event("voice_wake_blocked", score=round(float(score), 3))
                 continue
             self._event("voice_wake", score=round(float(score), 3))
             try:

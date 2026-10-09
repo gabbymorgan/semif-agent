@@ -128,6 +128,13 @@ class GatewayService:
             humanize_cfg = humanize_cfg if isinstance(humanize_cfg, dict) else {}
             self._humanize_default = bool(humanize_cfg.get("enabled", False))
             self.humanizer = self._build_humanizer(humanize_cfg)
+        #: Let an adapter that needs it gate input on the scheduler being free
+        #: (the voice gateway holds the wake word until the current request
+        #: reaches a result). Generic hook; only some adapters implement it.
+        for adapter in self.adapters.values():
+            setter = getattr(adapter, "set_input_ready", None)
+            if callable(setter):
+                setter(self.input_ready)
         self._owners: dict[str, Target] = {}
         self._parents: dict[str, str] = {}
         self._pending_owner: Target | None = None
@@ -274,6 +281,22 @@ class GatewayService:
             if source.startswith(prefix):
                 return (platform, source[len(prefix):])
         return None
+
+    def input_ready(self) -> bool:
+        """Whether a new command may start now.
+
+        False while the single scheduler slot is executing a run; True when the
+        scheduler is idle or paused for the user's answer to a question (the run
+        is not running, so the answer must be accepted). The voice gateway uses
+        this to hold the wake word until the current request has reached a
+        result. Reads the scheduler's flags without its lock on purpose — the
+        lock is held for the whole run, so acquiring it here would block the
+        audio loop for the duration of the run.
+        """
+        scheduler = self.scheduler
+        if getattr(scheduler, "pending", None) is not None:
+            return True
+        return getattr(scheduler, "current", None) is None
 
     def handle_inbound(self, msg: InboundMessage, platform: str | None = None) -> None:
         """Handle one authorized inbound command. Called by the adapter."""

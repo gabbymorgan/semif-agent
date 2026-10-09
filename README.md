@@ -682,7 +682,10 @@ python -m semif_agent.cli gateway --platform voice
   run lower than the official models, the seeded `wake.threshold` is `0.2` (the
   official models score ~0.99 and use `0.5`).
 - **Behavior.** Half-duplex — capture is discarded while a reply is speaking, so
-  the agent never transcribes itself (no barge-in yet). A short beep plays when
+  the agent never transcribes itself (no barge-in yet). The wake word is required
+  before every command and is held while the scheduler is still running the
+  current request, so a second command cannot start until the first reaches a
+  result. A short beep plays when
   the wake word fires (`gateway.voice.cue`), so you know you're being heard; a
   short multi-note "bling" (`cue.submit_notes`, each entry
   `[frequency_hz, duration_ms]`, spaced by `cue.note_gap_ms`) plays once the

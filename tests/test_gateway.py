@@ -186,6 +186,39 @@ def test_service_submit_error_is_replied(tmp_path):
     assert outbound, "expected a reply"
 
 
+def test_service_input_ready_tracks_scheduler(tmp_path):
+    # The voice gateway holds the wake word on this: not ready while a run is
+    # executing, ready when idle or paused for the user's answer.
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    assert service.input_ready() is True          # idle
+    scheduler.busy("working")
+    assert service.input_ready() is False         # a run is executing
+    scheduler.pending = object()                  # paused for the answer
+    assert service.input_ready() is True
+    scheduler.pending = None
+    scheduler.current = None
+    assert service.input_ready() is True
+
+
+def test_service_wires_input_ready_into_voice_adapter(tmp_path):
+    # A constructed service hands its `input_ready` to an adapter that exposes
+    # `set_input_ready` (the voice gateway).
+    class ReadyAdapter:
+        name = "voice"
+
+        def __init__(self):
+            self.ready = None
+
+        def set_input_ready(self, fn):
+            self.ready = fn
+
+    scheduler = build_scheduler(tmp_path)
+    adapter = ReadyAdapter()
+    service = GatewayService(scheduler, adapter, config={})
+    assert adapter.ready == service.input_ready
+
+
 def test_service_routes_pending_answer_to_same_chat(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_service(scheduler)

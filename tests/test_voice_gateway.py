@@ -84,7 +84,7 @@ class FakeTts:
         return b"PCM", 22050
 
 
-def make_daemon(frames, stt_text="hello", config=None):
+def make_daemon(frames, stt_text="hello", config=None, input_ready=None):
     audio = FakeAudio(frames)
     engines = VoiceEngines(
         wake=FakeWake(),
@@ -100,7 +100,7 @@ def make_daemon(frames, stt_text="hello", config=None):
     }
     if config:
         cfg.update(config)
-    return VoiceDaemon(cfg, engines=engines), engines
+    return VoiceDaemon(cfg, engines=engines, input_ready=input_ready), engines
 
 
 # ---- requirements ----------------------------------------------------------
@@ -148,6 +148,37 @@ def test_no_wake_word_produces_nothing():
     daemon.run(heard.append)
     assert heard == []
     assert engines.stt.calls == []
+
+
+# ---- input gating (hold the wake word while the scheduler is busy) ---------
+
+
+def test_wake_blocked_while_input_not_ready():
+    # While the scheduler slot is busy the wake word is ignored: no cue, no
+    # capture, no transcription (traced `voice_wake_blocked`).
+    ready = {"ok": False}
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"], input_ready=lambda: ready["ok"]
+    )
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    heard = []
+    daemon.run(heard.append)
+    assert heard == []
+    assert engines.stt.calls == []
+    assert engines.audio.writes == []
+    assert "voice_wake_blocked" in events
+    assert "voice_wake" not in events
+
+
+def test_wake_allowed_when_input_ready():
+    ready = {"ok": True}
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL", b"SIL"], input_ready=lambda: ready["ok"]
+    )
+    heard = []
+    daemon.run(heard.append)
+    assert heard == ["hello"]
 
 
 def test_max_utterance_caps_collection(monkeypatch):
