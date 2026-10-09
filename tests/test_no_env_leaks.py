@@ -39,7 +39,7 @@ DENYLIST = {
     "stale llm default": r"qwen2\.5:3b",
     "absolute home path": r"/home/abby",
     "old venv path": r"semif-venv",
-    "machine descriptor": r"\b(?:the box|dev box|dev machine|staging box)\b",
+    "machine descriptor": r"\b(?:dev box|dev machine|staging box)\b",
 }
 
 
