@@ -513,7 +513,7 @@ Key blocks:
 | `queue` | `max_size` |
 | `skill_bodies` / `skill_seeds` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
-| `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD, follow-up window |
+| `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
 | `bridges.nextcloud` | Nextcloud bridge: host/port/token + connection (url/username/app_password/defaults) |
@@ -687,10 +687,8 @@ python -m semif_agent.cli gateway --platform voice
   short multi-note "bling" (`cue.submit_notes`, each entry
   `[frequency_hz, duration_ms]`, spaced by `cue.note_gap_ms`) plays once the
   utterance is transcribed. (Set `cue.submit_notes` to `[]` and
-  `cue.submit_frequency > 0` for the older single submit beep.) After a reply, the next
-  utterance is accepted **without** the wake word for `follow_up_window_s`, so
-  answering a question is conversational. After the wake word, capture waits
-  `listen_timeout_s` for the command to begin, so a pause before speaking
+  `cue.submit_frequency > 0` for the older single submit beep.) After the wake
+  word, capture waits `listen_timeout_s` for the command to begin, so a pause before speaking
   (e.g. while the cue beep plays) does not truncate it. `max_speak_chars`
   truncates long
   replies before speaking. `result_only` (default true for voice) speaks only the

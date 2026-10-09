@@ -293,8 +293,7 @@ voice_transport.py
                 always-on wake word (openWakeWord), VAD endpointing
                 (webrtcvad, energy fallback), speech-to-text (faster-whisper)
                 and text-to-speech (Piper) over `sounddevice`; half-duplex
-                (capture discarded while speaking) with a follow-up window so a
-                reply can be answered without the wake word. Every heavy dep is
+                (capture discarded while speaking). Every heavy dep is
                 lazy-imported, keeping the module stdlib-only; the engine
                 interfaces are plain classes so tests inject fakes. Knows
                 nothing about the scheduler or the gateway.
@@ -558,8 +557,8 @@ CLI, unit tests (24) + integration tests (2).
   work through `GatewayService` unchanged — a spoken command is just text from
   `voice:<chat_id>`, and every reply is spoken. No remote peer and no allowlist
   (physical mic access is the authorization). Half-duplex: capture is discarded
-  while a reply is speaking (no barge-in yet); after each reply a
-  `follow_up_window_s` accepts the next utterance without the wake word. The
+  while a reply is speaking (no barge-in yet); the wake word is required before
+  every command. The
   whole voice stack is optional and lazy-imported (`requirements/voice.txt`,
   pinned separately from the engine set since it is hardware-dependent); the
   gateway refuses to start with an install hint. `bootstrap.sh --voice`
@@ -1174,8 +1173,7 @@ CLI, unit tests (24) + integration tests (2).
   pause before the command does not end the capture (then `vad.silence_ms`).
   **Half-duplex**: capture frames are discarded while a
   reply is speaking, so the agent never transcribes itself (no barge-in yet);
-  after a reply a `follow_up_window_s` accepts the next utterance without the
-  wake word, so answering a question is conversational. `max_speak_chars`
+  the wake word is required before every command. `max_speak_chars`
   truncates long replies before speaking, and a short sine `cue` beep plays on
   wake (optionally again on transcription) so the user knows they were heard.
   **Result-only output**: `VoiceAdapter.result_only` (default true; per-platform
@@ -1278,7 +1276,7 @@ CLI, unit tests (24) + integration tests (2).
   `simplex.send_message`, and
   `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
-  follow-up window, `speak` truncation/failure, adapter + CLI wiring) — no
+  `speak` truncation/failure, adapter + CLI wiring) — no
   hardware, network, or heavy packages. `tests/test_voice_record.py` covers the
   recording helpers (`semif_agent/voice_train.py`) — prompt loading, WAV I/O,
   level math, the silence-endpointing loop, and the LJSpeech dataset writer —

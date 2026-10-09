@@ -17,9 +17,6 @@ resampling is done in the loop.
 Design notes:
 - **Half-duplex.** Capture frames are discarded while a reply is being spoken,
   so the agent never transcribes its own voice (no barge-in yet).
-- **Follow-up window.** After a reply, the next utterance is accepted without
-  the wake word for `follow_up_window_s`, so answering a question is
-  conversational.
 - The engine interfaces are plain classes so tests can inject fakes and drive
   the loop without hardware or the optional packages.
 """
@@ -672,7 +669,6 @@ class VoiceDaemon:
         self.initial_silence_ms = max(
             int(vad_cfg.get("initial_silence_ms", 1500) or 0), self.vad_silence_ms
         )
-        self.follow_up_window = float(cfg.get("follow_up_window_s", 5.0) or 0.0)
         self.max_speak_chars = int(cfg.get("max_speak_chars", 600) or 0)
         cue = cfg.get("cue", {}) or {}
         self.cue_enabled = bool(cue.get("enabled", True))
@@ -693,7 +689,6 @@ class VoiceDaemon:
         self._on_utterance: UtteranceHandler | None = None
         self._stop = threading.Event()
         self._speaking = threading.Event()
-        self._follow_until = 0.0
 
     # ---- requirements ----
 
@@ -768,23 +763,19 @@ class VoiceDaemon:
                 continue
             if self._speaking.is_set():
                 continue
-            armed = time.time() < self._follow_until
-            wait_for_speech_ms = 0
-            if not armed:
-                score = engines.wake.score(pcm)
-                if score < self.wake_threshold:
-                    continue
-                self._event("voice_wake", score=round(float(score), 3))
-                try:
-                    engines.wake.reset()
-                except Exception:
-                    pass
-                self._cue(self.cue_frequency, self.cue_duration_ms)
-                # Wait for the command to start rather than assuming it is
-                # glued to the wake word (the wake frame + a natural pause are
-                # discarded so the command is not truncated).
-                wait_for_speech_ms = self.listen_timeout_ms
-            self._follow_until = 0.0
+            score = engines.wake.score(pcm)
+            if score < self.wake_threshold:
+                continue
+            self._event("voice_wake", score=round(float(score), 3))
+            try:
+                engines.wake.reset()
+            except Exception:
+                pass
+            self._cue(self.cue_frequency, self.cue_duration_ms)
+            # Wait for the command to start rather than assuming it is glued to
+            # the wake word (the wake frame + a natural pause are discarded so
+            # the command is not truncated).
+            wait_for_speech_ms = self.listen_timeout_ms
             utterance = self._collect(engines, pcm, wait_for_speech_ms=wait_for_speech_ms)
             if not utterance:
                 continue
@@ -1016,8 +1007,6 @@ class VoiceDaemon:
                 engines.audio.flush()  # clear any TTS echo captured while speaking
             except Exception:
                 pass
-            if self.follow_up_window > 0:
-                self._follow_until = time.time() + self.follow_up_window
             try:
                 engines.wake.reset()
             except Exception:

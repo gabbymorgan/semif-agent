@@ -96,7 +96,6 @@ def make_daemon(frames, stt_text="hello", config=None):
     cfg = {
         "audio": {"frame_ms": 80, "sample_rate": 16000},
         "vad": {"silence_ms": 160, "min_speech_ms": 80, "max_utterance_s": 30},
-        "follow_up_window_s": 5.0,
         "max_speak_chars": 600,
     }
     if config:
@@ -311,16 +310,17 @@ def test_speak_synthesizes_and_plays():
     daemon.speak("  hello there  ")
     assert engines.tts.spoken == ["hello there"]
     assert engines.audio.writes == [(b"PCM", 22050)]
-    # A reply opens the follow-up window (no wake word needed next).
-    assert daemon._follow_until > 0
 
 
-def test_follow_up_window_accepts_without_wake():
+def test_no_follow_up_after_reply():
+    # The wake word is required for every command: speech after a reply is not
+    # captured until the wake word fires again.
     daemon, engines = make_daemon([b"speech", b"SIL", b"SIL"])
-    daemon.speak("are you there?")  # opens the follow-up window
+    daemon.speak("are you there?")
     heard = []
     daemon.run(heard.append)
-    assert heard == ["hello"]
+    assert heard == []
+    assert engines.stt.calls == []
 
 
 def test_speak_truncates_long_text():

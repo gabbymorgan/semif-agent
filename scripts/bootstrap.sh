@@ -643,8 +643,8 @@ Voice command gateway (wake word + speech-to-text + text-to-speech):
     the foreground (it needs your audio session; it is NOT a systemd unit):
       HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli gateway --platform voice
   - Say the wake word (gateway.voice.wake.model, default 'hey_computer' — phrase
-    "Hey Computer") and speak; the reply is spoken back. After each reply the
-    next utterance needs no wake word for gateway.voice.follow_up_window_s.
+    "Hey Computer") and speak; the reply is spoken back. The wake word is
+    required before every command (no post-reply follow-up listening).
   - If the mic or speaker is silent/quiet, set the ALSA mixer (PortAudio has no
     volume control) and persist it:
       alsamixer                 # or: amixer -c <card> sset 'Speaker' unmute
