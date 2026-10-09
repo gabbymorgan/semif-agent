@@ -42,6 +42,11 @@ class VoiceAdapter(GatewayAdapter):
         #: `run()` blocks on the mic; this daemon owns capture/wake/STT/TTS.
         self.daemon = VoiceDaemon(cfg, trace=trace, name=self.name)
         self._on_inbound = None
+        #: Utterances are handed to a worker thread, not run on the audio
+        #: thread: the scheduler is synchronous and can block on the decision
+        #: engine, and a slow or failing task must neither stop the mic being
+        #: read nor kill the front end. `None` asks the worker to stop.
+        self._inbound: "queue.Queue[InboundMessage | None]" = queue.Queue()
 
     # ---- requirements ----
 
@@ -69,12 +74,41 @@ class VoiceAdapter(GatewayAdapter):
                 self.daemon.speak(message.text)
 
         threading.Thread(target=_pump, name="voice-outbound-pump", daemon=True).start()
-        self.daemon.run(self._on_utterance)
+        threading.Thread(
+            target=self._inbound_worker, name="voice-inbound-worker", daemon=True
+        ).start()
+        try:
+            self.daemon.run(self._on_utterance)
+        finally:
+            self._inbound.put(None)
 
     def close(self) -> None:
         self.daemon.close()
 
     # ---- inbound ----
+
+    def _inbound_worker(self) -> None:
+        """Run the scheduler off the audio thread, one utterance at a time.
+
+        The scheduler is synchronous and can block on the decision engine; a
+        slow task must not stop the mic being read, and a task error is traced
+        and spoken rather than propagated — one bad command must not take the
+        voice front end down with it.
+        """
+        while True:
+            message = self._inbound.get()
+            if message is None:
+                return
+            self._handle(message)
+
+    def _handle(self, message: InboundMessage) -> None:
+        if self._on_inbound is None:
+            return
+        try:
+            self._on_inbound(message)
+        except Exception as exc:
+            self.daemon._event("gateway_handler_failed", message=str(exc)[:300])
+            self.daemon.speak("Sorry, something went wrong handling that.")
 
     def _on_utterance(self, text: str) -> None:
         text = (text or "").strip()
@@ -86,13 +120,13 @@ class VoiceAdapter(GatewayAdapter):
             display_name=self.display_name,
             chars=len(text),
         )
-        message = InboundMessage(
-            text=text,
-            chat_id=self.chat_id,
-            chat_type="dm",
-            contact_id=self.chat_id,
-            display_name=self.display_name,
-            raw={},
+        self._inbound.put(
+            InboundMessage(
+                text=text,
+                chat_id=self.chat_id,
+                chat_type="dm",
+                contact_id=self.chat_id,
+                display_name=self.display_name,
+                raw={},
+            )
         )
-        if self._on_inbound is not None:
-            self._on_inbound(message)

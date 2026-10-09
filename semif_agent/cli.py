@@ -13,6 +13,7 @@ Run on a host with SemIf + a GGUF + a local OpenAI-compatible server:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import sys
@@ -822,6 +823,12 @@ def run_gateway(
     run two scheduler processes over one skill store), so each gets its own
     transport thread but they route through one `GatewayService`.
     """
+    # Dump every thread's Python stack on a fatal signal (SIGSEGV/SIGABRT/...):
+    # a wedged front end (e.g. a voice loop stuck on the mic) leaves a trace in
+    # the journal instead of dying silently. Also enabled by the unit's
+    # PYTHONFAULTHANDLER=1; harmless when set twice.
+    faulthandler.enable()
+
     gateway_cfg = config.get("gateway", {}) or {}
     platforms = _resolve_platforms(platform, gateway_cfg)
 

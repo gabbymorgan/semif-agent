@@ -18,17 +18,22 @@ from semif_agent.voice_transport import VoiceDaemon, VoiceEngines
 
 
 class FakeAudio:
-    def __init__(self, frames):
+    def __init__(self, frames, on_empty=None):
         self.frames = list(frames)
+        #: What `read()` returns when the script runs out: `None` = the input is
+        #: closed (the loop exits), `b""` = a read timeout (a stalled stream).
+        self.on_empty = on_empty
         self.writes = []
         self.closed = False
-        self.input_opened = False
+        self.input_opens = 0
 
     def open_input(self, sample_rate, frame_ms, device=""):
-        self.input_opened = True
+        self.input_opens += 1
 
-    def read(self):
-        return self.frames.pop(0) if self.frames else None
+    def read(self, timeout=None):
+        if self.frames:
+            return self.frames.pop(0)
+        return self.on_empty
 
     def open_output(self, sample_rate, device=""):
         pass
@@ -132,7 +137,7 @@ def test_wake_word_then_silence_produces_one_utterance():
     heard = []
     daemon.run(heard.append)
     assert heard == ["hello"]
-    assert engines.audio.input_opened is True
+    assert engines.audio.input_opens == 1
     assert engines.audio.closed is True
     # The wake detector is reset after firing.
     assert engines.wake.resets >= 1
@@ -182,6 +187,37 @@ def test_command_after_pause_is_captured():
     assert engines.stt.calls == [b"command" + b"SIL" * 2]
 
 
+def test_pause_between_wake_and_command_is_tolerated():
+    # The wake detector can fire inside the wake phrase, so the frames after it
+    # are the phrase's tail, not the command; a natural pause before the command
+    # must not end the capture (the bug that made repeated asks fail).
+    daemon, engines = make_daemon(
+        [b"WAKE", b"tail", b"SIL", b"SIL", b"SIL", b"SIL", b"SIL", b"SIL",
+         b"command", b"SIL", b"SIL"]
+    )
+    heard = []
+    daemon.run(heard.append)
+    assert heard == ["hello"]
+    assert b"command" in engines.stt.calls[0]
+
+
+def test_short_command_still_endpoints():
+    # Once enough speech is in hand the normal silence endpoint applies, so a
+    # command is not left waiting on the longer initial tolerance.
+    daemon, engines = make_daemon(
+        [b"WAKE", b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h",
+         b"SIL", b"SIL", b"SIL"],
+        config={"vad": {"silence_ms": 160, "min_speech_ms": 80,
+                        "min_command_ms": 400, "initial_silence_ms": 2000}},
+    )
+    heard = []
+    daemon.run(heard.append)
+    assert heard == ["hello"]
+    # It ended on the 160 ms endpoint (two silent frames), not on the longer
+    # initial tolerance.
+    assert engines.stt.calls[0] == b"abcdefgh" + b"SIL" * 2
+
+
 def test_wake_without_command_times_out(monkeypatch):
     # Wake fires but the user never speaks a command: no utterance is produced
     # (traced `voice_no_command`) instead of capturing the wake frame as one.
@@ -195,6 +231,67 @@ def test_wake_without_command_times_out(monkeypatch):
     utterance = daemon._collect(engines, b"WAKE", wait_for_speech_ms=3000)
     assert utterance == b""
     assert "voice_no_command" in events
+
+
+# ---- capture-stream watchdog ----------------------------------------------
+
+
+def test_capture_stall_reopens_input(monkeypatch):
+    # A stalled PortAudio/ALSA callback never delivers another frame; the loop
+    # must reopen the input instead of blocking forever.
+    import semif_agent.voice_transport as vt
+
+    daemon, engines = make_daemon([])
+    engines.audio.on_empty = b""  # every read times out (a stalled stream)
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    clock = iter([100.0, 100.5, 106.0])
+    monkeypatch.setattr(vt.time, "time", lambda: next(clock))
+
+    assert daemon._read_frame(engines) == b""  # first timeout: stall starts
+    assert daemon._read_frame(engines) == b""  # still stalled, below the limit
+    assert daemon._read_frame(engines) == b""  # past stall_timeout_s -> reopen
+    assert "voice_stream_stalled" in events
+    assert "voice_stream_reopened" in events
+    assert engines.audio.input_opens == 1
+    assert engines.audio.closed is True  # closed before reopening
+
+
+def test_capture_stall_reopen_failure_is_traced(monkeypatch):
+    import semif_agent.voice_transport as vt
+
+    daemon, engines = make_daemon([])
+    engines.audio.on_empty = b""
+
+    def boom(sample_rate, frame_ms, device=""):
+        raise RuntimeError("device busy")
+
+    engines.audio.open_input = boom
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    clock = iter([100.0, 106.0])
+    monkeypatch.setattr(vt.time, "time", lambda: next(clock))
+    monkeypatch.setattr(vt.time, "sleep", lambda *_: None)
+
+    daemon._read_frame(engines)
+    daemon._read_frame(engines)
+    assert "voice_stream_reopen_failed" in events
+
+
+def test_watchdog_disabled_uses_blocking_read(monkeypatch):
+    # read_timeout_s=0 restores the old blocking read (no timeout kwarg passed).
+    daemon, engines = make_daemon(
+        [], config={"audio": {"frame_ms": 80, "sample_rate": 16000, "read_timeout_s": 0}}
+    )
+    seen = {}
+
+    def read(timeout=None):
+        seen["timeout"] = timeout
+        return None
+
+    engines.audio.read = read
+    assert daemon._read_frame(engines) is None
+    assert seen["timeout"] is None
 
 
 # ---- half-duplex / speaking ------------------------------------------------
@@ -259,6 +356,9 @@ def test_adapter_emits_inbound_message():
     seen = []
     adapter._on_inbound = seen.append
     adapter._on_utterance("  hello there  ")
+    # The utterance is queued for the worker, not run on the audio thread.
+    assert adapter._inbound.qsize() == 1
+    adapter._handle(adapter._inbound.get())
     assert len(seen) == 1
     assert seen[0].text == "hello there"
     assert seen[0].chat_id == "mic"
@@ -272,6 +372,33 @@ def test_adapter_ignores_empty_utterance():
     adapter._on_inbound = seen.append
     adapter._on_utterance("   ")
     assert seen == []
+    assert adapter._inbound.empty()
+
+
+def test_adapter_worker_handles_then_stops():
+    adapter = VoiceAdapter({})
+    seen = []
+    adapter._on_inbound = seen.append
+    adapter._on_utterance("one")
+    adapter._inbound.put(None)  # sentinel stops the worker
+    adapter._inbound_worker()
+    assert [m.text for m in seen] == ["one"]
+
+
+def test_adapter_contains_handler_error():
+    # A task that raises must not kill the front end: the worker traces it and
+    # speaks an apology instead of propagating.
+    adapter = VoiceAdapter({})
+
+    def boom(message):
+        raise RuntimeError("kaboom")
+
+    adapter._on_inbound = boom
+    spoken = []
+    adapter.daemon.speak = lambda text: spoken.append(text)
+    adapter._on_utterance("do the thing")
+    adapter._handle(adapter._inbound.get())  # must not raise
+    assert spoken and "wrong" in spoken[0]
 
 
 def test_adapter_is_result_only():

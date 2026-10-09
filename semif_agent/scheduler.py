@@ -631,7 +631,21 @@ class Scheduler:
         a pre-act contract variable is left unset and marked skipped, and an
         act-driven pause receives the empty string (the body may then fail,
         which is assessed normally).
+
+        Guarded like `submit_request`: a front end calls this synchronously
+        (the voice adapter from its worker thread), so an engine failure must
+        be fatal-and-reported, and any other error must come back as a reply
+        rather than propagate and take the front end down.
         """
+        try:
+            return self._answer(text)
+        except EngineUnavailable as exc:
+            return SchedulerReply("fatal", self._mark_fatal(exc))
+        except Exception as exc:
+            self.trace.append("error", "?", phase="answer", message=str(exc))
+            return SchedulerReply("error", f"could not resume the run: {exc}")
+
+    def _answer(self, text: str) -> SchedulerReply:
         with self._lock:
             if self.pending is None:
                 return SchedulerReply("error", "no run is waiting for input")
@@ -818,8 +832,17 @@ class Scheduler:
         """Answer a deferred question. An empty answer skips it.
 
         A repair question carries the detail the user wants the skill repaired
-        with; answering it starts the repair directly.
+        with; answering it starts the repair directly. Guarded so an engine or
+        repair failure is reported instead of propagating into the front end.
         """
+        try:
+            return self._answer_question(question_id, text)
+        except EngineUnavailable as exc:
+            return "fatal", self._mark_fatal(exc)
+        except Exception as exc:
+            return "error", f"could not record the answer: {exc}"
+
+    def _answer_question(self, question_id: str, text: str) -> tuple[str, str]:
         offer_id: str | None = None
         answer = (text or "").strip()
         with self._lock:
@@ -870,7 +893,16 @@ class Scheduler:
         The draft worker is blocked in `_request_approval`; setting the status
         and notifying releases it (True registers + writes the body, False
         aborts). The terminal trace event is written by the worker, not here.
+        Guarded so an unexpected failure is reported instead of propagating.
         """
+        try:
+            return self._answer_approval(approval_id, approved)
+        except EngineUnavailable as exc:
+            return "fatal", self._mark_fatal(exc)
+        except Exception as exc:
+            return "error", f"could not record the approval: {exc}"
+
+    def _answer_approval(self, approval_id: str, approved: bool) -> tuple[str, str]:
         with self._lock:
             approval = next(
                 (a for a in self.approvals if a.id == approval_id), None
@@ -915,8 +947,17 @@ class Scheduler:
         `retry` requeues the original request; `repair_skill` rewrites the body
         from the observed failure; `ask_user` posts a question whose answer
         starts the repair; `no_repair` closes the offer. Repair writes are
-        bounded by `codegen.repair.max_attempts` per skill.
+        bounded by `codegen.repair.max_attempts` per skill. Guarded so a retry
+        run or write failure is reported instead of propagating.
         """
+        try:
+            return self._resolve_repair(offer_id, action)
+        except EngineUnavailable as exc:
+            return "fatal", self._mark_fatal(exc)
+        except Exception as exc:
+            return "error", f"could not execute the repair: {exc}"
+
+    def _resolve_repair(self, offer_id: str, action: str | None = None) -> tuple[str, str]:
         with self._lock:
             offer = next((r for r in self.repairs if r.id == offer_id), None)
             if offer is None:

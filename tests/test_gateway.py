@@ -201,6 +201,37 @@ def test_service_routes_pending_answer_to_same_chat(tmp_path):
     assert any("AB123" in text for text in drain_outbound(service))
 
 
+def test_service_survives_answer_failure(tmp_path):
+    # A resume that raises must come back as a reply, never propagate into the
+    # front end (the voice adapter calls handle_inbound synchronously).
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    scheduler._run_skill(need_input_skill([]), Request("track it", source="simplex:4"))
+    assert scheduler.pending is not None
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("kaboom")
+
+    scheduler._answer = boom
+    service.handle_inbound(InboundMessage(text="AB123", chat_id="4", contact_id="4"))
+    assert any("kaboom" in text for text in drain_outbound(service))
+
+
+def test_answer_engine_unavailable_is_fatal(tmp_path):
+    from semif_agent.engine import EngineUnavailable
+
+    scheduler = build_scheduler(tmp_path)
+    scheduler._run_skill(need_input_skill([]), Request("track it", source="simplex:4"))
+
+    def boom(*_args, **_kwargs):
+        raise EngineUnavailable("engine down")
+
+    scheduler._answer = boom
+    reply = scheduler.answer("AB123")
+    assert reply.status == "fatal"
+    assert scheduler.fatal is not None
+
+
 def test_service_refuses_other_chat_during_pending(tmp_path):
     scheduler = build_scheduler(tmp_path)
     service = build_service(scheduler)

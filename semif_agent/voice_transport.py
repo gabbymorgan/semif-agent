@@ -103,15 +103,17 @@ class Synthesizer:
 class AudioIO:
     """Mic capture and speaker playback.
 
-    `read()` blocks for one frame and returns its bytes, or `None` once the
-    input is closed (the loop exits on `None`). `open_output`/`write` may be
-    called at any sample rate the synthesizer produced.
+    `read(timeout)` returns one frame's bytes; with a `timeout` it returns
+    `b""` when no frame arrived in time, and `None` once the input is closed
+    (the loop exits on `None`). The timeout is how the loop detects a stalled
+    capture stream and recovers from it. `open_output`/`write` may be called at
+    any sample rate the synthesizer produced.
     """
 
     def open_input(self, sample_rate: int, frame_ms: int, device: str = "") -> None:
         raise NotImplementedError
 
-    def read(self) -> bytes | None:
+    def read(self, timeout: float | None = None) -> bytes | None:
         raise NotImplementedError
 
     def open_output(self, sample_rate: int, device: str = "") -> None:
@@ -442,8 +444,9 @@ class SoundDeviceAudio(AudioIO):
     def read(self, timeout: float | None = None) -> bytes | None:
         """Block for the next frame (or up to `timeout` seconds).
 
-        Returns `None` once the input is closed, or on a `timeout` with no
-        frame — a caller that passes a timeout can detect a stalled stream
+        Returns `None` once the input is closed (the sentinel `close()` puts on
+        the queue), or `b""` when a `timeout` elapses with no frame — so a
+        caller that passes a timeout can detect a stalled capture stream
         instead of blocking forever.
         """
         if timeout is None:
@@ -451,7 +454,7 @@ class SoundDeviceAudio(AudioIO):
         try:
             return self._frames.get(timeout=timeout)
         except queue.Empty:
-            return None
+            return b""
 
     def open_output(self, sample_rate: int, device: str = "") -> None:
         pass  # a raw stream is opened per utterance in `write`
@@ -610,10 +613,28 @@ class VoiceDaemon:
         self.sample_rate = int(audio_cfg.get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
         self.frame_ms = int(audio_cfg.get("frame_ms", 80) or 80)
         self.input_device = str(audio_cfg.get("input_device", "") or "")
+        #: Capture-stream watchdog. `read_timeout_s` is how long a frame read
+        #: waits before it counts as a stall; when the stream stalls
+        #: continuously for `stall_timeout_s` the input is closed and reopened
+        #: (a wedged PortAudio/ALSA callback otherwise blocks `read()` forever).
+        #: 0 for either restores the old blocking read with no recovery.
+        self.read_timeout_s = float(audio_cfg.get("read_timeout_s", 1.0) or 0.0)
+        self.stall_timeout_s = float(audio_cfg.get("stall_timeout_s", 5.0) or 0.0)
+        self._stall_since = 0.0
         vad_cfg = cfg.get("vad", {}) or {}
         self.vad_silence_ms = int(vad_cfg.get("silence_ms", 1000) or 1000)
         self.min_speech_ms = int(vad_cfg.get("min_speech_ms", 120) or 120)
         self.max_utterance_s = float(vad_cfg.get("max_utterance_s", 30) or 30)
+        #: A longer silence tolerance while the utterance is still short. The
+        #: wake detector can fire inside the wake phrase (the cue beep follows),
+        #: so the first speech after it is the phrase's tail, not the command;
+        #: a natural pause before the command must not end the capture. Once
+        #: `min_command_ms` of speech is in hand, the normal `vad_silence_ms`
+        #: endpoint applies (so a real command still ends promptly).
+        self.min_command_ms = int(vad_cfg.get("min_command_ms", 700) or 0)
+        self.initial_silence_ms = max(
+            int(vad_cfg.get("initial_silence_ms", 1500) or 0), self.vad_silence_ms
+        )
         self.follow_up_window = float(cfg.get("follow_up_window_s", 5.0) or 0.0)
         self.max_speak_chars = int(cfg.get("max_speak_chars", 600) or 0)
         cue = cfg.get("cue", {}) or {}
@@ -698,9 +719,11 @@ class VoiceDaemon:
 
     def _loop(self, engines: VoiceEngines) -> None:
         while not self._stop.is_set():
-            pcm = engines.audio.read()
+            pcm = self._read_frame(engines)
             if pcm is None:
                 return
+            if not pcm:
+                continue
             if self._speaking.is_set():
                 continue
             armed = time.time() < self._follow_until
@@ -763,9 +786,16 @@ class VoiceDaemon:
                 break  # a reply started; stop capturing so we don't transcribe it
             if self.max_utterance_s > 0 and (time.time() - started) >= self.max_utterance_s:
                 break
-            pcm = engines.audio.read()
+            pcm = self._read_frame(engines)
             if pcm is None:
                 break
+            if not pcm:
+                # No frame within the read timeout: keep waiting, but still
+                # honor the "command never started" deadline below.
+                if waiting and (time.time() - wait_started) * 1000.0 >= wait_for_speech_ms:
+                    self._event("voice_no_command", waited_ms=wait_for_speech_ms)
+                    return b""
+                continue
             is_speech = engines.vad.is_speech(pcm, self.sample_rate)
             if waiting:
                 if not is_speech:
@@ -781,7 +811,15 @@ class VoiceDaemon:
                 last_speech_ts = time.time()
             else:
                 silence_ms += self.frame_ms
-            if silence_ms >= self.vad_silence_ms:
+            # Tolerate a longer pause until the command's speech is underway
+            # (see `initial_silence_ms`): the wake phrase's tail is captured
+            # first, and a pause before the actual command must not end it.
+            limit = (
+                self.initial_silence_ms
+                if speech_ms < self.min_command_ms
+                else self.vad_silence_ms
+            )
+            if silence_ms >= limit:
                 break
         if speech_ms < self.min_speech_ms:
             self._event(
@@ -794,6 +832,60 @@ class VoiceDaemon:
         self._event("voice_speech_end", ts=last_speech_ts, speech_ms=speech_ms)
         self._event("voice_utterance", frames=len(frames), speech_ms=speech_ms)
         return b"".join(frames)
+
+    # ---- capture health ----
+
+    def _read_frame(self, engines: VoiceEngines) -> bytes | None:
+        """Read one capture frame, recovering from a stalled stream.
+
+        Returns the frame bytes, `b""` when no frame arrived within
+        `read_timeout_s`, or `None` once the input is closed. When the stream
+        stalls continuously for `stall_timeout_s` — the PortAudio callback has
+        stopped delivering, so a blocking `read()` would hang the front end
+        forever — the input is closed and reopened so the loop recovers.
+        """
+        timeout = self.read_timeout_s if self.read_timeout_s > 0 else None
+        pcm = engines.audio.read(timeout=timeout)
+        if pcm is None:
+            return None
+        if pcm:
+            self._stall_since = 0.0
+            return pcm
+        if timeout is None or self.stall_timeout_s <= 0:
+            return b""
+        now = time.time()
+        if not self._stall_since:
+            self._stall_since = now
+            return b""
+        if now - self._stall_since >= self.stall_timeout_s:
+            self._stall_since = 0.0
+            self._reopen_input(engines)
+        return b""
+
+    def _reopen_input(self, engines: VoiceEngines) -> None:
+        """Close and reopen the capture stream after a stall (best-effort).
+
+        A stalled PortAudio/ALSA stream never delivers another frame, so the
+        blocking read would hang the whole front end. Reopening gives the
+        device a fresh stream; a hard failure is traced and backed off rather
+        than raised, so the loop keeps retrying instead of dying.
+        """
+        self._event("voice_stream_stalled", stall_s=round(self.stall_timeout_s, 3))
+        try:
+            engines.audio.close()
+        except Exception:
+            pass
+        try:
+            engines.audio.open_input(self.sample_rate, self.frame_ms, self.input_device)
+        except Exception as exc:
+            self._event("voice_stream_reopen_failed", message=str(exc)[:200])
+            time.sleep(min(2.0, self.stall_timeout_s or 1.0))
+            return
+        try:
+            engines.wake.reset()
+        except Exception:
+            pass
+        self._event("voice_stream_reopened")
 
     # ---- speaking ----
 

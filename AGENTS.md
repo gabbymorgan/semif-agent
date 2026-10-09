@@ -1149,8 +1149,22 @@ CLI, unit tests (24) + integration tests (2).
   so physical access is the authorization; a single configured `chat_id`
   identifies the session and `home_channel` defaults to it so background
   notifications (timers, repair offers) are spoken too. `run(on_inbound,
-  outbound)` starts an outbound-pump thread (`OutboundMessage` → `speak`) and
-  blocks in the mic loop. **Half-duplex**: capture frames are discarded while a
+  outbound)` starts an outbound-pump thread (`OutboundMessage` → `speak`) and an
+  **inbound-worker thread**, and blocks in the mic loop. Utterances are handed to
+  the worker, not run on the audio thread: the scheduler is synchronous and can
+  block on the decision engine, so a slow task must not stop the mic being read,
+  and the worker traces + speaks a task error instead of letting it kill the
+  front end. **Capture-stream watchdog**: `_read_frame` reads with
+  `audio.read_timeout_s`; when the stream stalls continuously for
+  `audio.stall_timeout_s` (a wedged PortAudio/ALSA callback that never delivers
+  another frame) it traces `voice_stream_stalled` and closes/reopens the input
+  (`voice_stream_reopened`), so the loop recovers instead of blocking forever.
+  **Endpointing tolerates the wake tail**: the wake detector can fire inside the
+  wake phrase and the cue beep follows, so the first speech captured is the
+  phrase's tail, not the command — until `vad.min_command_ms` of speech is in
+  hand the trailing-silence endpoint uses `vad.initial_silence_ms`, so a natural
+  pause before the command does not end the capture (then `vad.silence_ms`).
+  **Half-duplex**: capture frames are discarded while a
   reply is speaking, so the agent never transcribes itself (no barge-in yet);
   after a reply a `follow_up_window_s` accepts the next utterance without the
   wake word, so answering a question is conversational. `max_speak_chars`
@@ -1180,7 +1194,10 @@ CLI, unit tests (24) + integration tests (2).
   ownership across an updated request so its completion still routes home. A
   `needs_input` pause sets `pending_owner` from the pending run's source; the
   same chat's next message goes straight to `Scheduler.answer` (no
-  queue/navigation). A *different* chat — **including a chat on another
+  queue/navigation). The answer-side entry points (`answer`, `answer_question`,
+  `resolve_repair`, `answer_approval`) are guarded like `submit_request`: an
+  `EngineUnavailable` is fatal-and-reported and any other error returns a reply,
+  so a resume/repair failure never propagates into a front end. A *different* chat — **including a chat on another
   platform** — during that pause is told to wait: the single-slot scheduler must
   not silently abandon the first chat's run, and one service fronts all
   adapters so the guard spans them. A background poll calls

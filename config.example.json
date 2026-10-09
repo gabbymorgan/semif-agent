@@ -217,7 +217,7 @@
       "text_batch_delay": 0.8
     },
     "voice": {
-      "_comment": "Voice command adapter: a local microphone front end with wake word + speech-to-text + text-to-speech. Requires the optional voice stack (requirements/voice.txt; sounddevice + openwakeword + faster-whisper + piper-tts + onnxruntime; the system needs libportaudio2). Lazy-imported; the gateway refuses to start with an install hint. Runs best in the user's audio session (foreground `gateway --platform voice`), not a headless systemd user service. Audio is 16 kHz mono int16; capture/playback run at the device's native rate and are resampled to/from 16 kHz (capture_sample_rate/output_sample_rate override it; 0 = the device default). wake.model is an openWakeWord model name or path (official models download into the venv and resolve by name; a pinned community model such as the default 'hey_computer' is fetched into model_dir, .runtime/voice/wake); stt.model is a faster-whisper size/path (cached under .runtime/hf); tts.voice is a Piper voice id or path (bootstrap downloads it under .runtime/voice/tts). After each reply the next utterance is accepted without the wake word for follow_up_window_s. After the wake word, listen_timeout_s is how long to wait for the command to start before giving up, so a pause before speaking does not truncate it. result_only speaks just the skill's result line (dropping queue/urgency bookkeeping and the `<skill>: ok —` wrapper) instead of the full scheduler output; set false for the complete text. max_speak_chars truncates long replies before speaking. chat_id identifies the single local session; home_channel defaults to it so timers/repair offers are spoken too.",
+      "_comment": "Voice command adapter: a local microphone front end with wake word + speech-to-text + text-to-speech. Requires the optional voice stack (requirements/voice.txt; sounddevice + openwakeword + faster-whisper + piper-tts + onnxruntime; the system needs libportaudio2). Lazy-imported; the gateway refuses to start with an install hint. Runs best in the user's audio session (foreground `gateway --platform voice`), not a headless systemd user service. Audio is 16 kHz mono int16; capture/playback run at the device's native rate and are resampled to/from 16 kHz (capture_sample_rate/output_sample_rate override it; 0 = the device default). wake.model is an openWakeWord model name or path (official models download into the venv and resolve by name; a pinned community model such as the default 'hey_computer' is fetched into model_dir, .runtime/voice/wake); stt.model is a faster-whisper size/path (cached under .runtime/hf); tts.voice is a Piper voice id or path (bootstrap downloads it under .runtime/voice/tts). After each reply the next utterance is accepted without the wake word for follow_up_window_s. After the wake word, listen_timeout_s is how long to wait for the command to start before giving up, so a pause before speaking does not truncate it. result_only speaks just the skill's result line (dropping queue/urgency bookkeeping and the `<skill>: ok —` wrapper) instead of the full scheduler output; set false for the complete text. max_speak_chars truncates long replies before speaking. chat_id identifies the single local session; home_channel defaults to it so timers/repair offers are spoken too. A stalled capture stream (the PortAudio callback stops delivering frames) is detected via audio.read_timeout_s and recovered by closing and reopening the input after audio.stall_timeout_s, so the front end no longer hangs silently. Utterances run on a worker thread (not the audio thread), so a slow or failing task neither stops the mic being read nor kills the front end.",
       "enabled": false,
       "chat_id": "voice",
       "display_name": "voice",
@@ -257,18 +257,24 @@
         "volume": 1.0
       },
       "audio": {
+        "_comment": "Capture-stream watchdog: read_timeout_s is how long a frame read waits before it counts as a stall; when the stream stalls continuously for stall_timeout_s (a wedged PortAudio/ALSA callback stops delivering frames) the input is closed and reopened so the voice front end recovers instead of hanging forever. 0 for either restores the old blocking read with no recovery.",
         "input_device": "",
         "output_device": "",
         "sample_rate": 16000,
         "frame_ms": 80,
         "capture_sample_rate": 0,
         "output_sample_rate": 0,
-        "dc_removal": true
+        "dc_removal": true,
+        "read_timeout_s": 1.0,
+        "stall_timeout_s": 5.0
       },
       "vad": {
+        "_comment": "Endpointing. silence_ms is the trailing-silence endpoint once a command is underway. The wake detector can fire inside the wake phrase (and the cue beep follows), so the first speech captured is the phrase's tail, not the command: until min_command_ms of speech is in hand the endpoint uses initial_silence_ms instead, so a natural pause before the command does not end the capture. min_speech_ms rejects a blip; max_utterance_s caps a runaway.",
         "silence_ms": 500,
         "min_speech_ms": 120,
         "max_utterance_s": 30,
+        "min_command_ms": 700,
+        "initial_silence_ms": 1500,
         "aggressiveness": 2,
         "energy_threshold": 200.0
       }
