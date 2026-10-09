@@ -612,6 +612,80 @@ def test_canned_response_runs_without_assessment(tmp_path):
     assert log.read() == []
 
 
+def test_assessment_state_carries_skill_action(tmp_path):
+    """The assessment decision must see what the skill was meant to do.
+
+    Regression: with only `skill: <label>` in the state, the decision model
+    misfired on a correctly-read result for an ambiguous phrasing, marked a
+    truthful read failed, and looped the retry ladder until a repair offer. The
+    skill's declared action now rides in both assessment states.
+    """
+    from semif_agent.skill import SkillRunner
+    from semif_agent.skills import ActionContext
+
+    engine = ScriptedEngine(
+        choices={"Did the skill achieve": "failure"}, default="success"
+    )
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+
+    def act(ctx, request):
+        return ActionResult(action_log="SimpleX message from pepper: hello", new_state="read")
+
+    skill = Skill(
+        name="next_message",
+        category="simplex",
+        description="Read the next unread SimpleX message.",
+        act=act,
+    )
+    runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+    runner.run(skill, Request("What's my next simplex message?"))
+
+    outcome_state = engine.calls[0].state
+    assert "skill action: Read the next unread SimpleX message." in outcome_state
+    assert "goal: What's my next simplex message?" in outcome_state
+    requeue_state = engine.calls[1].state
+    assert "skill action: Read the next unread SimpleX message." in requeue_state
+
+
+def test_requeue_state_flags_identical_repeat(tmp_path):
+    """A retry that would reproduce the identical result is flagged as a no-op
+    so the requeue decision can choose `complete` instead of looping."""
+    from semif_agent.skill import SkillRunner
+    from semif_agent.skills import ActionContext
+
+    engine = ScriptedEngine(
+        choices={"Did the skill achieve": "failure"}, default="success"
+    )
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    skill = Skill(
+        name="next_message",
+        category="simplex",
+        description="Read the next unread SimpleX message.",
+        act=lambda ctx, request: ActionResult(
+            action_log="SimpleX message from pepper: hello", new_state="read"
+        ),
+    )
+    runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+
+    # First attempt: no prior result, so no no-progress note.
+    runner.run(skill, Request("What's my next simplex message?"))
+    assert "identical result" not in engine.calls[1].state
+
+    # Same observed result as the previous attempt: flagged as a no-op retry.
+    engine.calls.clear()
+    repeat = Request("What's my next simplex message?")
+    repeat.meta["prev_result"] = "SimpleX message from pepper: hello"
+    runner.run(skill, repeat)
+    assert "identical result" in engine.calls[1].state
+
+    # A changed result is progress: not flagged.
+    engine.calls.clear()
+    progress = Request("What's my next simplex message?")
+    progress.meta["prev_result"] = "a different previous result"
+    runner.run(skill, progress)
+    assert "identical result" not in engine.calls[1].state
+
+
 
 def test_navigate_leaf_picks_among_existing_skills_only(tmp_path):
     """Two-stage leaf: create_skill is NOT an option in the leaf softmax. The
@@ -2027,3 +2101,25 @@ def test_exhausted_reentry_offers_repair(tmp_path):
     scheduler._finish_run(skill, request, outcome)
     assert not any(e["kind"] == "requeued" for e in scheduler.trace.read())
     assert any(e["kind"] == "repair_offered" for e in scheduler.trace.read())
+
+
+def test_requeue_remembers_previous_result(tmp_path):
+    """A requeued retry carries the observed result forward so the next
+    assessment can detect a guaranteed no-op repeat."""
+    scheduler = _scheduler(tmp_path)
+    _install_tracking_stub(scheduler)
+    skill = scheduler.tree["tracking"][0]
+    request = Request("track my package")
+    outcome = RunResult(
+        skill="tracking.check",
+        success=False,
+        summary="failed",
+        action_log="connection refused",
+        new_state="unchanged",
+        updated_request="track my package",
+    )
+    scheduler._finish_run(skill, request, outcome)
+    child = scheduler.queue.pop()
+    assert child is not None
+    assert child.meta["prev_result"] == "connection refused"
+    assert any(e["kind"] == "requeued" for e in scheduler.trace.read())

@@ -713,6 +713,10 @@ class Scheduler:
         requeued = False
         if outcome.updated_request and request.reentries < self.max_reentries:
             child = _requeue(request, outcome.updated_request)
+            # Remember what this attempt observed so the next assessment can
+            # tell a genuine retry (the result changed) from a guaranteed
+            # repeat against unchanged state.
+            child.meta["prev_result"] = outcome.action_log or outcome.new_state
             self.queue.push(child)
             self.trace.append("requeued", request.id, text=outcome.updated_request)
             if self.on_request_requeued is not None:

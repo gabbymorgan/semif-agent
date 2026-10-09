@@ -132,7 +132,9 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 summary is deterministic (no generation), built from
                 category.skill + ok/failed + action_log — the body writes only the
                 result, the runner adds the `category.name:` ref; the assess state carries
-                the resolved inputs (secrets redacted); a `DETERMINISTIC_CATEGORIES`
+                the skill's declared action, the goal, and the resolved inputs
+                (secrets redacted), and the requeue state flags a retry that would
+                reproduce the identical observed result as a no-op; a `DETERMINISTIC_CATEGORIES`
                 run (housekeeping) skips assessment/repair — it is an internal
                 mechanical action with a known result, not an external run;
                 a run paused for input is resumed by re-invoking act with the

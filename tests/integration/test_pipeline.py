@@ -728,3 +728,41 @@ def test_empty_result_is_assessed_as_success(tmp_path):
     assert "assess:requeue" not in phases, (
         "an empty discovery must not be retried or repaired"
     )
+
+
+def test_read_result_is_assessed_as_success(tmp_path):
+    """A correctly-read result is a successful run, not a failure.
+
+    The assessment must see the skill's declared action; with only the skill
+    label the real model marked a truthful read failed for ambiguous phrasings
+    (e.g. "What's my next simplex message?"), which then looped the retry ladder
+    and offered to repair a working skill. This exercises the real engine, since
+    only it produces the probabilities.
+    """
+    config = load_config()
+    require_real(config)
+    engine = SemIfEngine(build_engine_config(config))
+
+    def act(ctx, request):
+        return ActionResult(
+            action_log="SimpleX message from pepper: hello",
+            new_state="SimpleX message from pepper: hello",
+        )
+
+    skill = Skill(
+        name="next_message",
+        category="simplex",
+        description="Read the next unread SimpleX message.",
+        act=act,
+    )
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+    outcome = runner.run(skill, Request("What's my next simplex message?"))
+    print(f"[{outcome.success}] {outcome.summary}")
+
+    assert outcome.success is True, outcome.summary
+    phases = [row["extra"]["phase"] for row in log.read()]
+    assert "assess:outcome" in phases
+    assert "assess:requeue" not in phases, (
+        "a truthful read must not be retried or repaired"
+    )

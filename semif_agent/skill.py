@@ -295,15 +295,19 @@ class SkillRunner:
         then offered to `assess:requeue`, which picks complete/retry. On retry
         the original request text is re-dispatched (the scheduler bounds it by
         `max_reentries`). Both are real logged decision rows. The state carries
-        the resolved inputs so a wrong resolution is visible to the decision.
-        The engine is always real: EngineUnavailable propagates to the
-        scheduler, which marks the app fatal.
+        the skill's declared action, the goal, and the resolved inputs so the
+        decision sees what the skill was meant to do and how its inputs
+        resolved; the requeue state additionally flags a retry that would
+        reproduce the identical observed result as a no-op. The engine is always
+        real: EngineUnavailable propagates to the scheduler, which marks the app
+        fatal.
         """
         label = f"{skill.category}.{skill.name}"
         resolved = _resolved_inputs(skill, ctx.config)
         outcome = DecisionRequest(
             state=(
                 f"skill: {label}\n"
+                f"skill action: {skill.description}\n"
                 f"goal: {request.text}\n"
                 f"resolved inputs:\n{resolved}\n"
                 f"action log:\n{action.action_log}"
@@ -334,13 +338,28 @@ class SkillRunner:
         if success:
             return True, None
 
+        # A retry that would reproduce the identical observed result is a
+        # guaranteed no-op run (the request, config, and external state are
+        # unchanged), so the requeue decision is told before it can pick
+        # `retry` again — otherwise a deterministic failure loops through the
+        # reentry ladder and ends in a repair offer for a working skill.
+        observed = action.action_log or action.new_state
+        prev = request.meta.get("prev_result")
+        no_progress = ""
+        if prev is not None and prev == observed:
+            no_progress = (
+                "\nAttempts so far produced the identical result; retrying "
+                "would repeat the same run against unchanged state."
+            )
         requeue = DecisionRequest(
             state=(
                 f"skill: {label}\n"
+                f"skill action: {skill.description}\n"
                 f"goal: {request.text}\n"
                 f"resolved inputs:\n{resolved}\n"
                 f"action log:\n{action.action_log}\n"
                 "outcome: failed"
+                f"{no_progress}"
             ),
             question="Is the request complete, or should it run again?",
             options=[
