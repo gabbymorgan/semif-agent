@@ -873,10 +873,10 @@ class OutlookClient:
     # ---- To Do tasks ----
 
     def list_task_lists(self) -> list[dict]:
-        items = self._paged(
-            "/me/todo/lists",
-            {"$select": "id,displayName,isOwner,wellknownListName", "$top": 100},
-        )
+        # No $select: Graph's To Do endpoints reject OData $select for personal
+        # (consumer) Microsoft accounts with RequestBroker--ParseUri, while $top
+        # is accepted. Fetch the full shape and read the fields we need.
+        items = self._paged("/me/todo/lists", {"$top": 100})
         return [
             {
                 "id": item.get("id"),
@@ -905,14 +905,9 @@ class OutlookClient:
 
     def list_tasks(self, task_list="") -> list[dict]:
         list_id = self._resolve_task_list(task_list)
+        # No $select here either: see list_task_lists (consumer To Do quirk).
         items = self._paged(
-            f"/me/todo/lists/{urllib.parse.quote(list_id)}/tasks",
-            {
-                "$select": (
-                    "id,title,status,importance,dueDateTime,completedDateTime,body,createdDateTime"
-                ),
-                "$top": 100,
-            },
+            f"/me/todo/lists/{urllib.parse.quote(list_id)}/tasks", {"$top": 100}
         )
         return [_task(item, list_id) for item in items]
 
