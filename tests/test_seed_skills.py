@@ -40,6 +40,7 @@ def test_expected_seeds_exist():
     assert "time.set_timer" in ids
     assert "time.set_alarm" in ids
     assert "nextcloud.create_task" in ids
+    assert "calculator.calculate" in ids
 
 
 @pytest.mark.parametrize("seed", SEED_DIRS, ids=[seed_id(s) for s in SEED_DIRS])

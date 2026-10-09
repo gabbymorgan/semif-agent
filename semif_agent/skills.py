@@ -669,6 +669,11 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
         "Time and date utilities: telling the current time or date, setting "
         "countdown timers, and setting alarms."
     ),
+    "calculator": (
+        "Arithmetic: evaluating a numeric expression the user asks for — "
+        "addition, subtraction, multiplication, division, powers and exponents, "
+        "squares, cubes, square roots, cube roots, fractions, and percentages."
+    ),
     "housekeeping": (
         "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
         "cancelling the agent's own skills."

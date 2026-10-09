@@ -345,8 +345,9 @@ fine-tuning loop — it is not yet the fine-tune itself.
   of third-party systems, so generated bodies never speak native protocols.
 - **Seeds** — shipped real starter skills: `nextcloud.create_event` (the
   authoritative worked example), `nextcloud.next_event` (Nextcloud CalDAV),
-  `nextcloud.create_task` (Nextcloud task list), and
-  `simplex.next_message` / `simplex.send_message` / `simplex.connect_link`.
+  `nextcloud.create_task` (Nextcloud task list),
+  `simplex.next_message` / `simplex.send_message` / `simplex.connect_link`, and
+  `calculator.calculate` (two operands, one SemIf-chosen operator, spoken answer).
 - **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
 - **Stdlib-only core** — SemIf/llama.cpp are lazy imports, so the package stays
   importable and testable without the heavy engine installed.
@@ -890,6 +891,12 @@ committed seed never holds secrets.
   `simplex_default_contact`, plus the LLM bridge (`llm_bridge_url`,
   `llm_bridge_token`) to write the text when the request states none.
 - `simplex.connect_link` — show/create the forwarding bot's contact link.
+- `calculator.calculate` — evaluate a bounded arithmetic request (two operands,
+  one operator) and speak the answer in words; the operator is a SemIf choice
+  over addition, subtraction, multiplication, division, exponents, squares,
+  cubes, square roots, cube roots, fractions, and percentages, and SemIf picks
+  the operands when the request writes more numbers than the operation needs
+  (pure local compute, no config).
 
 ---
 

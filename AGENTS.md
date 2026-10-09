@@ -881,7 +881,13 @@ CLI, unit tests (24) + integration tests (2).
   `zoneinfo`), falling back to the host's own timezone when it is empty or
   unknown; `TimerService` formats due/fired times in that zone too. The nextcloud
   seeds derive "now" the same way, so a request time is parsed in the user's
-  zone rather than the host's;
+  zone rather than the host's; `calculator.calculate` is the local-arithmetic
+  seed (`compute` transport, empty contract): bounded to two operands and one
+  operator, the operator is a SemIf choice over addition/subtraction/
+  multiplication/division/exponents/squares/cubes/square roots/cube roots/
+  fractions/percentages, SemIf picks the operands when the request offers more
+  numbers than the operator consumes, and the answer is spelled out in words for
+  the ear (an inexact result is announced as "approximately ...");
   `tests/test_seed_skills.py` keeps them honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
