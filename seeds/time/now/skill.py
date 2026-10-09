@@ -9,8 +9,6 @@ the machine itself.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from semif_agent.skills import ActionResult
 from semif_agent.timers import local_now
 
@@ -19,18 +17,7 @@ INTEGRATION = {"service": "local_clock", "transport": "compute", "config_vars": 
 CONTRACT = {}
 
 
-def _offset_text(now: datetime) -> str:
-    offset = now.strftime("%z")
-    if not offset:
-        return ""
-    return f" UTC{offset[:3]}:{offset[3:]}"
-
-
 def act(ctx, request):
     now = local_now(ctx.config)
-    zone = now.tzname() or "local"
-    message = (
-        f"It is {now.strftime('%H:%M')} "
-        f"({now.strftime('%I:%M %p').lstrip('0')} {zone}{_offset_text(now)})."
-    )
+    message = f"It is {now.strftime('%I:%M %p').lstrip('0')}."
     return ActionResult(action_log=message, new_state=message)
