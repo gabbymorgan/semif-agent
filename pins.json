@@ -19,5 +19,13 @@
     "piper_train_ref": "efffbfb226bfb511ebbcf55d0cecd8b35a89743d",
     "base_checkpoint_url": "https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main/en/en_US/lessac/medium/epoch=2164-step=1355540.ckpt",
     "base_checkpoint_sha256": "ab7e5b8dab40f834b7cc58ae4ad7b7009c954b901e4ddbb784bbe11ce379a1cd"
+  },
+  "wake_word": {
+    "_comment": "openWakeWord-compatible wake-word model refs fetched by scripts/voice-models.py into .runtime/voice/wake (deployment-independent, code-owned like the other pins). openWakeWord ships no 'computer' model, so this community-trained ONNX (Apache-2.0, same mel/embedding feature models) is pinned by sha256. 'phrase' is the spoken wake phrase.",
+    "hey_computer": {
+      "url": "https://huggingface.co/Soulcreek2/speechkit-wakeword-models/resolve/main/hey_computer.onnx",
+      "sha256": "3acbd9ffff04beba2d16ebdfd0d4c734d65fecdd22446f25f4d0afa6e5d7606b",
+      "phrase": "Hey Computer"
+    }
   }
 }

@@ -667,18 +667,29 @@ python -m semif_agent.cli gateway --platform voice
   PortAudio has no volume control — use `alsamixer`/`amixer` (then
   `sudo alsactl store`) to unmute and set the mic/speaker levels.
 - **Models.** `gateway.voice.wake.model` is an openWakeWord model (default
-  `hey_mycroft`), `stt.model` a faster-whisper size (default `base.en`), and
+  `hey_computer`, spoken phrase "Hey Computer"), `stt.model` a faster-whisper
+  size (default `base.en`), and
   `tts.voice` a Piper voice (default `en_US-lessac-medium`). Bootstrap downloads
-  the openWakeWord models into the venv's package dir (under `.runtime/venv`)
-  and the Piper voice into `.runtime/voice/tts`; the faster-whisper model lands
-  in the `.runtime/hf` cache.
+  the official openWakeWord models into the venv's package dir (under
+  `.runtime/venv`) and the Piper voice into `.runtime/voice/tts`; the
+  faster-whisper model lands in the `.runtime/hf` cache. openWakeWord ships no
+  "computer" model, so the default is a **pinned community model**
+  (openWakeWord-compatible, sha256-checked in `pins.json`) that
+  `scripts/voice-models.py` fetches into `.runtime/voice/wake`, where the
+  detector resolves it via `wake.model_dir`. Set `wake.model` to an official
+  name (e.g. `alexa`) or a path to switch. Because the community model's scores
+  run lower than the official models, the seeded `wake.threshold` is `0.2` (the
+  official models score ~0.99 and use `0.5`).
 - **Behavior.** Half-duplex — capture is discarded while a reply is speaking, so
   the agent never transcribes itself (no barge-in yet). A short beep plays when
   the wake word fires (`gateway.voice.cue`), so you know you're being heard; set
   `cue.submit_frequency > 0` for a second beep once the utterance is
   transcribed. After a reply, the next
   utterance is accepted **without** the wake word for `follow_up_window_s`, so
-  answering a question is conversational. `max_speak_chars` truncates long
+  answering a question is conversational. After the wake word, capture waits
+  `listen_timeout_s` for the command to begin, so a pause before speaking
+  (e.g. while the cue beep plays) does not truncate it. `max_speak_chars`
+  truncates long
   replies before speaking. `result_only` (default true for voice) speaks only the
   skill's result line — scheduler bookkeeping is dropped and the
   `<skill>: ok —` wrapper is stripped — so the spoken output is the answer, not

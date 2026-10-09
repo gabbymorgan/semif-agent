@@ -543,7 +543,7 @@ def build_engines(cfg: dict, trace=None) -> VoiceEngines:
     audio_cfg = cfg.get("audio", {}) or {}
 
     wake_model = resolve_model_path(
-        str(wake_cfg.get("model", "hey_mycroft") or ""),
+        str(wake_cfg.get("model", "hey_computer") or ""),
         str(wake_cfg.get("model_dir", "") or ""),
         (".onnx", ".tflite"),
     )
@@ -555,7 +555,7 @@ def build_engines(cfg: dict, trace=None) -> VoiceEngines:
     return VoiceEngines(
         wake=OpenWakeWordDetector(
             wake_model,
-            threshold=float(wake_cfg.get("threshold", 0.5)),
+            threshold=float(wake_cfg.get("threshold", 0.2)),
             inference_framework=str(wake_cfg.get("inference_framework", "onnx")),
         ),
         vad=_build_vad(cfg),
@@ -601,7 +601,11 @@ class VoiceDaemon:
         self.config = cfg
         self.trace = trace
         self.name = name
-        self.wake_threshold = float((cfg.get("wake", {}) or {}).get("threshold", 0.5))
+        self.wake_threshold = float((cfg.get("wake", {}) or {}).get("threshold", 0.2))
+        #: After the wake word, how long to wait for the command's speech to
+        #: begin before giving up (a natural pause after "hey <word>" — e.g.
+        #: waiting for the cue beep — must not truncate the command).
+        self.listen_timeout_ms = int(float(cfg.get("listen_timeout_s", 3.0) or 0) * 1000)
         audio_cfg = cfg.get("audio", {}) or {}
         self.sample_rate = int(audio_cfg.get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
         self.frame_ms = int(audio_cfg.get("frame_ms", 80) or 80)
@@ -700,6 +704,7 @@ class VoiceDaemon:
             if self._speaking.is_set():
                 continue
             armed = time.time() < self._follow_until
+            wait_for_speech_ms = 0
             if not armed:
                 score = engines.wake.score(pcm)
                 if score < self.wake_threshold:
@@ -710,8 +715,12 @@ class VoiceDaemon:
                 except Exception:
                     pass
                 self._cue(self.cue_frequency, self.cue_duration_ms)
+                # Wait for the command to start rather than assuming it is
+                # glued to the wake word (the wake frame + a natural pause are
+                # discarded so the command is not truncated).
+                wait_for_speech_ms = self.listen_timeout_ms
             self._follow_until = 0.0
-            utterance = self._collect(engines, pcm)
+            utterance = self._collect(engines, pcm, wait_for_speech_ms=wait_for_speech_ms)
             if not utterance:
                 continue
             try:
@@ -728,15 +737,27 @@ class VoiceDaemon:
             if self._on_utterance is not None:
                 self._on_utterance(text)
 
-    def _collect(self, engines: VoiceEngines, first_frame: bytes) -> bytes:
-        """Accumulate frames from the wake word until trailing silence."""
-        frames = [first_frame]
-        speech_ms = self.frame_ms
+    def _collect(self, engines: VoiceEngines, first_frame: bytes, wait_for_speech_ms: int = 0) -> bytes:
+        """Accumulate frames from the wake word until trailing silence.
+
+        With `wait_for_speech_ms > 0`, `first_frame` (the wake-word frame) and
+        any leading silence are discarded and capture starts only once the
+        command's speech begins — so a natural pause after the wake word does
+        not truncate the command. Gives up after that many milliseconds with no
+        speech (traced `voice_no_command`).
+        """
+        frames: list[bytes] = []
+        speech_ms = 0
         silence_ms = 0
         started = time.time()
         #: Wall-clock of the most recent frame the VAD called speech — the
         #: "last word spoken" boundary the latency breakdown measures from.
         last_speech_ts = started
+        waiting = wait_for_speech_ms > 0
+        wait_started = started
+        if not waiting:
+            frames.append(first_frame)
+            speech_ms = self.frame_ms
         while not self._stop.is_set():
             if self._speaking.is_set():
                 break  # a reply started; stop capturing so we don't transcribe it
@@ -745,8 +766,16 @@ class VoiceDaemon:
             pcm = engines.audio.read()
             if pcm is None:
                 break
+            is_speech = engines.vad.is_speech(pcm, self.sample_rate)
+            if waiting:
+                if not is_speech:
+                    if (time.time() - wait_started) * 1000.0 >= wait_for_speech_ms:
+                        self._event("voice_no_command", waited_ms=wait_for_speech_ms)
+                        return b""
+                    continue
+                waiting = False
             frames.append(pcm)
-            if engines.vad.is_speech(pcm, self.sample_rate):
+            if is_speech:
                 speech_ms += self.frame_ms
                 silence_ms = 0
                 last_speech_ts = time.time()

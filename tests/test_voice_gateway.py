@@ -170,6 +170,33 @@ def test_min_speech_rejects_short_utterance():
     assert engines.stt.calls == []
 
 
+def test_command_after_pause_is_captured():
+    # A pause between the wake word and the command (e.g. waiting for the cue
+    # beep) must not truncate the command: capture waits for speech to begin.
+    daemon, engines = make_daemon(
+        [b"WAKE", b"SIL", b"SIL", b"SIL", b"command", b"SIL", b"SIL"]
+    )
+    heard = []
+    daemon.run(heard.append)
+    assert heard == ["hello"]
+    assert engines.stt.calls == [b"command" + b"SIL" * 2]
+
+
+def test_wake_without_command_times_out(monkeypatch):
+    # Wake fires but the user never speaks a command: no utterance is produced
+    # (traced `voice_no_command`) instead of capturing the wake frame as one.
+    import semif_agent.voice_transport as vt
+
+    ticks = iter([0.0, 0.0, 3000.0])
+    monkeypatch.setattr(vt.time, "time", lambda: next(ticks))
+    daemon, engines = make_daemon([b"SIL", b"SIL"])
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    utterance = daemon._collect(engines, b"WAKE", wait_for_speech_ms=3000)
+    assert utterance == b""
+    assert "voice_no_command" in events
+
+
 # ---- half-duplex / speaking ------------------------------------------------
 
 
@@ -313,3 +340,66 @@ def test_resample_pcm16():
     assert len(_resample_pcm16(pcm, 44100, 16000)) // 2 == 160
     assert _resample_pcm16(pcm, 44100, 44100) == pcm
     assert _resample_pcm16(b"", 44100, 16000) == b""
+
+
+# ---- wake-word model pinning (community model, no network) ------------------
+
+
+def _load_voice_models():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "voice-models.py"
+    spec = importlib.util.spec_from_file_location("voice_models_script", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_wake_word_pin_resolves_from_model_dir(tmp_path):
+    import hashlib
+
+    from semif_agent.voice_transport import resolve_model_path
+
+    module = _load_voice_models()
+    pins = module.pinned_wake_models()
+    assert "hey_computer" in pins
+    ref = pins["hey_computer"]
+    assert ref["url"].endswith("/hey_computer.onnx")
+    assert len(ref["sha256"]) == len(hashlib.sha256(b"").hexdigest())
+
+    stub = tmp_path / "hey_computer.onnx"
+    stub.write_bytes(b"stub")
+    assert resolve_model_path("hey_computer", str(tmp_path), (".onnx", ".tflite")) == str(stub)
+
+
+def test_download_wake_file_verifies_and_skips_existing(tmp_path):
+    import hashlib
+
+    module = _load_voice_models()
+    data = b"fake-openwakeword-model"
+    source = tmp_path / "src.onnx"
+    source.write_bytes(data)
+    ref = {"url": source.as_uri(), "sha256": hashlib.sha256(data).hexdigest()}
+
+    wake_dir = tmp_path / "wake"
+    module.download_wake_file("hey_computer", ref, wake_dir)
+    dest = wake_dir / "hey_computer.onnx"
+    assert dest.read_bytes() == data
+    # Idempotent: a present, matching file is not re-fetched.
+    module.download_wake_file("hey_computer", ref, wake_dir)
+    assert dest.read_bytes() == data
+
+
+def test_download_wake_file_rejects_sha_mismatch(tmp_path):
+    import pytest
+
+    module = _load_voice_models()
+    source = tmp_path / "src.onnx"
+    source.write_bytes(b"tampered")
+    ref = {"url": source.as_uri(), "sha256": "0" * 64}
+
+    wake_dir = tmp_path / "wake"
+    with pytest.raises(SystemExit):
+        module.download_wake_file("hey_computer", ref, wake_dir)
+    assert not (wake_dir / "hey_computer.onnx").exists()
