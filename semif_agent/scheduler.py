@@ -54,6 +54,7 @@ from .skills import (
     SkillDraft,
     SkillStore,
     apply_tombstones,
+    bound_output,
     build_housekeeping_skills,
     build_skills,
     build_tree,
@@ -312,6 +313,13 @@ class Scheduler:
         #: is truncated to this many characters at a word boundary.
         chain_cfg = config.get("chain", {}) or {}
         self.result_chars = int(chain_cfg.get("result_chars", 300))
+        #: Seconds a completed run stays recallable for a follow-up request in
+        #: the same chat/source. A follow-up within the window gets the prior
+        #: run's ledger as context so it can refer to it ("send it to Sam"); 0
+        #: disables recall entirely. Measured from the prior run's completion.
+        self.query_recall_window = max(
+            0.0, float(config.get("query_recall_window", 30) or 0)
+        )
         #: The `assess:outcome` thresholds (precedence failed > done > continue).
         assess_cfg = config.get("assess", {}) or {}
         self.done_tau = float(assess_cfg.get("done_tau", 0.5))
@@ -397,6 +405,11 @@ class Scheduler:
         self._repair_counts: dict[str, int] = {}
         self._approval_notify = threading.Condition(self._lock)
         self.approvals: list[PendingApproval] = []
+        #: Per-origin-source memory of the last completed run's ledger, keyed by
+        #: `Request.origin_source`: {"ledger": [...], "completed_at": float}. A
+        #: follow-up within `query_recall_window` recalls it. Only real skills
+        #: are recorded (not the canned `response` tree or housekeeping).
+        self._recall: dict[str, dict] = {}
 
     # ---- fatal handling ----
 
@@ -438,7 +451,9 @@ class Scheduler:
 
     def _submit_locked(self, text: str, source: str = "typed") -> SchedulerReply:
         request = Request(text, source=source)
+        request.origin_source = source
         self.trace.append("submit", request.id, text=text, source=source)
+        self._attach_recall(request)
 
         if self.current is None:
             self.current = Process(request=request, skill="(scheduling)")
@@ -467,6 +482,73 @@ class Scheduler:
             return SchedulerReply("rejected", "queue is full", request.id)
         self.trace.append("queued", request.id)
         return SchedulerReply("queued", "queued", request.id)
+
+    # ---- previous-run recall ----
+
+    def _attach_recall(self, request: Request) -> None:
+        """Give a fresh request the last completed run's ledger if it is recent.
+
+        Recall is per origin source and bounded by `query_recall_window`; a
+        request that arrives in time gets the prior ledger as context so it can
+        refer to it. It is attached as `prior_ledger` (never `run_ledger`): the
+        follow-up is not an in-flight continuation, so the actionability guard
+        must still run and the monotonic-progress guard must not see it.
+        """
+        if self.query_recall_window <= 0:
+            return
+        source = request.origin_source or request.source
+        memory = self._recall.get(source)
+        if not memory:
+            return
+        age = time.time() - float(memory.get("completed_at", 0.0))
+        if age > self.query_recall_window:
+            self._recall.pop(source, None)
+            return
+        request.prior_ledger = [dict(e) for e in memory.get("ledger", [])]
+        request.prior_at = float(memory.get("completed_at", 0.0))
+        self.trace.append(
+            "recall_used",
+            request.id,
+            source=source,
+            age=round(age, 1),
+            steps=len(request.prior_ledger),
+        )
+
+    def _record_recall(self, skill: Skill, request: Request, outcome) -> None:
+        """Remember a completed run's ledger for a later follow-up.
+
+        Keys on the origin source and stamps completion time. Real skills only:
+        the canned `response` tree and the deterministic `housekeeping` meta
+        skills are not recorded (a greeting should not occupy the recall slot).
+        The final step is synthesized as a ledger entry because a single-step
+        run's own `run_ledger` is empty — without it there would be nothing to
+        recall.
+        """
+        if self.query_recall_window <= 0:
+            return
+        if (
+            skill.category in CANNED_CATEGORIES
+            or skill.category in DETERMINISTIC_CATEGORIES
+        ):
+            return
+        outcome_text = (
+            outcome.action_log
+            or outcome.new_state
+            or outcome.summary
+            or outcome.error
+            or ""
+        )
+        entry = {
+            "query": request.text,
+            "skill": f"{skill.category}.{skill.name}",
+            "outcome": bound_output(outcome_text, self.result_chars),
+        }
+        ledger = [dict(e) for e in request.run_ledger] + [entry]
+        source = request.origin_source or request.source
+        self._recall[source] = {
+            "ledger": ledger,
+            "completed_at": time.time(),
+        }
 
     def busy(self, text: str, skill: str = "(driving)") -> None:
         """Set a fake in-progress process so the queue path is exercised."""
@@ -806,6 +888,7 @@ class Scheduler:
                 "error", request.id, skill=skill.name, message=outcome.error
             )
             self._propose_repair(skill, request, outcome)
+            self._record_recall(skill, request, outcome)
             return DispatchResult(kind="error", summary=f"skill error: {outcome.error}")
         if outcome.needs_input:
             self.pending = PendingRun(
@@ -878,6 +961,7 @@ class Scheduler:
                 skill=entry["skill"],
                 reason="repeat" if repeat else "budget",
             )
+            self._record_recall(skill, request, outcome)
             return DispatchResult(
                 kind="ran",
                 summary=outcome.summary,
@@ -888,6 +972,7 @@ class Scheduler:
             )
         if verdict == "failed":
             self._propose_repair(skill, request, outcome)
+        self._record_recall(skill, request, outcome)
         return DispatchResult(
             kind="ran",
             summary=outcome.summary,
@@ -2454,9 +2539,14 @@ def _continue(request: Request, entry: dict) -> Request:
     config answers must not leak forward).
     """
     updated = Request(request.text, source="continue")
+    updated.origin_source = request.origin_source or request.source
     updated.reentries = request.reentries + 1
     updated.meta["parent_run"] = request.id
     updated.run_ledger = [dict(e) for e in request.run_ledger] + [dict(entry)]
+    # Carry any recalled previous-request context forward so the whole new chain
+    # keeps the reference the follow-up was resolved against.
+    updated.prior_ledger = [dict(e) for e in request.prior_ledger]
+    updated.prior_at = request.prior_at
     return updated
 
 

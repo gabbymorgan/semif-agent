@@ -39,6 +39,7 @@ from .skills import (
     SkillStore,
     bound_output,
     render_ledger,
+    render_recall,
     resolve_skill_config,
     unresolved_variables,
 )
@@ -345,6 +346,9 @@ class SkillRunner:
             f"resolved inputs:\n{resolved}\n"
             f"action log:\n{observed}"
         )
+        recall = render_recall(request)
+        if recall:
+            state += f"\n{recall}"
         ledger = render_ledger(request.run_ledger)
         if ledger:
             state += f"\nsteps already taken:\n{ledger}"

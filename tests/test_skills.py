@@ -49,8 +49,10 @@ from semif_agent.skills import (
     confirm_skill_fit,
     category_descriptions,
     CATEGORY_DESCRIPTIONS,
+    compose_state,
     generate_category,
     generate_skill,
+    last_result,
     merge_registry,
     merge_seed_store,
     merge_skill_store,
@@ -130,7 +132,8 @@ def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
 
-def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosity=None):
+def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosity=None,
+               recall_window=None):
     """A scheduler driven by the deterministic scripted engine (conftest) so
     scheduling/authoring mechanics are testable without a GGUF. Assessment is a
     SemIf decision now, so a run needs the engine to answer `assess:*`."""
@@ -142,6 +145,8 @@ def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosit
     }
     if verbosity is not None:
         config["verbosity"] = verbosity
+    if recall_window is not None:
+        config["query_recall_window"] = recall_window
     return Scheduler(
         engine=ScriptedEngine(choices=choices, default=default),
         llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
@@ -2197,6 +2202,195 @@ def test_continue_routes_next_step_carries_ledger(tmp_path):
         {"query": "track my package", "skill": "tracking.check", "outcome": "tracking opened"}
     ]
     assert any(e["kind"] == "continued" for e in scheduler.trace.read())
+
+
+def _completed(skill_name="calculator.calculate", log="255 * 12 = 3060"):
+    category, name = skill_name.split(".", 1)
+    skill = Skill(
+        name=name,
+        category=category,
+        description="Do arithmetic.",
+        act=lambda ctx, request: ActionResult(action_log=log, new_state=log),
+    )
+    outcome = RunResult(
+        skill=skill_name,
+        success=True,
+        summary=f"{skill_name}: ok — {log}",
+        action_log=log,
+        new_state=log,
+        outcome="done",
+    )
+    return skill, outcome
+
+
+def test_recall_records_and_attaches_recent_run(tmp_path):
+    """A completed real run is remembered per source; a follow-up within the
+    window gets its ledger as `prior_ledger`, rendered as a 'previous request'
+    block and exposed to bodies via last_result."""
+    scheduler = _scheduler(tmp_path)
+    assert scheduler.query_recall_window == 30
+    skill, outcome = _completed()
+    first = Request("what is 255*12?", source="typed")
+    first.origin_source = "typed"
+    scheduler._record_recall(skill, first, outcome)
+
+    follow = Request("send that to Sam", source="typed")
+    follow.origin_source = "typed"
+    scheduler._attach_recall(follow)
+
+    assert follow.prior_ledger == [
+        {
+            "query": "what is 255*12?",
+            "skill": "calculator.calculate",
+            "outcome": "255 * 12 = 3060",
+        }
+    ]
+    assert follow.prior_at > 0
+    assert last_result(follow) == "255 * 12 = 3060"
+    state = compose_state(follow)
+    assert "previous request" in state
+    assert "calculator.calculate -> 255 * 12 = 3060" in state
+    assert any(e["kind"] == "recall_used" for e in scheduler.trace.read())
+
+
+def test_recall_window_zero_disables(tmp_path):
+    """`query_recall_window: 0` remembers nothing and recalls nothing."""
+    scheduler = _scheduler(tmp_path, recall_window=0)
+    skill, outcome = _completed()
+    first = Request("what is 255*12?", source="typed")
+    first.origin_source = "typed"
+    scheduler._record_recall(skill, first, outcome)
+    assert scheduler._recall == {}
+
+    follow = Request("send that to Sam", source="typed")
+    follow.origin_source = "typed"
+    scheduler._attach_recall(follow)
+    assert follow.prior_ledger == []
+    assert not any(e["kind"] == "recall_used" for e in scheduler.trace.read())
+
+
+def test_recall_expired_is_not_attached_and_pruned(tmp_path):
+    """A run older than the window is not recalled, and its stale memory is
+    dropped."""
+    scheduler = _scheduler(tmp_path, recall_window=30)
+    skill, outcome = _completed()
+    first = Request("what is 255*12?", source="typed")
+    first.origin_source = "typed"
+    scheduler._record_recall(skill, first, outcome)
+    scheduler._recall["typed"]["completed_at"] = time.time() - 100
+
+    follow = Request("send that to Sam", source="typed")
+    follow.origin_source = "typed"
+    scheduler._attach_recall(follow)
+    assert follow.prior_ledger == []
+    assert "typed" not in scheduler._recall
+
+
+def test_recall_is_per_source(tmp_path):
+    """Two chats do not recall each other's runs."""
+    scheduler = _scheduler(tmp_path)
+    skill, outcome = _completed()
+    first = Request("what is 255*12?", source="gateway:a")
+    first.origin_source = "gateway:a"
+    scheduler._record_recall(skill, first, outcome)
+
+    other = Request("send that to Sam", source="gateway:b")
+    other.origin_source = "gateway:b"
+    scheduler._attach_recall(other)
+    assert other.prior_ledger == []
+
+    same = Request("send that to Sam", source="gateway:a")
+    same.origin_source = "gateway:a"
+    scheduler._attach_recall(same)
+    assert same.prior_ledger and same.prior_ledger[-1]["outcome"] == "255 * 12 = 3060"
+
+
+def test_recall_excludes_canned_and_housekeeping(tmp_path):
+    """The canned `response` tree and the housekeeping meta skills are never
+    remembered (a greeting must not occupy the recall slot)."""
+    scheduler = _scheduler(tmp_path)
+    for category in ("response", "housekeeping"):
+        skill = Skill(
+            name="x",
+            category=category,
+            description="d",
+            act=lambda ctx, request: ActionResult("line", "line"),
+        )
+        outcome = RunResult(
+            skill=f"{category}.x", success=True, summary="ok",
+            action_log="line", new_state="line", outcome="done",
+        )
+        req = Request("hi", source="typed")
+        req.origin_source = "typed"
+        scheduler._record_recall(skill, req, outcome)
+    assert scheduler._recall == {}
+
+
+def test_finish_run_records_terminal_but_not_intermediate(tmp_path):
+    """`_finish_run` records a terminal run, records a failure, but does not
+    record an intermediate `continue` (the child records the full ledger)."""
+    scheduler = _scheduler(tmp_path)
+    skill, outcome = _completed(skill_name="tracking.check", log="opened")
+    done = Request("track my package", source="typed")
+    done.origin_source = "typed"
+    scheduler._finish_run(skill, done, outcome)
+    assert scheduler._recall["typed"]["ledger"][-1]["skill"] == "tracking.check"
+
+    # An intermediate continue is re-dispatched, not recorded as terminal.
+    scheduler._recall.clear()
+    cont = Request("track my package", source="typed")
+    cont.origin_source = "typed"
+    cont_outcome = RunResult(
+        skill="tracking.check", success=True, summary="ok",
+        action_log="opened", new_state="opened", outcome="continue",
+    )
+    result = scheduler._finish_run(skill, cont, cont_outcome)
+    assert result.intermediate is True
+    assert scheduler._recall == {}
+
+    # A failure is remembered too (a follow-up can refer to what failed).
+    scheduler._recall.clear()
+    failed = Request(
+        "check my inbox", source="typed"
+    )
+    failed.origin_source = "typed"
+    err = RunResult(
+        skill="mail.check", success=False, summary="",
+        action_log="", new_state="", error="bridge refused", outcome="failed",
+    )
+    scheduler._finish_run(
+        Skill(name="check", category="mail", description="d",
+              act=lambda ctx, r: ActionResult("", "")),
+        failed,
+        err,
+    )
+    assert scheduler._recall["typed"]["ledger"][-1]["outcome"] == "bridge refused"
+
+
+def test_continue_carries_recall_context(tmp_path):
+    """A chained continuation keeps the recalled previous-request context and
+    the origin source."""
+    scheduler = _scheduler(tmp_path)
+    request = Request("send that to Sam", source="typed")
+    request.origin_source = "gateway:a"
+    request.prior_ledger = [
+        {"query": "what is 255*12?", "skill": "calculator.calculate", "outcome": "3060"}
+    ]
+    request.prior_at = 123.0
+    scheduler._finish_run(
+        Skill(name="send_message", category="simplex", description="d",
+              act=lambda ctx, r: ActionResult("sent", "sent")),
+        request,
+        RunResult(
+            skill="simplex.send_message", success=True, summary="ok",
+            action_log="sent", new_state="sent", outcome="continue",
+        ),
+    )
+    child = scheduler.queue.pop()
+    assert child is not None
+    assert child.origin_source == "gateway:a"
+    assert child.prior_ledger == request.prior_ledger
+    assert child.prior_at == 123.0
 
 
 def test_capped_continue_halts_chain_not_repair(tmp_path):

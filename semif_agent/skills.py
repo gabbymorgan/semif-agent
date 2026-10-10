@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -607,18 +608,38 @@ def render_ledger(entries: list[dict]) -> str:
 
 
 def last_result(request: Request) -> str:
-    """The most recent chained step's result, or "" on a first-step request.
+    """The most recent result this run can build on.
 
     A body that runs as a later step of a chain reads this to use what the
     previous step produced (e.g. a computed value to send) instead of
     recomputing or fabricating it. The value is the prior step's bounded outcome
     (its ``action_log`` or ``new_state``) — the same text the run ledger carries
     and renders into the routing/assessment state.
+
+    When the current chain has no steps yet, it falls back to the recalled
+    previous request's last outcome (a follow-up within ``query_recall_window``),
+    so "send it to Sam" can reuse the answer the agent just gave.
     """
     ledger = getattr(request, "run_ledger", None) or []
     if not ledger:
-        return ""
+        ledger = getattr(request, "prior_ledger", None) or []
+        return str(ledger[-1].get("outcome") or "") if ledger else ""
     return str(ledger[-1].get("outcome") or "")
+
+
+def render_recall(request: Request) -> str:
+    """Render the recalled previous request's ledger as a compact context block.
+
+    Distinct from `render_ledger`/`run_ledger`: recall is background context for
+    resolving a reference in the current request, not a step of the current
+    chain. Returns "" when there is nothing to recall.
+    """
+    entries = getattr(request, "prior_ledger", None) or []
+    if not entries:
+        return ""
+    prior_at = getattr(request, "prior_at", 0.0) or 0.0
+    age = f" ({int(max(0.0, time.time() - prior_at))}s ago)" if prior_at else ""
+    return f"previous request{age}:\n{render_ledger(entries)}"
 
 
 def compose_state(request: Request, additional_context: str | None = None) -> str:
@@ -626,6 +647,9 @@ def compose_state(request: Request, additional_context: str | None = None) -> st
     if additional_context:
         parts.append(f"({additional_context})")
     state = " ".join(parts)
+    recall = render_recall(request)
+    if recall:
+        state = f"{state}\n{recall}"
     ledger = render_ledger(request.run_ledger)
     if ledger:
         state = f"{state}\nsteps already taken:\n{ledger}"
@@ -1572,6 +1596,9 @@ def confirm_skill_fit(
         f"Requested action: {request.text}\n"
         f"Action of the existing skill: {skill.description}"
     )
+    recall = render_recall(request)
+    if recall:
+        state += f"\n{recall}"
     ledger = render_ledger(request.run_ledger)
     if ledger:
         state += f"\nsteps already taken:\n{ledger}"

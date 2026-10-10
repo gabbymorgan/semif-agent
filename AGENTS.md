@@ -91,6 +91,13 @@ scheduler.py    no up-front gate: every input is dispatched
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user,
                 while a `continue` step is re-dispatched into next-step routing
                 with a bounded run ledger (the chained multi-step path);
+                a completed real-skill run's ledger is also held in memory per
+                origin source for `query_recall_window` seconds (0 disables), so a
+                follow-up request in the same chat arrives with it as
+                `prior_ledger` (a `previous request` context block) and can refer
+                to the prior result — kept separate from `run_ledger` so a
+                recall never skips the actionability guard or feeds the
+                monotonic-progress guard;
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
                 operate on the tree via `ctx.admin`; new-skill creation is gated by
                 a tri-state mode (`new_skill_creation`: allow/deny/ask) with a
@@ -130,7 +137,12 @@ skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 parses a free-form request for a category.skill or bare name;
                 parse_meta_command recognizes explicit housekeeping commands and
                 the meta skills resolve or ask for their target as an input
-                variable
+                variable; compose_state / render_ledger / render_recall render
+                the steps already taken (and, for a follow-up within
+                `query_recall_window`, the recalled `prior_ledger` as a `previous
+                request` block) into the routing/assessment state, and
+                last_result returns the last run-ledger (or recalled) outcome a
+                chained body can reuse instead of recomputing
 skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 act(ctx, request) phase that returns ActionResult (its own
                 SemIf sub-decisions ride on ActionResult.decisions and are

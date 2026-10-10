@@ -66,6 +66,10 @@ class Request:
     text: str
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     source: str = "typed"
+    #: The originating source/chat, threaded through a continued chain (whose
+    #: own `source` becomes "continue"). Recall memory is keyed by this so a
+    #: follow-up in one chat never recalls another chat's run.
+    origin_source: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
     received_at: float = field(default_factory=time.time)
     priority: float = 0.5
@@ -79,16 +83,30 @@ class Request:
     #: request. Bounded by construction (each outcome is bounded to the
     #: speakable budget, and the chain is capped).
     run_ledger: list[dict[str, Any]] = field(default_factory=list)
+    #: The previous *completed* run's ledger, recalled when this request arrived
+    #: within `query_recall_window` seconds of it (per origin source). Rendered
+    #: as a "previous request" context block and exposed to bodies via
+    #: `last_result`, so a follow-up can refer to the prior result ("send it to
+    #: Sam"). Deliberately separate from `run_ledger`: recall is not an in-flight
+    #: continuation, so it must not skip the actionability guard nor feed the
+    #: monotonic-progress guard. Empty when there is nothing to recall.
+    prior_ledger: list[dict[str, Any]] = field(default_factory=list)
+    #: Completion time of the recalled run (for the "Ns ago" label); 0.0 when
+    #: there is no recall.
+    prior_at: float = 0.0
 
     def copy_for_requeue(self) -> "Request":
         return Request(
             text=self.text,
             id=self.id,
             source=self.source,
+            origin_source=self.origin_source,
             meta=dict(self.meta),
             received_at=self.received_at,
             priority=self.priority,
             reentries=self.reentries + 1,
             resume=dict(self.resume),
             run_ledger=[dict(entry) for entry in self.run_ledger],
+            prior_ledger=[dict(entry) for entry in self.prior_ledger],
+            prior_at=self.prior_at,
         )

@@ -2,6 +2,8 @@
   "_comment": "Per-machine config. config.json is gitignored. bootstrap.sh seeds config.json from this file only when config.json does not exist, and NOTHING writes config.json afterwards — only a human edits it. Pinned engine/tokenizer/GGUF/simplex-chat refs live in the committed pins.json, not here. Every machine keeps its own config.json. Top-level `timezone` is the IANA zone (e.g. America/Chicago) the agent reports local time in; empty means the host's local timezone.",
   "tau": 0.6,
   "max_reentries": 3,
+  "query_recall_window": 30,
+  "_query_recall_window_comment": "Seconds a completed run stays recallable to a follow-up request in the same chat/source. A follow-up within the window is given the previous run's ledger as 'previous request' context (and bodies can reuse its result via last_result), so a reference like \"send it to Sam\" resolves against what the agent just did. 0 disables recall entirely. Measured from the previous run's completion; only the last completed real skill run per source is remembered (canned responses and housekeeping meta skills are never recalled).",
   "new_skill_creation": "allow",
   "_new_skill_creation_comment": "Global new-skill creation mode: \"allow\" (create without asking), \"deny\" (never author new skills/categories), or \"ask\" (author only after the human approves the proposal). A category can override this in data/skills/<category>/config.json with its own \"new_skill_creation\" value; the built-in housekeeping and response categories are always denied in code.",
   "verbosity": "result",
