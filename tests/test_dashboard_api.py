@@ -155,7 +155,7 @@ def test_restart_without_codegen_returns_error_json(tmp_path):
         server.close()
 
 
-def test_tree_endpoint_carries_origin_and_locks(tmp_path):
+def test_tree_endpoint_carries_origin_and_modes(tmp_path):
     scheduler = build_scheduler(tmp_path)
     _generated_skill(scheduler, "tracking", "track_live")
     server = Server(scheduler)
@@ -168,9 +168,9 @@ def test_tree_endpoint_carries_origin_and_locks(tmp_path):
             s["origin"] == "builtin"
             for s in payload["categories"]["housekeeping"]
         )
-        assert payload["locks"]["housekeeping"] is True
-        assert payload["locks"]["response"] is True
-        assert payload["locks"]["tracking"] is False
+        assert payload["new_skill_modes"]["housekeeping"] == "deny"
+        assert payload["new_skill_modes"]["response"] == "deny"
+        assert payload["new_skill_modes"]["tracking"] == "allow"
     finally:
         server.close()
 
@@ -239,25 +239,25 @@ def test_regen_endpoint_without_codegen_errors(tmp_path):
         server.close()
 
 
-def test_lock_endpoint_roundtrip(tmp_path):
+def test_new_skill_mode_endpoint_roundtrip(tmp_path):
     scheduler = build_scheduler(tmp_path)
     scheduler.tree["tracking"] = []
     server = Server(scheduler)
     try:
-        status, payload = server.get("/api/locks")
+        status, payload = server.get("/api/new-skill-modes")
         assert status == 200
-        assert payload["locks"]["tracking"] is False
+        assert payload["modes"]["tracking"] == "allow"
 
         status, payload = server.post(
-            "/api/lock", {"category": "tracking", "locked": True}
+            "/api/new-skill-mode", {"category": "tracking", "mode": "ask"}
         )
         assert payload["status"] == "ok"
 
         status, payload = server.get("/api/tree")
-        assert payload["locks"]["tracking"] is True
+        assert payload["new_skill_modes"]["tracking"] == "ask"
 
         status, payload = server.post(
-            "/api/lock", {"category": "housekeeping", "locked": False}
+            "/api/new-skill-mode", {"category": "housekeeping", "mode": "allow"}
         )
         assert payload["status"] == "error"
     finally:

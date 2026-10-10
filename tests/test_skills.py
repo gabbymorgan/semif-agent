@@ -1303,9 +1303,9 @@ def _answer_approval_when_posted(scheduler, approved, timeout=5.0):
     return False
 
 
-def test_creation_approval_off_proceeds(tmp_path):
-    """The default (no `creation_approval`) leaves creation unchanged: the gate
-    returns immediately and posts nothing."""
+def test_creation_mode_allow_proceeds(tmp_path):
+    """The default (`new_skill_creation` unset -> allow) leaves creation
+    unchanged: the gate returns immediately and posts nothing."""
     scheduler = _scheduler(tmp_path)
     job = DraftAuthor(
         request=Request("book a trip"), category=None, kind="category"
@@ -1314,9 +1314,70 @@ def test_creation_approval_off_proceeds(tmp_path):
     assert scheduler.pending_approvals() == []
 
 
+def test_creation_approval_legacy_boolean_fallback(tmp_path):
+    """The retired `creation_approval` boolean still maps to ask/allow when the
+    new `new_skill_creation` key is absent."""
+    def build(config):
+        return Scheduler(
+            engine=ScriptedEngine(default="success"),
+            llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+            log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+            config={
+                "skills": {},
+                "category_registry": str(tmp_path / "categories.json"),
+                "skill_bodies": str(tmp_path / "skills"),
+                "skill_seeds": str(tmp_path / "seeds"),
+                **config,
+            },
+            trace=TraceLog(str(tmp_path / "runs.jsonl")),
+        )
+
+    assert build({"creation_approval": True}).new_skill_mode == "ask"
+    assert build({"creation_approval": False}).new_skill_mode == "allow"
+    # The new key wins when both are present.
+    assert build(
+        {"creation_approval": True, "new_skill_creation": "deny"}
+    ).new_skill_mode == "deny"
+
+
+def test_creation_mode_deny_aborts_without_prompting(tmp_path):
+    """Global `deny` blocks authoring outright; no approval is posted."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.new_skill_mode = "deny"
+    scheduler.defer_questions = True
+    job = DraftAuthor(
+        request=Request("book a trip"), category=None, kind="category"
+    )
+    assert scheduler._request_approval(job, "category", "travel", "Trips.") is False
+    assert scheduler.pending_approvals() == []
+    assert any(
+        e["kind"] == "category_create_blocked" for e in scheduler.trace.read()
+    )
+
+
+def test_creation_mode_per_category_override(tmp_path):
+    """A category override wins over the global mode."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["travel"] = []
+    scheduler.new_skill_mode = "ask"
+    scheduler.set_category_mode("travel", "allow")
+    job = DraftAuthor(
+        request=Request("book a trip"), category="travel", kind="skill"
+    )
+    # allow -> proceeds with no prompt even though the global mode is ask
+    assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is True
+    assert scheduler.pending_approvals() == []
+
+    scheduler.set_category_mode("travel", "deny")
+    assert scheduler._request_approval(job, "skill", "book_flight", "Book.") is False
+    assert any(
+        e["kind"] == "skill_create_blocked" for e in scheduler.trace.read()
+    )
+
+
 def test_creation_approval_approved_proceeds(tmp_path):
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     job = DraftAuthor(
         request=Request("book a trip"), category=None, kind="category"
@@ -1339,7 +1400,7 @@ def test_creation_approval_approved_proceeds(tmp_path):
 
 def test_creation_approval_denied_aborts(tmp_path):
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     job = DraftAuthor(
         request=Request("book a trip"), category="travel", kind="skill"
@@ -1361,7 +1422,7 @@ def test_creation_approval_denied_aborts(tmp_path):
 
 def test_creation_approval_timeout_denies(tmp_path):
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     scheduler.elicitation_wait = 0.1
     job = DraftAuthor(
@@ -1377,7 +1438,7 @@ def test_creation_approval_without_front_end_denies(tmp_path):
     """With no deferring front end there is nobody to answer, so creation is
     denied immediately rather than stalling the draft worker."""
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = False
     job = DraftAuthor(
         request=Request("book a trip"), category="travel", kind="skill"
@@ -1391,7 +1452,7 @@ def test_creation_approval_without_front_end_denies(tmp_path):
 def test_creation_approval_chain_skips_second_prompt(tmp_path):
     """A skill job chained from an approved category is already covered."""
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     job = DraftAuthor(
         request=Request("book a trip"),
@@ -1407,7 +1468,7 @@ def test_author_category_denied_does_not_register(tmp_path, monkeypatch):
     """The category hook: a denied proposal registers nothing and queues no
     chained skill draft."""
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     monkeypatch.setattr(
         "semif_agent.scheduler.generate_category",
@@ -1427,7 +1488,7 @@ def test_author_category_denied_does_not_register(tmp_path, monkeypatch):
 
 def test_author_skill_denied_does_not_register(tmp_path, monkeypatch):
     scheduler = _scheduler(tmp_path)
-    scheduler.creation_approval = True
+    scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     monkeypatch.setattr(
         "semif_agent.scheduler.generate_skill",

@@ -69,6 +69,30 @@ from .skills import (
 )
 from .trace import TraceLog
 
+#: The tri-state governing whether a new skill (or category) may be authored.
+#: `allow` authors immediately, `deny` blocks creation outright, and `ask`
+#: authors only after the human approves the proposal. Set globally with the
+#: top-level `new_skill_creation` config value and overridden per category in
+#: `data/skills/<category>/config.json` (same key).
+NEW_SKILL_MODES = ("allow", "deny", "ask")
+
+
+def normalize_new_skill_mode(value) -> str | None:
+    """Coerce a configured new-skill mode to one of `NEW_SKILL_MODES`.
+
+    Accepts the mode strings and, for backward compatibility with the retired
+    `locks.new_skill` boolean, maps `True` -> "deny" and `False` -> "allow".
+    Returns None for anything unrecognized so the caller can fall back to the
+    next tier (category override, then the global default).
+    """
+    if isinstance(value, bool):
+        return "deny" if value else "allow"
+    if isinstance(value, str):
+        mode = value.strip().lower()
+        if mode in NEW_SKILL_MODES:
+            return mode
+    return None
+
 
 @dataclass
 class Process:
@@ -173,10 +197,11 @@ class PendingApproval:
     """A proposed category/skill awaiting the human's yes/no.
 
     Posted by the single-slot `llm` draft worker after the proposal is authored
-    and before anything is registered. `creation_approval` is off by default;
-    when on, a denial or timeout aborts creation (nothing registered, no body
-    written, the request is not re-dispatched). One prompt per creation request:
-    the category prompt covers its chained skill, so a new category asks once.
+    and before anything is registered. Only posted when the effective new-skill
+    mode is `ask` (the global default or a per-category override); a denial or
+    timeout aborts creation (nothing registered, no body written, the request is
+    not re-dispatched). One prompt per creation request: the category prompt
+    covers its chained skill, so a new category asks once.
     """
 
     id: str
@@ -267,7 +292,14 @@ class Scheduler:
             elicitation_cfg.get("answer_timeout", 30.0)
         )
         self.defer_questions = False
-        self.creation_approval = bool(config.get("creation_approval", False))
+        #: Global new-skill creation mode: "allow" (default), "deny", or "ask".
+        #: A category may override it in its category config. The retired
+        #: boolean `creation_approval` is still read as a fallback (True -> ask,
+        #: False -> allow) so an existing config keeps its behaviour.
+        self.new_skill_mode = (
+            normalize_new_skill_mode(config.get("new_skill_creation"))
+            or ("ask" if config.get("creation_approval") else "allow")
+        )
         fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
         self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
         self.fidelity_max_attempts = int(fidelity_cfg.get("max_attempts", 1))
@@ -487,6 +519,8 @@ class Scheduler:
             bypass_tau=self.bypass_tau,
         )
         if isinstance(navigation, CreateCategory):
+            if self.new_skill_mode == "deny":
+                return self._blocked_create(request, None)
             return self._dispatch_create_category(request)
         if isinstance(navigation, CreateSkill):
             return self._dispatch_skill(request, navigation.category)
@@ -568,36 +602,56 @@ class Scheduler:
             ),
         )
 
-    # ---- new-skill locks (deterministic per-category create door) ----
+    # ---- new-skill creation modes (deterministic per-category create door) ----
 
-    def _category_locked(self, category: str) -> bool:
-        """Is this category closed to new-skill creation?
+    def _category_mode(self, category: str) -> str:
+        """Effective new-skill mode for a category: allow | deny | ask.
 
-        A plain boolean gate, not a SemIf decision: the closed `response` tree
-        and the built-in `housekeeping` category are locked in code
-        (HARD_LOCKED_CATEGORIES); every other category is locked when its
-        category config (`data/skills/<category>/config.json`) sets
-        `locks.new_skill` true. Absent config means unlocked. The lock is
+        A deterministic gate, not a SemIf decision. The closed `response` tree
+        and the built-in `housekeeping` category are always `deny` (hard-locked
+        in code). Every other category reads `new_skill_creation` from its
+        category config (`data/skills/<category>/config.json`); when absent it
+        falls back to the global `new_skill_creation` mode. The retired boolean
+        `locks.new_skill` is still honored (True -> deny, False -> allow) so a
+        previously locked category never silently reopens. The mode is
         creation-only: existing skills still run, and repair/regen of an
         existing leaf is allowed.
         """
         if category in CANNED_CATEGORIES or category in HARD_LOCKED_CATEGORIES:
-            return True
+            return "deny"
         config = self.body_store.read_category_config(category) or {}
-        locks = config.get("locks") or {}
-        return bool(locks.get("new_skill", False))
+        mode = normalize_new_skill_mode(config.get("new_skill_creation"))
+        if mode is None:
+            mode = normalize_new_skill_mode(
+                (config.get("locks") or {}).get("new_skill")
+            )
+        return mode or self.new_skill_mode
 
-    def _blocked_create(self, request: Request, category: str) -> DispatchResult:
-        """Report that a locked category will not accept a new skill."""
-        self.trace.append(
-            "skill_create_blocked", request.id, category=category
-        )
+    def _category_locked(self, category: str) -> bool:
+        """Is this category closed to new-skill creation (mode == deny)?"""
+        return self._category_mode(category) == "deny"
+
+    def _blocked_create(
+        self, request: Request, category: str | None
+    ) -> DispatchResult:
+        """Report that a denied category (or a denied category creation) will
+        not author."""
+        if category is None:
+            self.trace.append("category_create_blocked", request.id)
+            return DispatchResult(
+                kind="error",
+                summary=(
+                    "cannot create a new category: new-skill creation is denied "
+                    '(set new_skill_creation to "allow" or "ask" in config.json)'
+                ),
+            )
+        self.trace.append("skill_create_blocked", request.id, category=category)
         return DispatchResult(
             kind="error",
             summary=(
                 f"cannot create a new skill in {category}: new-skill creation "
-                f"is locked (set locks.new_skill=false in "
-                f"data/skills/{category}/config.json to allow it)"
+                f'is denied (set new_skill_creation to "allow" or "ask" in '
+                f"data/skills/{category}/config.json, or globally in config.json)"
             ),
         )
 
@@ -1138,10 +1192,10 @@ class Scheduler:
     def _author_category(self, job: DraftAuthor) -> None:
         """Author a top-level category, then chain into its skill leaf.
 
-        When `creation_approval` is on, the human approves the proposed category
-        first; the chained skill is covered by that approval. An `llm` failure is
-        graceful: only the user is told, the request is not re-dispatched — the
-        decision engine stays the single fatal dependency.
+        When the global new-skill mode is `ask`, the human approves the proposed
+        category first; the chained skill is covered by that approval. An `llm`
+        failure is graceful: only the user is told, the request is not
+        re-dispatched — the decision engine stays the single fatal dependency.
         """
         draft = generate_category(self.llm, job.request, self._tree_snapshot())
         if not self._request_approval(job, "category", draft.name, draft.description):
@@ -1157,10 +1211,11 @@ class Scheduler:
                 return
             self.registry.register(draft.name, draft.description)
             self.tree[draft.name] = []
-            # Seed the category config so the new-skill lock is discoverable and
-            # editable from the start (default: unlocked).
+            # Seed the category config so the new-skill mode is discoverable and
+            # editable from the start. It records the mode in effect at creation
+            # (the global default), which the operator can then override.
             self.body_store.write_category_config(
-                draft.name, {"locks": {"new_skill": False}}
+                draft.name, {"new_skill_creation": self.new_skill_mode}
             )
             self.trace.append(
                 "category_created",
@@ -1173,8 +1228,9 @@ class Scheduler:
     def _author_skill(self, job: DraftAuthor) -> None:
         """Author a skill leaf stub, then launch the codegen body write.
 
-        When `creation_approval` is on, the human approves the proposed skill
-        (a chained skill inside an already-approved category skips this).
+        When the category's effective new-skill mode is `ask`, the human
+        approves the proposed skill (a chained skill inside an already-approved
+        category skips this).
         """
         draft = generate_skill(
             self.llm, job.request, job.category, self._tree_snapshot()
@@ -1243,25 +1299,49 @@ class Scheduler:
             "The request was not re-dispatched."
         )
 
-    # ---- creation approval (opt-in human veto on new categories/skills) ----
+    # ---- new-skill creation gate (allow / deny / ask) ----
 
     def _request_approval(
         self, job: DraftAuthor, kind: str, name: str, description: str
     ) -> bool:
-        """Ask the human to approve a proposed creation. Returns True to proceed.
+        """Resolve the creation gate for a proposed category/skill. True = proceed.
 
-        Off by default (`creation_approval`). When on, the single-slot `llm`
-        worker blocks here after the proposal is authored and before anything is
-        registered; the main gate stays free. One prompt per creation request —
-        a chained skill job (`job.approved`) is already covered by the category
+        The effective mode is the global `new_skill_mode` for a new category and
+        the category's own mode for a new skill (global default unless the
+        category config overrides it). `allow` returns immediately, `deny`
+        aborts, and `ask` blocks the single-slot `llm` worker here — after the
+        proposal is authored and before anything is registered — until the human
+        answers; the main gate stays free. One prompt per creation request: a
+        chained skill job (`job.approved`) is already covered by the category
         approval. Denial or timeout aborts creation: nothing is registered, no
         body is written, and the request is not re-dispatched. Without a
-        deferring front end there is nobody to answer, so it denies immediately
-        rather than stalling the worker.
+        deferring front end there is nobody to answer, so `ask` denies
+        immediately rather than stalling the worker.
         """
-        if not self.creation_approval or job.approved:
+        if job.approved:
             return True
+        mode = (
+            self.new_skill_mode
+            if kind == "category"
+            else self._category_mode(job.category)
+        )
         target = name if kind == "category" else f"{job.category}.{name}"
+        if mode == "allow":
+            return True
+        if mode == "deny":
+            # Normally blocked synchronously in dispatch; guard here too so an
+            # in-flight draft never registers under a deny.
+            if kind == "category":
+                self.trace.append("category_create_blocked", job.request.id)
+            else:
+                self.trace.append(
+                    "skill_create_blocked", job.request.id, category=job.category
+                )
+            print(
+                f"[creation] {kind} {target} denied by new-skill mode; "
+                "creation aborted."
+            )
+            return False
         if not self.defer_questions:
             self.trace.append(
                 "creation_approval_skipped",
@@ -2176,31 +2256,42 @@ class Scheduler:
         )
         return "ok", detail
 
-    def set_category_lock(self, category: str, locked: bool) -> tuple[str, str]:
-        """Toggle a category's new-skill lock in its category config."""
+    def set_category_mode(self, category: str, mode: str) -> tuple[str, str]:
+        """Set a category's new-skill mode (`allow` | `deny` | `ask`).
+
+        Written to the category config (`new_skill_creation`); passing an empty
+        value clears the override so the category inherits the global mode.
+        """
         with self._lock:
             if category in CANNED_CATEGORIES or category in HARD_LOCKED_CATEGORIES:
                 return "error", (
-                    f"{category} is a built-in category and is always locked"
+                    f"{category} is a built-in category and is always denied"
                 )
             if category not in self.tree:
                 return "error", f"no category {category}"
             config = self.body_store.read_category_config(category) or {}
-            locks = dict(config.get("locks") or {})
-            locks["new_skill"] = bool(locked)
-            config["locks"] = locks
+            # Drop the retired boolean lock so it cannot shadow the new mode.
+            config.pop("locks", None)
+            if mode:
+                normalized = normalize_new_skill_mode(mode)
+                if normalized is None:
+                    return "error", (
+                        f"invalid mode {mode!r}: expected one of "
+                        f"{', '.join(NEW_SKILL_MODES)}"
+                    )
+                config["new_skill_creation"] = normalized
+            else:
+                config.pop("new_skill_creation", None)
             self.body_store.write_category_config(category, config)
+            effective = self._category_mode(category)
             self.trace.append(
-                "category_lock_set", "?", category=category, new_skill=bool(locked)
+                "category_mode_set", "?", category=category, mode=effective
             )
-        return "ok", (
-            f"{category} new-skill creation "
-            f"{'locked' if locked else 'unlocked'}"
-        )
+        return "ok", f"{category} new-skill creation is now {effective}"
 
-    def category_locks(self) -> dict[str, bool]:
+    def category_modes(self) -> dict[str, str]:
         with self._lock:
-            return {category: self._category_locked(category) for category in self.tree}
+            return {category: self._category_mode(category) for category in self.tree}
 
     def status(self) -> str:
         with self._lock:

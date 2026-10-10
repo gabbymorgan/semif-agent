@@ -75,7 +75,7 @@ scheduler.py    no up-front gate: every input is dispatched
                 queued, the gate stays free, the category job chains into its
                 skill job, and the original request is re-queued and re-runs the
                 new leaf when the body lands; an optional human approval gate
-                (`creation_approval`, off by default) blocks the draft worker
+                (new-skill mode `ask`; see below) blocks the draft worker
                 after the proposal is authored and before anything is
                 registered — one prompt per request, denial/timeout aborts
                 creation, surfaced via the approval queue; the body worker runs the full
@@ -90,9 +90,10 @@ scheduler.py    no up-front gate: every input is dispatched
                 failed real run triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user;
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
-                operate on the tree via `ctx.admin`; per-category new-skill locks
-                (`locks.new_skill` in the category config) gate creation, with
-                `housekeeping`/`response` hard-locked in code; front ends get a
+                operate on the tree via `ctx.admin`; new-skill creation is gated by
+                a tri-state mode (`new_skill_creation`: allow/deny/ask) with a
+                per-category override in the category config, with
+                `housekeeping`/`response` always denied in code; front ends get a
                 structured `SchedulerReply` (status, text, run_id, skill_ref,
                 result) from `submit_request`/`answer`/`run_queue` so they never
                 parse the run id or skill ref back out of the summary
@@ -437,21 +438,37 @@ CLI, unit tests (24) + integration tests (2).
   runner skips `assess:outcome`/repair for it — a canned line has no side effect
   to assess. The leaf choice logs phase `navigate:response` and traces
   `response_selected`. `response.reject` (a stub that never ran) is gone.
-- **Optional human approval on creation** (Oct 2026): `creation_approval`
-  (top-level, default `false`) is a single boolean. When on, the single-slot
-  `llm` draft worker blocks after it authors a proposal and before anything is
-  registered; the human approves/denies via the REPL prompt, the dashboard
-  approvals panel (`GET/POST /api/approvals`), or a gateway chat reply
-  (`yes`/`no`). One prompt per creation request — a new category's chained skill
-  is covered by the category approval (`DraftAuthor.approved`). Denial or
-  timeout aborts creation: nothing is registered, no body is written, and the
-  request is not re-dispatched; the wait reuses
-  `codegen.elicitation.wait_timeout`. With no deferring front end it denies
-  immediately rather than stalling the worker. Traced as
+- **New-skill creation mode: allow / deny / ask** (Oct 2026; tri-state Oct 2026):
+  one setting governs whether the agent may author new skills/categories, as a
+  three-way mode. **Global default** is the top-level `new_skill_creation`
+  (`"allow"` default, `"deny"`, or `"ask"`); a category overrides it with its
+  own `new_skill_creation` in `data/skills/<category>/config.json` (absent =
+  inherit the global). `allow` authors immediately; `deny` blocks authoring
+  outright (`Scheduler._blocked_create`, traced `skill_create_blocked` /
+  `category_create_blocked`); `ask` authors only after the human approves the
+  proposal. The `ask` path is the old approval gate: the single-slot `llm` draft
+  worker blocks after it authors a proposal and before anything is registered;
+  the human approves/denies via the REPL prompt, the dashboard approvals panel
+  (`GET/POST /api/approvals`), or a gateway chat reply (`yes`/`no`). One prompt
+  per creation request — a new category's chained skill is covered by the
+  category approval (`DraftAuthor.approved`). Denial or timeout aborts creation:
+  nothing is registered, no body is written, and the request is not
+  re-dispatched; the wait reuses `codegen.elicitation.wait_timeout`. With no
+  deferring front end `ask` denies immediately rather than stalling the worker.
+  The mode is resolved by `Scheduler._category_mode` (deny for the hard-locked
+  `housekeeping`/`response` categories) and checked in `_dispatch`,
+  `_dispatch_skill`, `_author_skill`, `_request_approval`, and `restart_skill`.
+  Toggled from the config file or `Scheduler.set_category_mode` (`/mode`,
+  `/api/new-skill-mode`; an empty mode clears the override). Traced as
+  `category_mode_set`, plus the approval events
   `creation_approval_requested` / `_approved` / `_denied` / `_timeout` /
-  `_skipped`; it is a human veto, not a decision row — the SemIf create doors
-  still make and log the routing decision.
-- **Housekeeping meta skills + per-category new-skill locks** (Oct 2026): a
+  `_skipped`; the gate is deterministic (a human veto or a config value), not a
+  decision row — the SemIf create doors still make and log the routing decision.
+  The retired boolean `locks.new_skill` is still read (`true` -> deny, `false`
+  -> allow) so a previously locked category never silently reopens, and the
+  retired boolean `creation_approval` is still read as a global fallback
+  (`true` -> ask, `false` -> allow).
+- **Housekeeping meta skills + per-category new-skill modes** (Oct 2026): a
   built-in `housekeeping` category of four meta skills that act on the agent's
   own tree through `ctx.admin` (the scheduler): `delete_skill` (confirm, then
   remove the leaf, registry entry, and folder; durable via a
@@ -473,17 +490,18 @@ CLI, unit tests (24) + integration tests (2).
   names skill-management commands). They are built-ins
   (`Skill.origin == "builtin"`) reachable by natural language and, for operators,
   by slash-prefixed REPL commands (`/delete`, `/clear-config`, `/regen`,
-  `/cancel-build`, `/lock`) and dashboard endpoints/buttons. Their runs are
+  `/cancel-build`, `/mode`) and dashboard endpoints/buttons. Their runs are
   deterministic internal actions: `DETERMINISTIC_CATEGORIES` skips
-  `assess:outcome`/repair, and the category is hard-locked from authoring. Every
-  category carries a **new-skill lock** in its category config
-  (`data/skills/<category>/config.json` → `{"locks": {"new_skill": bool}}`); the
-  lock is a deterministic boolean gate (`Scheduler._category_locked`) checked in
-  `_dispatch`, `_dispatch_skill`, `_author_skill`, and `restart_skill`, and
-  toggled from the config file or `Scheduler.set_category_lock` (`/lock`,
-  `/api/lock`). `housekeeping` and the closed `response` tree are hard-locked in
-  code (`HARD_LOCKED_CATEGORIES`/`CANNED_CATEGORIES`) and can never be unlocked.
-  The lock is creation-only: existing skills still run and repair/regen of an
+  `assess:outcome`/repair, and the category is hard-denied from authoring. Every
+  category carries a **new-skill mode** in its category config
+  (`data/skills/<category>/config.json` → `{"new_skill_creation": "allow|deny|ask"}`),
+  overriding the global `new_skill_creation`; the mode is a deterministic gate
+  (`Scheduler._category_mode` / `_category_locked`) checked in `_dispatch`,
+  `_dispatch_skill`, `_author_skill`, and `restart_skill`, and toggled from the
+  config file or `Scheduler.set_category_mode` (`/mode`, `/api/new-skill-mode`).
+  `housekeeping` and the closed `response` tree are hard-denied in code
+  (`HARD_LOCKED_CATEGORIES`/`CANNED_CATEGORIES`) and can never be changed. The
+  mode is creation-only: existing skills still run and repair/regen of an
   existing leaf is allowed.
 - **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
   elicitation is on by default and asks implementation questions (which

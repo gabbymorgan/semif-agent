@@ -255,46 +255,60 @@ def test_delete_seed_is_durable(tmp_path):
 
 def test_housekeeping_and_response_are_hard_locked(tmp_path):
     scheduler = _scheduler(tmp_path)
-    assert scheduler._category_locked("housekeeping") is True
-    assert scheduler._category_locked("response") is True
-    status, _ = scheduler.set_category_lock("housekeeping", False)
+    assert scheduler._category_mode("housekeeping") == "deny"
+    assert scheduler._category_mode("response") == "deny"
+    status, _ = scheduler.set_category_mode("housekeeping", "allow")
     assert status == "error"
 
 
-def test_category_lock_config_roundtrip(tmp_path):
+def test_category_mode_config_roundtrip(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.tree["notes"] = []
-    assert scheduler._category_locked("notes") is False
+    assert scheduler._category_mode("notes") == "allow"
 
-    status, _ = scheduler.set_category_lock("notes", True)
+    status, _ = scheduler.set_category_mode("notes", "ask")
     assert status == "ok"
-    assert scheduler._category_locked("notes") is True
+    assert scheduler._category_mode("notes") == "ask"
     config = scheduler.body_store.read_category_config("notes")
-    assert config["locks"]["new_skill"] is True
+    assert config["new_skill_creation"] == "ask"
 
-    scheduler.set_category_lock("notes", False)
-    assert scheduler._category_locked("notes") is False
+    scheduler.set_category_mode("notes", "deny")
+    assert scheduler._category_locked("notes") is True
     assert any(
-        e["kind"] == "category_lock_set" for e in scheduler.trace.read()
+        e["kind"] == "category_mode_set" for e in scheduler.trace.read()
     )
 
 
-def test_dispatch_skill_blocked_when_locked(tmp_path):
+def test_category_mode_inherits_global_and_overrides(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.tree["notes"] = []
-    scheduler.set_category_lock("notes", True)
+    scheduler.new_skill_mode = "ask"
+    assert scheduler._category_mode("notes") == "ask"
+
+    scheduler.set_category_mode("notes", "deny")
+    assert scheduler._category_mode("notes") == "deny"
+
+    # An empty mode clears the override so the category inherits the global.
+    scheduler.set_category_mode("notes", "")
+    assert scheduler._category_mode("notes") == "ask"
+
+
+def test_dispatch_skill_blocked_when_denied(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["notes"] = []
+    scheduler.set_category_mode("notes", "deny")
     result = scheduler._dispatch_skill(Request("make a note"), "notes")
     assert result.kind == "error"
-    assert "locked" in result.summary
+    assert "denied" in result.summary
     assert any(e["kind"] == "skill_create_blocked" for e in scheduler.trace.read())
 
 
-def test_restart_skill_blocked_when_locked(tmp_path):
+def test_restart_skill_blocked_when_denied(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.tree["notes"] = [
         Skill(name="stub", category="notes", description="d")
     ]
-    scheduler.set_category_lock("notes", True)
+    scheduler.set_category_mode("notes", "deny")
     status, _ = scheduler.restart_skill("notes", "stub")
     assert status == "error"
 

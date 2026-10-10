@@ -163,8 +163,10 @@ function eventRow(evt) {
     div.textContent = `cleared config: ${evt.category}.${evt.skill}`;
   } else if (evt.kind === "skill_create_blocked") {
     div.textContent = `new-skill creation blocked: ${evt.category}`;
-  } else if (evt.kind === "category_lock_set") {
-    div.textContent = `${evt.category} new-skill lock ${evt.new_skill ? "on" : "off"}`;
+  } else if (evt.kind === "category_create_blocked") {
+    div.textContent = "new-category creation blocked";
+  } else if (evt.kind === "category_mode_set") {
+    div.textContent = `${evt.category} new-skill creation: ${evt.mode}`;
   } else if (evt.kind === "needs_input") {
     div.textContent = "needs input";
     div.title = evt.question || "";
@@ -517,8 +519,10 @@ function eventNode(evt) {
     body.textContent = `cleared config for ${evt.category}.${evt.skill}`;
   } else if (evt.kind === "skill_create_blocked") {
     body.textContent = `new-skill creation blocked in ${evt.category}`;
-  } else if (evt.kind === "category_lock_set") {
-    body.textContent = `${evt.category} new-skill lock ${evt.new_skill ? "on" : "off"}`;
+  } else if (evt.kind === "category_create_blocked") {
+    body.textContent = "new-category creation blocked";
+  } else if (evt.kind === "category_mode_set") {
+    body.textContent = `${evt.category} new-skill creation: ${evt.mode}`;
   } else if (evt.kind === "needs_input") {
     node.classList.add("needs-input");
     body.textContent = `awaiting input: ${evt.question || ""}`;
@@ -606,16 +610,16 @@ async function housekeepingAction(path, category, name) {
   await refreshAll();
 }
 
-async function toggleLock(category, locked) {
+async function setSkillMode(category, mode) {
   try {
-    const res = await getJSON("/api/lock", {
+    const res = await getJSON("/api/new-skill-mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ category, locked }),
+      body: JSON.stringify({ category, mode }),
     });
     flash(`[${res.status}] ${res.detail}`);
   } catch (err) {
-    flash(`lock failed: ${err.message}`);
+    flash(`mode change failed: ${err.message}`);
   }
   await refreshAll();
 }
@@ -699,15 +703,15 @@ function renderTree() {
     const name = document.createElement("div");
     name.className = "cat-name";
     name.textContent = cat;
-    const locked = (state.tree.locks || {})[cat];
-    if (locked !== undefined) {
-      const lock = actionBtn(
-        locked ? "locked" : "open",
-        locked
-          ? "new-skill creation is locked; click to allow"
-          : "new-skill creation is allowed; click to lock",
-        () => toggleLock(cat, !locked)
-      );
+    const mode = (state.tree.new_skill_modes || {})[cat];
+    if (mode !== undefined) {
+      const next = { allow: "ask", ask: "deny", deny: "allow" }[mode] || "allow";
+      const hint = {
+        allow: "new skills are created without asking; click to ask first",
+        ask: "new skills ask for approval; click to deny creation",
+        deny: "new-skill creation is denied; click to allow",
+      }[mode];
+      const lock = actionBtn(mode, hint, () => setSkillMode(cat, next));
       lock.classList.add("lock-btn");
       name.appendChild(lock);
     }

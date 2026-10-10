@@ -138,13 +138,15 @@ flowchart TD
     GC --> APPROVE
     GS --> APPROVE
 
-    APPROVE{"creation_approval<br/>on? (default off)"}
-    APPROVE -- "no / already approved" --> REGISTER
-    APPROVE -- "yes" --> PROMPT["Output: approval prompt<br/>REPL / dashboard / gateway<br/>deny or timeout aborts"]
+    APPROVE{"new-skill mode<br/>allow / deny / ask<br/>(global default, per-category override)"}
+    APPROVE -- "allow" --> REGISTER
+    APPROVE -- "deny" --> ABORT2["Output: creation denied<br/>nothing registered, not re-dispatched"]
+    APPROVE -- "ask (already approved)" --> REGISTER
+    APPROVE -- "ask" --> PROMPT["Output: approval prompt<br/>REPL / dashboard / gateway<br/>deny or timeout aborts"]
     PROMPT -- "approved" --> REGISTER
     PROMPT -- "denied / timeout / no front end" --> ABORT["Output: creation aborted<br/>nothing registered, not re-dispatched"]
 
-    REGISTER["register stub in registry + tree<br/>seed category config (locks.new_skill)<br/>trace 'category_created' / 'skill_created'"]
+    REGISTER["register stub in registry + tree<br/>seed category config (new_skill_creation)<br/>trace 'category_created' / 'skill_created'"]
     REGISTER -- "category" --> CHAIN["chain into skill job<br/>approved=true"]
     CHAIN --> DRAFT
     REGISTER -- "skill" --> WRITE["single-slot codegen worker<br/>SkillWrite queue<br/>leaf.writing = true, trace 'skill_writing'"]
@@ -176,7 +178,7 @@ flowchart TD
     classDef output fill:#fce8e6,stroke:#d93025;
     classDef author fill:#e6f4ea,stroke:#34a853;
     class FID,CFG,REGEN semfill;
-    class PROMPT,ABORT,QS,FAIL,CANCELLED output;
+    class PROMPT,ABORT,ABORT2,QS,FAIL,CANCELLED output;
     class START,DIRECT,BACK,MAT,REQ author;
 ```
 
@@ -217,6 +219,7 @@ at or above `softmax_bypass_tau` (default 0.5) is already decisive, so its scope
 confirm is skipped; the **leaf** intent guard is never bypassed (the leaf softmax
 has no create option, so a confident winner is only the closest existing skill,
 never a match) — it always runs and can reject into create.
-New-skill creation is also gated deterministically by the per-category
-`locks.new_skill` (the `housekeeping` and `response` categories are hard-locked
-in code).
+New-skill creation is gated deterministically by the tri-state
+`new_skill_creation` mode — global default (`allow` / `deny` / `ask`) with a
+per-category override in `data/skills/<category>/config.json`; the
+`housekeeping` and `response` categories are always `deny` in code.

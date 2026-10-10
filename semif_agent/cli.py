@@ -452,8 +452,8 @@ def _print_repairs(scheduler: Scheduler) -> None:
 def _answer_approvals(scheduler: Scheduler) -> None:
     """Ask any pending creation approvals at the REPL.
 
-    Only prompts when `creation_approval` is on (the scheduler posts nothing
-    otherwise). An empty answer denies.
+    Only prompts when a category (or the global default) uses the `ask` mode
+    (the scheduler posts nothing otherwise). An empty answer denies.
     """
     while True:
         pending = scheduler.pending_approvals()
@@ -539,7 +539,7 @@ def repl(scheduler: Scheduler, config: dict) -> int:
         "housekeeping (slash-prefixed so plain requests still route by SemIf): "
         "/delete <category> <skill> | /clear-config <category> <skill> | "
         "/regen <category> <skill> | /cancel-build <category> <skill> | "
-        "/lock <category> on|off"
+        "/mode <category> allow|deny|ask"
     )
     while True:
         _answer_questions(scheduler)
@@ -630,14 +630,12 @@ def repl(scheduler: Scheduler, config: dict) -> int:
             status, detail = scheduler.cancel_skill_build(parts[1], parts[2])
             print(f"[{status}] {detail}")
             continue
-        if lower.startswith("/lock "):
+        if lower.startswith("/mode "):
             parts = line.lstrip("/").split()
-            if len(parts) != 3 or parts[2].lower() not in ("on", "off"):
-                print("usage: /lock <category> on|off")
+            if len(parts) != 3 or parts[2].lower() not in ("allow", "deny", "ask"):
+                print("usage: /mode <category> allow|deny|ask")
                 continue
-            status, detail = scheduler.set_category_lock(
-                parts[1], parts[2].lower() == "on"
-            )
+            status, detail = scheduler.set_category_mode(parts[1], parts[2].lower())
             print(f"[{status}] {detail}")
             continue
         if lower == "idle":

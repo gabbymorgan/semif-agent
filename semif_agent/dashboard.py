@@ -151,7 +151,7 @@ def build_tree_payload(scheduler: Scheduler) -> dict:
             ]
             for category, skills in sorted(snapshot.items())
         },
-        "locks": scheduler.category_locks(),
+        "new_skill_modes": scheduler.category_modes(),
     }
 
 
@@ -235,8 +235,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/approvals":
             self._send(200, {"approvals": self.scheduler.pending_approvals()})
             return
-        if path == "/api/locks":
-            self._send(200, {"locks": self.scheduler.category_locks()})
+        if path == "/api/new-skill-modes":
+            self._send(200, {"modes": self.scheduler.category_modes()})
             return
         if path == "/api/timers":
             self._send(
@@ -345,12 +345,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/cancel-build":
             self._housekeeping("cancel_skill_build")
             return
-        if path == "/api/lock":
+        if path == "/api/new-skill-mode":
             with self.lock:
                 try:
                     body = self._read_json()
-                    status, detail = self.scheduler.set_category_lock(
-                        str(body.get("category", "")), bool(body.get("locked"))
+                    status, detail = self.scheduler.set_category_mode(
+                        str(body.get("category", "")), str(body.get("mode", ""))
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))
