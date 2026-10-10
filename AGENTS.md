@@ -464,10 +464,6 @@ CLI, unit tests (24) + integration tests (2).
   `creation_approval_requested` / `_approved` / `_denied` / `_timeout` /
   `_skipped`; the gate is deterministic (a human veto or a config value), not a
   decision row — the SemIf create doors still make and log the routing decision.
-  The retired boolean `locks.new_skill` is still read (`true` -> deny, `false`
-  -> allow) so a previously locked category never silently reopens, and the
-  retired boolean `creation_approval` is still read as a global fallback
-  (`true` -> ask, `false` -> allow).
 - **Housekeeping meta skills + per-category new-skill modes** (Oct 2026): a
   built-in `housekeeping` category of four meta skills that act on the agent's
   own tree through `ctx.admin` (the scheduler): `delete_skill` (confirm, then
@@ -768,7 +764,9 @@ CLI, unit tests (24) + integration tests (2).
 - All pins are read from the committed `pins.json`: the `engine` block
   (`semif_repo` public GitHub `TheoLeeCJ/SemIf`, `semif_ref` pinned commit,
   `gguf_url`/`gguf_sha256`, HF tokenizer `source`/`revision`) and the
-  `simplex_chat` block (`version`, `bin_url`, `sha256`). Per-machine
+  `simplex_chat` block (`version`, and an `assets` map of per-arch
+  `bin_url`/`sha256`; bootstrap selects by `uname -m`, `arm64` normalized to
+  `aarch64`). Per-machine
   `simplex_chat` ports/display names stay in `config.json`. The python dep pins
   live in `requirements/staging.txt` (committed, one versioned artifact — every
   host provisions from it). The agent reads `engine.source`/`revision` from

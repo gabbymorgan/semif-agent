@@ -1314,32 +1314,6 @@ def test_creation_mode_allow_proceeds(tmp_path):
     assert scheduler.pending_approvals() == []
 
 
-def test_creation_approval_legacy_boolean_fallback(tmp_path):
-    """The retired `creation_approval` boolean still maps to ask/allow when the
-    new `new_skill_creation` key is absent."""
-    def build(config):
-        return Scheduler(
-            engine=ScriptedEngine(default="success"),
-            llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
-            log=DecisionLog(str(tmp_path / "decisions.jsonl")),
-            config={
-                "skills": {},
-                "category_registry": str(tmp_path / "categories.json"),
-                "skill_bodies": str(tmp_path / "skills"),
-                "skill_seeds": str(tmp_path / "seeds"),
-                **config,
-            },
-            trace=TraceLog(str(tmp_path / "runs.jsonl")),
-        )
-
-    assert build({"creation_approval": True}).new_skill_mode == "ask"
-    assert build({"creation_approval": False}).new_skill_mode == "allow"
-    # The new key wins when both are present.
-    assert build(
-        {"creation_approval": True, "new_skill_creation": "deny"}
-    ).new_skill_mode == "deny"
-
-
 def test_creation_mode_deny_aborts_without_prompting(tmp_path):
     """Global `deny` blocks authoring outright; no approval is posted."""
     scheduler = _scheduler(tmp_path)

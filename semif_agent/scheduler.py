@@ -80,13 +80,9 @@ NEW_SKILL_MODES = ("allow", "deny", "ask")
 def normalize_new_skill_mode(value) -> str | None:
     """Coerce a configured new-skill mode to one of `NEW_SKILL_MODES`.
 
-    Accepts the mode strings and, for backward compatibility with the retired
-    `locks.new_skill` boolean, maps `True` -> "deny" and `False` -> "allow".
     Returns None for anything unrecognized so the caller can fall back to the
     next tier (category override, then the global default).
     """
-    if isinstance(value, bool):
-        return "deny" if value else "allow"
     if isinstance(value, str):
         mode = value.strip().lower()
         if mode in NEW_SKILL_MODES:
@@ -293,12 +289,9 @@ class Scheduler:
         )
         self.defer_questions = False
         #: Global new-skill creation mode: "allow" (default), "deny", or "ask".
-        #: A category may override it in its category config. The retired
-        #: boolean `creation_approval` is still read as a fallback (True -> ask,
-        #: False -> allow) so an existing config keeps its behaviour.
+        #: A category may override it in its category config.
         self.new_skill_mode = (
-            normalize_new_skill_mode(config.get("new_skill_creation"))
-            or ("ask" if config.get("creation_approval") else "allow")
+            normalize_new_skill_mode(config.get("new_skill_creation")) or "allow"
         )
         fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
         self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
@@ -611,9 +604,7 @@ class Scheduler:
         and the built-in `housekeeping` category are always `deny` (hard-locked
         in code). Every other category reads `new_skill_creation` from its
         category config (`data/skills/<category>/config.json`); when absent it
-        falls back to the global `new_skill_creation` mode. The retired boolean
-        `locks.new_skill` is still honored (True -> deny, False -> allow) so a
-        previously locked category never silently reopens. The mode is
+        falls back to the global `new_skill_creation` mode. The mode is
         creation-only: existing skills still run, and repair/regen of an
         existing leaf is allowed.
         """
@@ -621,10 +612,6 @@ class Scheduler:
             return "deny"
         config = self.body_store.read_category_config(category) or {}
         mode = normalize_new_skill_mode(config.get("new_skill_creation"))
-        if mode is None:
-            mode = normalize_new_skill_mode(
-                (config.get("locks") or {}).get("new_skill")
-            )
         return mode or self.new_skill_mode
 
     def _category_locked(self, category: str) -> bool:
@@ -2270,8 +2257,6 @@ class Scheduler:
             if category not in self.tree:
                 return "error", f"no category {category}"
             config = self.body_store.read_category_config(category) or {}
-            # Drop the retired boolean lock so it cannot shadow the new mode.
-            config.pop("locks", None)
             if mode:
                 normalized = normalize_new_skill_mode(mode)
                 if normalized is None:

@@ -1,4 +1,4 @@
-"""Pure-stdlib tests for the housekeeping meta skills and per-category locks.
+"""Pure-stdlib tests for the housekeeping meta skills and per-category modes.
 
 These cover the deterministic mechanics: name resolution, registry/store
 deletion, tombstones, the lock gate, and the scheduler operations the meta
@@ -250,7 +250,7 @@ def test_delete_seed_is_durable(tmp_path):
     assert all(s.name != "probe" for s in reloaded.tree.get("nextcloud", []))
 
 
-# ---- locks ----
+# ---- new-skill modes ----
 
 
 def test_housekeeping_and_response_are_hard_locked(tmp_path):

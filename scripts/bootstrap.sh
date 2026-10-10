@@ -109,13 +109,21 @@ fi
 # --- read pins from the committed pins.json ---------------------------------
 # The ASCII unit separator (\x1f) delimits fields so an empty value never
 # shifts the fields after it (space-splitting collapses runs of whitespace).
+# The simplex-chat binary is per-arch: normalize `uname -m` to a pins key.
+SIMPLEX_ARCH="$(uname -m)"
+case "$SIMPLEX_ARCH" in
+  arm64|aarch64) SIMPLEX_ARCH="aarch64" ;;
+  x86_64|amd64)  SIMPLEX_ARCH="x86_64" ;;
+esac
 IFS=$'\x1f' read -r SEMIF_REPO SEMIF_REF GGUF_URL GGUF_SHA256 HF_SOURCE HF_REV \
   SIMPLEX_BIN_URL SIMPLEX_SHA256 < <(
-  python3 - "$PINS" <<'PY'
+  python3 - "$PINS" "$SIMPLEX_ARCH" <<'PY'
 import json, sys
 pins = json.load(open(sys.argv[1]))
+arch = sys.argv[2]
 e = pins["engine"]
 s = pins.get("simplex_chat", {})
+asset = (s.get("assets", {}) or {}).get(arch, {})
 print("\x1f".join([
     str(e.get("semif_repo", "")),
     str(e.get("semif_ref", "")),
@@ -123,8 +131,8 @@ print("\x1f".join([
     str(e.get("gguf_sha256", "")),
     str(e.get("source", "")),
     str(e.get("revision", "")),
-    str(s.get("bin_url", "")),
-    str(s.get("sha256", "")),
+    str(asset.get("bin_url", "")),
+    str(asset.get("sha256", "")),
 ]))
 PY
 )
@@ -134,7 +142,7 @@ if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256"
   exit 1
 fi
 if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" ]]; then
-  echo "simplex_chat pins missing in $PINS (bin_url/sha256)" >&2
+  echo "simplex_chat pins missing in $PINS for arch '$SIMPLEX_ARCH' (assets.<arch>.bin_url/sha256)" >&2
   exit 1
 fi
 

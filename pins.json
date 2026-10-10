@@ -9,9 +9,18 @@
     "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
   },
   "simplex_chat": {
+    "_comment": "Per-arch daemon binaries; bootstrap selects by `uname -m` (x86_64 | aarch64, arm64 normalized to aarch64). The pinned version is the same for every arch.",
     "version": "v7.0.3",
-    "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
-    "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0"
+    "assets": {
+      "x86_64": {
+        "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64",
+        "sha256": "895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0"
+      },
+      "aarch64": {
+        "bin_url": "https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-aarch64",
+        "sha256": "2d2e62351f11bc51ae659618584722b38ea5a6796b806c9a388ee6e3124c90ac"
+      }
+    }
   },
   "voice": {
     "_comment": "Piper TTS voice-training refs used by scripts/voice-train.sh (optional, off-bootstrap): the piper1-gpl training toolchain commit and the medium base checkpoint it fine-tunes from. See docs/VOICE-TRAIN.md.",
