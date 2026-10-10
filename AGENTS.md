@@ -87,8 +87,10 @@ scheduler.py    no up-front gate: every input is dispatched
                 cascade; elicitation asks implementation questions one at a
                 time (all front ends defer via the question queue, `answer_timeout`
                 per question); a
-                failed real run triggers a logged SemIf repair choice
-                (retry/repair_skill/ask_user/no_repair) surfaced to the user;
+                `failed` step triggers a logged SemIf repair choice
+                (retry/repair_skill/ask_user/no_repair) surfaced to the user,
+                while a `continue` step is re-dispatched into next-step routing
+                with a bounded run ledger (the chained multi-step path);
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
                 operate on the tree via `ctx.admin`; new-skill creation is gated by
                 a tri-state mode (`new_skill_creation`: allow/deny/ask) with a
@@ -100,9 +102,14 @@ scheduler.py    no up-front gate: every input is dispatched
 queue.py        bounded FIFO request queue (arrival order, max depth)
 skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 tree plus the `housekeeping` meta skills), navigation = SemIf
-                choices per level (logged;
-                the actionability guard runs first, at the top of navigation,
-                to arbitrate the response/create boundary), create_category
+                choices per level (logged; the question is "which category/skill
+                is the logical next step toward satisfying this request?" for the
+                first step AND each continuation, and the run ledger is rendered
+                into the state, so a chained step sees what was already done;
+                the actionability guard runs first, at the top of navigation, to
+                arbitrate the response/create boundary — but ONLY on the first
+                step, since a continuation is actionable by construction),
+                create_category
                 and create_skill author + register stubs via the small `llm`
                 provider (separate from codegen); SkillStore persists one folder per skill
                 (skill.py, skill.test.py, contract.json, config.json) and
@@ -128,16 +135,22 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 act(ctx, request) phase that returns ActionResult (its own
                 SemIf sub-decisions ride on ActionResult.decisions and are
                 logged with the run outcome, phase `act`);
-                assess is a SemIf decision (`assess:outcome` success/failure at
-                tau; on failure `assess:requeue` complete/retry) and the run
-                summary is deterministic (no generation), built from
+                assess is a SemIf decision (`assess:outcome`: is there any
+                additional work to satisfy the request? -> done / continue /
+                failed, at threshold precedence failed > done > continue) and the
+                run summary is deterministic (no generation), built from
                 category.skill + ok/failed + action_log — the body writes only the
-                result, the runner adds the `category.name:` ref; the assess state carries
-                the skill's declared action, the goal, and the resolved inputs
-                (secrets redacted), and the requeue state flags a retry that would
-                reproduce the identical observed result as a no-op; a `DETERMINISTIC_CATEGORIES`
+                result, the runner adds the `category.name:` ref; the assess state
+                carries the skill's declared action, the goal, the resolved inputs
+                (secrets redacted), the bounded action log, and the steps already
+                taken (the run ledger); `continue` re-dispatches the request into
+                next-step routing with a bounded run-ledger entry (capped by
+                `max_reentries` + the monotonic-progress guard), `failed` offers a
+                repair; a `DETERMINISTIC_CATEGORIES`
                 run (housekeeping) skips assessment/repair — it is an internal
                 mechanical action with a known result, not an external run;
+                every skill's output is truncated to the one shared speakable
+                budget (`chain.result_chars`);
                 a run paused for input is resumed by re-invoking act with the
                 answer on request.user_input; a
                 contract variable the runner cannot satisfy pauses BEFORE
@@ -394,7 +407,17 @@ CLI, unit tests (24) + integration tests (2).
   drift into create on a weak plurality (real runs scored `create_skill`
   0.585–0.803 on requests a seed skill clearly matched). The reuse-vs-create
   decision is the **intent guard** (`confirm_skill_fit`, phase
-  `navigate:intent`) at `navigation.intent_tau`. The **actionability guard**
+  `navigate:intent`) at `navigation.intent_tau`: it decides what the softmax
+  winner does for the request — `same` (performs the next action the request
+  needs), `part` (the request needs more than one action and this skill performs
+  one required part), or `different` (author a new leaf). The run ledger is part
+  of the guard's state so a later step judges against the *remaining* work, not
+  the whole request; the guard only decides whether the skill contributes —
+  whether more work remains is `assess:outcome`'s call, so a compound request is
+  broken into known skills while the final step still stops cleanly (a forced
+  continue on `part` was tried and rejected: the guard labeled the final send
+  step `part` 0.85 while assessment correctly said `done` 0.99, and the forced
+  continue authored a spurious category). The **actionability guard**
   (`confirm_non_action`, phase `navigate:actionability`) at
   `navigation.action_tau` (default 0.5) runs at the **top** of navigation,
   before category selection: it decides whether the input is an actionable
@@ -989,9 +1012,10 @@ CLI, unit tests (24) + integration tests (2).
   asks the next missing variable). An act-driven `needs_input` also accepts an
   empty answer — it is forwarded to `act` as `user_input=""`; a body that then
   fails for lack of the info is assessed/repair-offered normally.
-- **Resolved-input observation.** The `assess:outcome` / `assess:requeue` state
-  includes the resolved contract values (`resolved inputs:` block) so the
-  decision sees the full query → resolution → action path; secret-named
+- **Resolved-input observation.** The `assess:outcome` state includes the
+  resolved contract values (`resolved inputs:` block), the bounded action log, and
+  the run ledger (steps already taken) so the decision sees the full query →
+  resolution → action → chain path; secret-named
   variables (pass/token/secret/key/credential/auth) are redacted to `***` so
   credentials never reach the decision log.
 - **Requirements elicitation (implementation questions, default on).**

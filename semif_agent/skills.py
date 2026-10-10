@@ -575,11 +575,61 @@ def unresolved_variables(
     return [name for name in (skill.contract or {}) if name not in merged]
 
 
+def bound_output(text: str, limit: int) -> str:
+    """Truncate a skill's output to the speakable budget.
+
+    A skill result is read in a text message or heard as speech, so a long
+    result is a bad result: the budget is the one shared bound (the same one the
+    voice front end and the humanizer use). Truncation is at a word boundary and
+    marked with an ellipsis; a non-positive limit disables it. A long *product*
+    of a skill belongs in a file I/O side effect, not in the result string (see
+    CODEGEN.md / TESTGEN.md).
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    clipped = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return clipped + "…"
+
+
+def render_ledger(entries: list[dict]) -> str:
+    """Render the run ledger as a compact, deterministic block.
+
+    One line per step: ``N. <category.skill> -> <outcome>``. Same entries, same
+    string. Threaded into the routing/assessment state so a continuation sees
+    what was already done toward the request.
+    """
+    lines = []
+    for index, entry in enumerate(entries, 1):
+        skill = entry.get("skill") or "?"
+        outcome = (entry.get("outcome") or "").strip()
+        lines.append(f"  {index}. {skill} -> {outcome}" if outcome else f"  {index}. {skill}")
+    return "\n".join(lines)
+
+
+def last_result(request: Request) -> str:
+    """The most recent chained step's result, or "" on a first-step request.
+
+    A body that runs as a later step of a chain reads this to use what the
+    previous step produced (e.g. a computed value to send) instead of
+    recomputing or fabricating it. The value is the prior step's bounded outcome
+    (its ``action_log`` or ``new_state``) — the same text the run ledger carries
+    and renders into the routing/assessment state.
+    """
+    ledger = getattr(request, "run_ledger", None) or []
+    if not ledger:
+        return ""
+    return str(ledger[-1].get("outcome") or "")
+
+
 def compose_state(request: Request, additional_context: str | None = None) -> str:
     parts = [request.text]
     if additional_context:
         parts.append(f"({additional_context})")
-    return " ".join(parts)
+    state = " ".join(parts)
+    ledger = render_ledger(request.run_ledger)
+    if ledger:
+        state = f"{state}\nsteps already taken:\n{ledger}"
+    return state
 
 
 def _canned_response(name: str, message: str):
@@ -1174,6 +1224,7 @@ def navigate(
     category_tau: float = 0.75,
     action_tau: float = 0.5,
     bypass_tau: float = 0.5,
+    skip_actionability: bool = False,
 ) -> Skill | CreateCategory | CreateSkill:
     """Descend the tree one SemIf choice per level. Every choice is logged.
 
@@ -1226,7 +1277,7 @@ def navigate(
             "create_category",
             request.id,
             state=compose_state(request),
-            question="Which top-level category handles this request?",
+            question="Which category is the logical next step toward satisfying this request?",
             options=[],
             selected="create_category",
             probs={},
@@ -1236,8 +1287,10 @@ def navigate(
     # Actionability first: is this input a request at all? A non-request goes to
     # the closed `response` tree (a canned reply) and never reaches the category
     # softmax; a request always proceeds to category selection, so it can never
-    # be canned.
-    if confirm_non_action(engine, log, trace, request, action_tau):
+    # be canned. A **continuation** (a request already carrying a run ledger) is
+    # actionable by construction — it is the next step of an in-flight request —
+    # so it skips this guard; only a fresh first-step input is checked.
+    if not skip_actionability and confirm_non_action(engine, log, trace, request, action_tau):
         response_skills = tree.get("response")
         if response_skills:
             return _navigate_canned(
@@ -1247,7 +1300,7 @@ def navigate(
             "create_category",
             request.id,
             state=compose_state(request),
-            question="Which top-level category handles this request?",
+            question="Which category is the logical next step toward satisfying this request?",
             options=[],
             selected="create_category",
             probs={},
@@ -1263,7 +1316,7 @@ def navigate(
     )
     top = DecisionRequest(
         state=compose_state(request),
-        question="Which top-level category handles this request?",
+        question="Which category is the logical next step toward satisfying this request?",
         options=[Option(c, descriptions.get(c, c)) for c in categories]
         + [create_category],
     )
@@ -1338,7 +1391,7 @@ def navigate(
             request,
             additional_context=f"all choices are within the {category} category",
         ),
-        question=f"Which {category} skill performs the action this request asks for?",
+        question=f"Which {category} skill should run next to help satisfy this request?",
         options=[Option(s.name, s.description) for s in skills],
     )
     leaf_result = engine.call(leaf)
@@ -1482,36 +1535,67 @@ def confirm_skill_fit(
     request: Request,
     skill: Skill,
     tau: float = 0.6,
-) -> bool:
-    """Does this skill's action actually match what the request asks for?
+) -> str:
+    """What does this skill do for the request? "same" | "part" | "different".
 
-    Navigation picks the closest existing leaf; this guard is now the **sole**
+    Navigation picks the closest existing leaf; this guard is the **sole**
     leaf-level reuse-vs-create decision (create_skill is no longer an option in
-    the leaf softmax). If the skill's action is not the same action the request
-    asks for, dispatch authors a new leaf instead. The threshold is
-    `navigation.intent_tau` (deliberately separate from the run-assessment
-    `tau`, so tuning reuse-vs-create does not move assessment/fidelity).
+    the leaf softmax). It answers three ways:
 
-    Wording tuned against the real model: comparing the two *actions*
-    ("different action") is unambiguous where "can this serve the request" was
-    not — e.g. "message Sam" (an implicit send in instant-messaging syntax)
-    reads as a different action from "read the next message". Do not add an
-    instant-messaging context hint: it over-fires and pulls read phrasings to
-    the send side. The comparison is over-permissive on near-synonyms (read vs
-    send score "same" ~0.74-0.78), so it is paired with the softmax that
-    disambiguates them — the guard only ever sees the softmax winner.
+    - ``same`` — the skill performs the next action the request needs (running it
+      can satisfy the request, or is its final step);
+    - ``part`` — the request needs more than one action and this skill performs
+      one required part of it;
+    - ``different`` — the skill does not do any action the request asks for;
+      dispatch authors a new leaf instead.
+
+    ``same``/``part`` run the skill; ``different`` is the create door. The guard
+    only decides whether the skill *contributes* — whether more work remains is
+    ``assess:outcome``'s call (the guard must never force a continuation: in a
+    real run it labeled the final send step ``part`` 0.85 while the assessment
+    correctly said ``done`` 0.99, and a forced continue drove the chain into a
+    spurious new category). The **run ledger is part of the state** so a later
+    step judges against the *remaining* work, not the whole request. Without the
+    ledger a compound request has no single skill that is ``same``, so the guard
+    would author a monolithic skill for every one of them — the bug this fixes (a
+    real run picked ``calculator.calculate`` at 0.99 and was rejected into
+    create_skill).
+
+    The threshold is ``navigation.intent_tau`` (deliberately separate from the
+    run-assessment ``tau``, so tuning reuse-vs-create does not move
+    assessment/fidelity). Wording tuned against the real model: comparing the
+    two *actions* is unambiguous where "can this serve the request" was not.
+    Do not add an instant-messaging context hint: it over-fires and pulls read
+    phrasings to the send side.
     """
+    state = (
+        f"Requested action: {request.text}\n"
+        f"Action of the existing skill: {skill.description}"
+    )
+    ledger = render_ledger(request.run_ledger)
+    if ledger:
+        state += f"\nsteps already taken:\n{ledger}"
     decision = DecisionRequest(
-        state=(
-            f"Requested action: {request.text}\n"
-            f"Action of the existing skill: {skill.description}"
+        state=state,
+        question=(
+            "Given the steps already taken, what does this skill do for the "
+            "request?"
         ),
-        question="Compare the requested action and the skill's action. Are they the same action?",
         options=[
-            Option("same", "Same action."),
+            Option(
+                "same",
+                "It performs the next action the request needs and can satisfy "
+                "the request (or is its final step).",
+            ),
+            Option(
+                "part",
+                "The request needs more than one action; this skill performs one "
+                "required part of it, and more steps remain after it.",
+            ),
             Option(
                 "different",
-                "Different action: the skill does not do what the user asks.",
+                "It does not do any action the request asks for; a new skill is "
+                "needed.",
             ),
         ],
     )
@@ -1525,7 +1609,15 @@ def confirm_skill_fit(
             "skill": f"{skill.category}.{skill.name}",
         },
     )
-    fits = result.prob("same") >= tau
+    same = result.prob("same")
+    part = result.prob("part")
+    fits = (same + part) >= tau
+    if not fits:
+        verdict = "different"
+    elif same >= part:
+        verdict = "same"
+    else:
+        verdict = "part"
     trace.append(
         "intent_guard",
         request.id,
@@ -1533,9 +1625,10 @@ def confirm_skill_fit(
         skill=skill.name,
         selected=result.selected,
         probs=result.probs,
+        verdict=verdict,
         fits=fits,
     )
-    return fits
+    return verdict
 
 
 def tree_summary(tree: dict[str, list[Skill]]) -> str:

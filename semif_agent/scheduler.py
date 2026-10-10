@@ -90,6 +90,25 @@ def normalize_new_skill_mode(value) -> str | None:
     return None
 
 
+#: Output verbosity levels. "result" (default) shows only the final result of a
+#: request; "query" also shows each intermediate chain step (query + ledger);
+#: "decision" also shows each SemIf decision phase.
+VERBOSITY_LEVELS = ("result", "query", "decision")
+
+
+def normalize_verbosity(value) -> str:
+    """Coerce a configured verbosity to one of `VERBOSITY_LEVELS`.
+
+    Unrecognized/absent falls back to the "result" default (the end user only
+    wants the answer, not each decision or query).
+    """
+    if isinstance(value, str):
+        mode = value.strip().lower()
+        if mode in VERBOSITY_LEVELS:
+            return mode
+    return "result"
+
+
 @dataclass
 class Process:
     request: Request
@@ -223,6 +242,10 @@ class DispatchResult:
     #: The skill's own detail (its `action_log`, or `new_state` when empty) —
     #: the unwrapped result a `result_only` front end speaks.
     result: str | None = None
+    #: True when this step is an intermediate "continue" of a chained request:
+    #: the request is re-dispatched and the *final* step's reply is the answer.
+    #: A `result`-verbosity front end hides intermediates.
+    intermediate: bool = False
 
 
 @dataclass
@@ -240,6 +263,11 @@ class SchedulerReply:
     run_id: str = ""
     skill_ref: str | None = None
     result: str | None = None
+    #: See `DispatchResult.intermediate`.
+    intermediate: bool = False
+    #: At `decision` verbosity only: the SemIf decision phases (with the selected
+    #: option) recorded for this run, for a debugging front end.
+    decision_lines: list[str] = field(default_factory=list)
 
 
 class Scheduler:
@@ -275,6 +303,19 @@ class Scheduler:
         #: option, so its confidence carries no match signal).
         self.bypass_tau = float(nav_cfg.get("softmax_bypass_tau", 0.5))
         self.max_reentries = max_reentries
+        #: How much of a completed chain to surface. "result" (default): only the
+        #: final result; "query": also each intermediate step's query + ledger;
+        #: "decision": also each SemIf decision phase (a debugging view).
+        self.verbosity = normalize_verbosity(config.get("verbosity"))
+        #: One shared speakable budget for every skill's output (the result string
+        #: and its run-ledger entry): a result is read in a chat or spoken, so it
+        #: is truncated to this many characters at a word boundary.
+        chain_cfg = config.get("chain", {}) or {}
+        self.result_chars = int(chain_cfg.get("result_chars", 300))
+        #: The `assess:outcome` thresholds (precedence failed > done > continue).
+        assess_cfg = config.get("assess", {}) or {}
+        self.done_tau = float(assess_cfg.get("done_tau", 0.5))
+        self.fail_tau = float(assess_cfg.get("fail_tau", 0.5))
         self.codegen = codegen
         self.degeneration_check_factory = degeneration_check_factory
         self.regen_decision_factory = regen_decision_factory
@@ -329,7 +370,13 @@ class Scheduler:
             engine=self.engine, config=config, timers=self.timers, admin=self
         )
         self.runner = SkillRunner(
-            self.ctx, self.log, store=self.body_store, tau=self.tau
+            self.ctx,
+            self.log,
+            store=self.body_store,
+            tau=self.tau,
+            done_tau=self.done_tau,
+            fail_tau=self.fail_tau,
+            result_chars=self.result_chars,
         )
         self._fatal: str | None = None
         self.current: Process | None = None
@@ -404,11 +451,14 @@ class Scheduler:
                 return SchedulerReply(
                     "needs_input", outcome.summary, request.id,
                     outcome.skill_ref, outcome.result,
+                    decision_lines=self._decision_lines(request.id),
                 )
             self.trace.append("ran", request.id, skill=outcome.skill, summary=outcome.summary)
             return SchedulerReply(
                 "running", outcome.summary, request.id,
                 outcome.skill_ref, outcome.result,
+                intermediate=outcome.intermediate,
+                decision_lines=self._decision_lines(request.id),
             )
 
         ok = self.queue.push(request)
@@ -467,6 +517,7 @@ class Scheduler:
                     SchedulerReply(
                         "needs_input", outcome.summary, request.id,
                         outcome.skill_ref, outcome.result,
+                        decision_lines=self._decision_lines(request.id),
                     )
                 )
                 continue
@@ -475,9 +526,30 @@ class Scheduler:
                 SchedulerReply(
                     "ran", outcome.summary, request.id,
                     outcome.skill_ref, outcome.result,
+                    intermediate=outcome.intermediate,
+                    decision_lines=self._decision_lines(request.id),
                 )
             )
         return results
+
+    def _decision_lines(self, request_id: str) -> list[str]:
+        """The SemIf decision phases recorded for one run.
+
+        Only populated at `decision` verbosity (a debugging view); every other
+        level returns an empty list so a normal front end never sees SemIf
+        internals.
+        """
+        if self.verbosity != "decision":
+            return []
+        lines = []
+        for row in self.log.read():
+            extra = row.get("extra") or {}
+            if extra.get("run_id") != request_id:
+                continue
+            probs = row.get("predicted_probs") or {}
+            rendered = " ".join(f"{k}={v:.2f}" for k, v in probs.items())
+            lines.append(f"{extra.get('phase', '?')}: {row.get('selected', '?')} [{rendered}]")
+        return lines
 
     # ---- dispatch ----
 
@@ -510,6 +582,11 @@ class Scheduler:
             category_tau=self.category_tau,
             action_tau=self.action_tau,
             bypass_tau=self.bypass_tau,
+            # A continuation (a request already carrying a run ledger) is the
+            # next step of an in-flight request, so it is actionable by
+            # construction and skips the actionability guard; only a fresh
+            # first-step input is checked against the closed `response` tree.
+            skip_actionability=bool(request.run_ledger),
         )
         if isinstance(navigation, CreateCategory):
             if self.new_skill_mode == "deny":
@@ -531,9 +608,10 @@ class Scheduler:
         # therefore the sole leaf-level create door and is never bypassed: a
         # confident softmax winner among only-wrong options must still be
         # checked, or codegen can never be reached for an unmatched request.
-        if not confirm_skill_fit(
+        verdict = confirm_skill_fit(
             self.engine, self.log, self.trace, request, navigation, self.intent_tau
-        ):
+        )
+        if verdict == "different":
             self.trace.append(
                 "intent_mismatch",
                 request.id,
@@ -543,6 +621,10 @@ class Scheduler:
             if self._category_locked(navigation.category):
                 return self._blocked_create(request, navigation.category)
             return self._dispatch_skill(request, navigation.category)
+        # `same` or `part` both run the skill: a `part` step is one required part
+        # of a compound request, and whether more work remains is `assess:outcome`'s
+        # call — never the guard's. (Forcing a `continue` here overrode a correct
+        # `done` on the final step and drove the chain into a spurious create.)
         return self._run_skill(navigation, request)
 
     def _dispatch_create_category(self, request: Request) -> DispatchResult:
@@ -707,12 +789,15 @@ class Scheduler:
                 return SchedulerReply(
                     "needs_input", result.summary, pending.request.id,
                     result.skill_ref, result.result,
+                    decision_lines=self._decision_lines(pending.request.id),
                 )
             self.current = None
             self.trace.append("ran", pending.request.id, skill=result.skill, summary=result.summary)
             return SchedulerReply(
                 "ran", f"[resumed] {result.summary}", pending.request.id,
                 result.skill_ref, result.result,
+                intermediate=result.intermediate,
+                decision_lines=self._decision_lines(pending.request.id),
             )
 
     def _finish_run(self, skill: Skill, request: Request, outcome) -> DispatchResult:
@@ -741,29 +826,67 @@ class Scheduler:
                 skill_ref=f"{skill.category}.{skill.name}",
                 result=outcome.action_log or outcome.new_state or None,
             )
+        verdict = outcome.outcome or ("done" if outcome.success else "failed")
         self.trace.append(
             "assessed",
             request.id,
             skill=skill.name,
+            outcome=verdict,
             success=outcome.success,
             summary=outcome.summary,
             assessment_summary=outcome.assessment_summary,
             action_log=outcome.action_log,
-            updated_request=outcome.updated_request,
         )
-        requeued = False
-        if outcome.updated_request and request.reentries < self.max_reentries:
-            child = _requeue(request, outcome.updated_request)
-            # Remember what this attempt observed so the next assessment can
-            # tell a genuine retry (the result changed) from a guaranteed
-            # repeat against unchanged state.
-            child.meta["prev_result"] = outcome.action_log or outcome.new_state
-            self.queue.push(child)
-            self.trace.append("requeued", request.id, text=outcome.updated_request)
-            if self.on_request_requeued is not None:
-                self.on_request_requeued(request.id, child.id)
-            requeued = True
-        if not outcome.success and not (outcome.updated_request and requeued):
+        if verdict == "continue":
+            entry = {
+                "query": request.text,
+                "skill": f"{skill.category}.{skill.name}",
+                "outcome": outcome.action_log or outcome.new_state,
+            }
+            repeat = self._would_repeat(request, entry)
+            if request.reentries < self.max_reentries and not repeat:
+                child = _continue(request, entry)
+                self.queue.push(child)
+                self.trace.append(
+                    "continued",
+                    request.id,
+                    skill=entry["skill"],
+                    outcome=entry["outcome"],
+                    step=len(child.run_ledger),
+                )
+                if self.on_request_requeued is not None:
+                    self.on_request_requeued(request.id, child.id)
+                # Intermediate step: the request is re-dispatched, and the final
+                # step's reply is the answer. A `result`-verbosity front end
+                # hides this reply.
+                return DispatchResult(
+                    kind="ran",
+                    summary=outcome.summary,
+                    skill=skill.name,
+                    decisions_logged=outcome.decisions_logged,
+                    skill_ref=f"{skill.category}.{skill.name}",
+                    result=(outcome.action_log or outcome.new_state or None),
+                    intermediate=True,
+                )
+            # The chain stops here: it worked, but either the step budget is
+            # spent or the next step would repeat an identical (skill, outcome).
+            # This is not a failure, so no repair offer — just report what is
+            # still pending.
+            self.trace.append(
+                "chain_halted",
+                request.id,
+                skill=entry["skill"],
+                reason="repeat" if repeat else "budget",
+            )
+            return DispatchResult(
+                kind="ran",
+                summary=outcome.summary,
+                skill=skill.name,
+                decisions_logged=outcome.decisions_logged,
+                skill_ref=f"{skill.category}.{skill.name}",
+                result=(outcome.action_log or outcome.new_state or None),
+            )
+        if verdict == "failed":
             self._propose_repair(skill, request, outcome)
         return DispatchResult(
             kind="ran",
@@ -772,6 +895,21 @@ class Scheduler:
             decisions_logged=outcome.decisions_logged,
             skill_ref=f"{skill.category}.{skill.name}",
             result=(outcome.action_log or outcome.new_state or None),
+        )
+
+    def _would_repeat(self, request: Request, entry: dict) -> bool:
+        """Would entering this step repeat an identical (skill, outcome)?
+
+        The monotonic-progress guard: each chain step must either select a
+        *different* skill or produce a *changed* outcome. A repeated pair means
+        the chain is not making progress (the request and external state are
+        unchanged), so it must stop instead of looping.
+        """
+        skill = entry.get("skill")
+        outcome = entry.get("outcome")
+        return any(
+            prior.get("skill") == skill and prior.get("outcome") == outcome
+            for prior in request.run_ledger
         )
 
     # ---- repair loop ----
@@ -2305,10 +2443,20 @@ class Scheduler:
             return "\n".join(lines)
 
 
-def _requeue(request: Request, updated_text: str) -> Request:
-    updated = Request(updated_text, source="requeue")
+def _continue(request: Request, entry: dict) -> Request:
+    """Build the next-step request for a chained run.
+
+    Deterministic: the *new query* is the original goal re-fed with the run
+    ledger attached (composed in `compose_state`), never a generated utterance.
+    Carries the prior ledger plus this step's entry, bumps the step count, and
+    links the parent run so a front end can route the completion home. `meta` is
+    intentionally not copied (a later step is a different skill, so per-fire
+    config answers must not leak forward).
+    """
+    updated = Request(request.text, source="continue")
     updated.reentries = request.reentries + 1
     updated.meta["parent_run"] = request.id
+    updated.run_ledger = [dict(e) for e in request.run_ledger] + [dict(entry)]
     return updated
 
 

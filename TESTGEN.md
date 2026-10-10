@@ -26,6 +26,12 @@ integration, and the agent offers to fix the skill when that real run fails. A
 test must never be "fixed" by simulating the action or by weakening an
 assertion, and a simulated body is broken even if every test passes.
 
+A skill's result is **bounded** to one speakable budget (it is read in a chat
+message or spoken aloud; `chain.result_chars`, ~300 characters). Do not assert a
+long/detailed payload: a skill whose real product is long or structured writes it
+to the service or a file as a side effect and returns a short summary plus a
+pointer. Order by the skill's own contract, not the fixture's size.
+
 ## contract.json
 
 A **single JSON object**. Each key is the name of a variable the skill needs;

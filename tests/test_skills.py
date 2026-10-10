@@ -28,6 +28,7 @@ from semif_agent.scheduler import (
     PendingQuestion,
     RepairOffer,
     Scheduler,
+    SchedulerReply,
     SkillWrite,
 )
 from semif_agent.skills import (
@@ -129,20 +130,23 @@ def _pipeline_codegen_server(replies: list) -> tuple[ThreadingHTTPServer, str]:
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/v1"
 
 
-def _scheduler(tmp_path, codegen=None, choices=None, default="success"):
+def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosity=None):
     """A scheduler driven by the deterministic scripted engine (conftest) so
     scheduling/authoring mechanics are testable without a GGUF. Assessment is a
     SemIf decision now, so a run needs the engine to answer `assess:*`."""
+    config = {
+        "skills": {},
+        "category_registry": str(tmp_path / "categories.json"),
+        "skill_bodies": str(tmp_path / "skills"),
+        "skill_seeds": str(tmp_path / "seeds"),
+    }
+    if verbosity is not None:
+        config["verbosity"] = verbosity
     return Scheduler(
         engine=ScriptedEngine(choices=choices, default=default),
         llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
         log=DecisionLog(str(tmp_path / "decisions.jsonl")),
-        config={
-            "skills": {},
-            "category_registry": str(tmp_path / "categories.json"),
-            "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
-        },
+        config=config,
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
         codegen=codegen,
     )
@@ -188,8 +192,7 @@ def test_run_summary_is_deterministic_and_surfaces_action_log(tmp_path):
 def test_run_summary_failure_uses_new_state_when_no_action_log(tmp_path):
     """A failed run with an empty action log falls back to the new state."""
     scheduler = _scheduler(
-        tmp_path, choices={"achieve the user's goal": "failure",
-                           "complete, or should it run again": "complete"}
+        tmp_path, choices={"additional work to be done": "failed"}
     )
 
     def act(ctx, request):
@@ -200,6 +203,7 @@ def test_run_summary_failure_uses_new_state_when_no_action_log(tmp_path):
     scheduler._run_skill(skill, Request("probe it"))
     assessed = [e for e in scheduler.trace.read() if e["kind"] == "assessed"]
     assert assessed[-1]["success"] is False
+    assert assessed[-1]["outcome"] == "failed"
     assert assessed[-1]["summary"] == "tracking.probe: failed — service unreachable"
 
 
@@ -615,16 +619,15 @@ def test_canned_response_runs_without_assessment(tmp_path):
 def test_assessment_state_carries_skill_action(tmp_path):
     """The assessment decision must see what the skill was meant to do.
 
-    Regression: with only `skill: <label>` in the state, the decision model
-    misfired on a correctly-read result for an ambiguous phrasing, marked a
-    truthful read failed, and looped the retry ladder until a repair offer. The
-    skill's declared action now rides in both assessment states.
+    The state carries the skill's declared action, the goal, and the resolved
+    inputs so the decision can judge whether more work is needed toward the
+    request. One three-way decision (done/continue/failed), no second call.
     """
     from semif_agent.skill import SkillRunner
     from semif_agent.skills import ActionContext
 
     engine = ScriptedEngine(
-        choices={"Did the skill achieve": "failure"}, default="success"
+        choices={"additional work to be done": "done"}
     )
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
 
@@ -638,52 +641,63 @@ def test_assessment_state_carries_skill_action(tmp_path):
         act=act,
     )
     runner = SkillRunner(ActionContext(engine=engine, config={}), log)
-    runner.run(skill, Request("What's my next simplex message?"))
+    outcome = runner.run(skill, Request("What's my next simplex message?"))
 
-    outcome_state = engine.calls[0].state
-    assert "skill action: Read the next unread SimpleX message." in outcome_state
-    assert "goal: What's my next simplex message?" in outcome_state
-    requeue_state = engine.calls[1].state
-    assert "skill action: Read the next unread SimpleX message." in requeue_state
+    assert len(engine.calls) == 1
+    state = engine.calls[0].state
+    assert "skill action: Read the next unread SimpleX message." in state
+    assert "goal: What's my next simplex message?" in state
+    assert outcome.outcome == "done"
 
 
-def test_requeue_state_flags_identical_repeat(tmp_path):
-    """A retry that would reproduce the identical result is flagged as a no-op
-    so the requeue decision can choose `complete` instead of looping."""
+def test_assessment_three_way_verdict(tmp_path):
+    """The one `assess:outcome` decision yields done / continue / failed by
+    threshold precedence (failed > done > continue)."""
     from semif_agent.skill import SkillRunner
     from semif_agent.skills import ActionContext
 
-    engine = ScriptedEngine(
-        choices={"Did the skill achieve": "failure"}, default="success"
+    skill = Skill(
+        name="next_message",
+        category="simplex",
+        description="Read the next unread SimpleX message.",
+        act=lambda ctx, request: ActionResult(action_log="did it", new_state="x"),
     )
+
+    def verdict_for(selected):
+        engine = ScriptedEngine(choices={"additional work to be done": selected})
+        log = DecisionLog(str(tmp_path / f"{selected}.jsonl"))
+        runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+        return runner.run(skill, Request("go")).outcome
+
+    assert verdict_for("done") == "done"
+    assert verdict_for("continue") == "continue"
+    assert verdict_for("failed") == "failed"
+
+
+def test_assessment_state_includes_run_ledger(tmp_path):
+    """A continuation's assessment sees the steps already taken, so it can tell
+    whether the request is satisfied or more work is needed."""
+    from semif_agent.skill import SkillRunner
+    from semif_agent.skills import ActionContext
+
+    engine = ScriptedEngine(choices={"additional work to be done": "done"})
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     skill = Skill(
         name="next_message",
         category="simplex",
         description="Read the next unread SimpleX message.",
-        act=lambda ctx, request: ActionResult(
-            action_log="SimpleX message from pepper: hello", new_state="read"
-        ),
+        act=lambda ctx, request: ActionResult(action_log="second step", new_state="read"),
     )
     runner = SkillRunner(ActionContext(engine=engine, config={}), log)
+    request = Request("do the thing")
+    request.run_ledger = [
+        {"query": "do the thing", "skill": "simplex.other", "outcome": "already ran"}
+    ]
+    runner.run(skill, request)
 
-    # First attempt: no prior result, so no no-progress note.
-    runner.run(skill, Request("What's my next simplex message?"))
-    assert "identical result" not in engine.calls[1].state
-
-    # Same observed result as the previous attempt: flagged as a no-op retry.
-    engine.calls.clear()
-    repeat = Request("What's my next simplex message?")
-    repeat.meta["prev_result"] = "SimpleX message from pepper: hello"
-    runner.run(skill, repeat)
-    assert "identical result" in engine.calls[1].state
-
-    # A changed result is progress: not flagged.
-    engine.calls.clear()
-    progress = Request("What's my next simplex message?")
-    progress.meta["prev_result"] = "a different previous result"
-    runner.run(skill, progress)
-    assert "identical result" not in engine.calls[1].state
+    state = engine.calls[0].state
+    assert "steps already taken:" in state
+    assert "simplex.other -> already ran" in state
 
 
 
@@ -778,9 +792,9 @@ def test_navigate_leaf_returns_best_existing_skill(tmp_path):
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 1.0},
+            "logical next step": {"simplex": 1.0},
             "Does the scope": {"covers": 1.0},
-            "skill performs": {"next_message": 0.45, "connect_link": 0.55},
+            "skill should run next": {"next_message": 0.45, "connect_link": 0.55},
         }
     )
     result = navigate(
@@ -796,7 +810,7 @@ def test_navigate_single_skill_category_skips_the_softmax(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
-        {"top-level category": {"simplex": 1.0}, "Does the scope": {"covers": 1.0}}
+        {"logical next step": {"simplex": 1.0}, "Does the scope": {"covers": 1.0}}
     )
     tree = {
         "simplex": [
@@ -812,7 +826,7 @@ def test_navigate_single_skill_category_skips_the_softmax(tmp_path):
 def test_navigate_empty_category_short_circuits_to_create(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = _ProbEngine({"top-level category": {"simplex": 1.0}})
+    engine = _ProbEngine({"logical next step": {"simplex": 1.0}})
     result = navigate(engine, log, trace, Request("anything"), {"simplex": []})
     assert isinstance(result, CreateSkill)
     assert result.category == "simplex"
@@ -822,7 +836,7 @@ def test_navigate_empty_category_short_circuits_to_create(tmp_path):
 def test_navigate_category_options_carry_descriptions(tmp_path):
     """The category softmax must offer each category WITH its description — bare
     names carry no signal (the misroute bug)."""
-    engine = _ProbEngine({"top-level category": {"simplex": 1.0}})
+    engine = _ProbEngine({"logical next step": {"simplex": 1.0}})
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     tree = {
@@ -836,7 +850,7 @@ def test_navigate_category_options_carry_descriptions(tmp_path):
         ]
     }
     navigate(engine, log, trace, Request("read the next message"), tree)
-    cat_decision = next(c for c in engine.calls if "top-level category" in c.question)
+    cat_decision = next(c for c in engine.calls if "logical next step" in c.question)
     by_id = {o.id: o.description for o in cat_decision.options}
     assert by_id["simplex"] == "SimpleX messaging: read/send messages."
     assert "new top-level category is needed" in by_id["create_category"]
@@ -851,7 +865,7 @@ def test_navigate_category_rejected_scope_authors_category(tmp_path):
     tree = _leaf_tree()
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 0.45},
+            "logical next step": {"simplex": 0.45},
             "Does the scope": {"none": 1.0},
         }
     )
@@ -867,9 +881,9 @@ def test_navigate_category_confirmed_scope_descends(tmp_path):
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 0.45},
+            "logical next step": {"simplex": 0.45},
             "Does the scope": {"covers": 1.0},
-            "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+            "skill should run next": {"next_message": 1.0, "connect_link": 0.0},
         }
     )
     result = navigate(engine, log, trace, Request("read a message"), _leaf_tree())
@@ -885,8 +899,8 @@ def test_navigate_confident_category_winner_skips_scope_confirm(tmp_path):
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 0.9},
-            "skill performs": {"next_message": 1.0, "connect_link": 0.0},
+            "logical next step": {"simplex": 0.9},
+            "skill should run next": {"next_message": 1.0, "connect_link": 0.0},
         }
     )
     result = navigate(engine, log, trace, Request("read a message"), _leaf_tree())
@@ -948,7 +962,7 @@ def test_navigate_actionability_sends_a_request_to_create(tmp_path):
     tree = build_tree(build_skills({"skills": {}}))
     engine = _ProbEngine(
         {
-            "top-level category": {"response": 1.0},
+            "logical next step": {"response": 1.0},
             "non-request input": {"action": 1.0},
         }
     )
@@ -968,7 +982,7 @@ def test_navigate_actionability_keeps_a_statement_in_response(tmp_path):
     tree = build_tree(build_skills({"skills": {}}))
     engine = _ProbEngine(
         {
-            "top-level category": {"create_category": 1.0},
+            "logical next step": {"create_category": 1.0},
             "non-request input": {"non_action": 1.0},
         }
     )
@@ -998,14 +1012,14 @@ def test_navigate_actionability_gate_precedes_category_selection(tmp_path):
         {
             "non-request input": {"non_action": 1.0},
             # If the category softmax ran it would route to simplex, not response.
-            "top-level category": {"simplex": 1.0},
+            "logical next step": {"simplex": 1.0},
             "canned response": {"response.greeting": 1.0},
         }
     )
     result = navigate(engine, log, trace, Request("the sky is blue"), tree)
     assert getattr(result, "category", None) == "response"
     assert all(
-        "top-level category" not in c.question for c in engine.calls
+        "logical next step" not in c.question for c in engine.calls
     ), "the category softmax must not run for non-request input"
     phases = [r["extra"]["phase"] for r in log.read()]
     assert "navigate:actionability" in phases
@@ -1029,13 +1043,13 @@ def test_navigate_category_softmax_excludes_the_canned_response_tree(tmp_path):
     ]
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 1.0},
+            "logical next step": {"simplex": 1.0},
             "Does the scope": {"covers": 1.0},
         }
     )
     navigate(engine, log, trace, Request("read the next simplex message"), tree)
     cat_decision = next(
-        c for c in engine.calls if "top-level category" in c.question
+        c for c in engine.calls if "logical next step" in c.question
     )
     ids = [o.id for o in cat_decision.options]
     assert "response" not in ids
@@ -1051,7 +1065,7 @@ def test_dispatch_action_tau_controls_catchall_routing(tmp_path):
         scheduler = Scheduler(
             engine=_ProbEngine(
                 {
-                    "top-level category": {"response": 1.0},
+                    "logical next step": {"response": 1.0},
                     "non-request input": {"non_action": 0.6, "action": 0.4},
                 }
             ),
@@ -1089,12 +1103,12 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
     def build(intent_tau: float):
         engine = _ProbEngine(
             {
-                "top-level category": {"simplex": 1.0},
+                "logical next step": {"simplex": 1.0},
                 "Does the scope": {"covers": 1.0},
                 # The leaf softmax offers only existing skills, so the intent
                 # guard always runs (it is the create door).
-                "skill performs": {"next_message": 0.45, "connect_link": 0.3},
-                "same action": {"same": 0.8, "different": 0.2},
+                "skill should run next": {"next_message": 0.45, "connect_link": 0.3},
+                "what does this skill do": {"same": 0.8, "different": 0.2},
             }
         )
         scheduler = Scheduler(
@@ -1138,24 +1152,40 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
     assert queued_high == [("simplex", "skill")]
 
 
-def test_confirm_skill_fit_returns_true_when_action_matches(tmp_path):
+def test_confirm_skill_fit_returns_same_when_action_matches(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = ScriptedEngine(choices={"same action": "same"})
+    engine = ScriptedEngine(choices={"what does this skill do": "same"})
     skill = Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")
-    assert confirm_skill_fit(engine, log, trace, Request("read the next simplex message"), skill) is True
+    assert confirm_skill_fit(engine, log, trace, Request("read the next simplex message"), skill) == "same"
     row = log.read()[-1]
     assert row["extra"]["phase"] == "navigate:intent"
     assert row["selected"] == "same"
 
 
-def test_confirm_skill_fit_returns_false_on_mismatch(tmp_path):
+def test_confirm_skill_fit_returns_different_on_mismatch(tmp_path):
     log = DecisionLog(str(tmp_path / "decisions.jsonl"))
     trace = TraceLog(str(tmp_path / "runs.jsonl"))
-    engine = ScriptedEngine(choices={"same action": "different"})
+    engine = ScriptedEngine(choices={"what does this skill do": "different"})
     skill = Skill(name="next_message", category="simplex", description="Read the next SimpleX message.")
-    assert confirm_skill_fit(engine, log, trace, Request("send a simplex message"), skill) is False
+    assert confirm_skill_fit(engine, log, trace, Request("send a simplex message"), skill) == "different"
     assert any(e["kind"] == "intent_guard" and e["fits"] is False for e in trace.read())
+
+
+def test_confirm_skill_fit_returns_part_for_a_compound_request(tmp_path):
+    """A skill that performs one required part of a compound request is accepted
+    as `part` (not rejected into create), and the ledger is in the state."""
+    log = DecisionLog(str(tmp_path / "decisions.jsonl"))
+    trace = TraceLog(str(tmp_path / "runs.jsonl"))
+    engine = ScriptedEngine(choices={"what does this skill do": "part"})
+    skill = Skill(name="calculate", category="calculator", description="Do arithmetic.")
+    request = Request("send the result of 22 * 10 to pepper on simplex")
+    request.run_ledger = [
+        {"query": "x", "skill": "calculator.calculate", "outcome": "done"}
+    ]
+    assert confirm_skill_fit(engine, log, trace, request, skill) == "part"
+    guard = next(e for e in trace.read() if e["kind"] == "intent_guard")
+    assert guard["verdict"] == "part" and guard["fits"] is True
 
 
 def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
@@ -1163,7 +1193,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
     guard sends dispatch to create_skill in the same category instead."""
     scheduler = _scheduler(
         tmp_path,
-        choices={"top-level category": "simplex", "same action": "different"},
+        choices={"logical next step": "simplex", "what does this skill do": "different"},
     )
     scheduler.tree.pop("response", None)
     scheduler.tree["simplex"] = [
@@ -1183,7 +1213,7 @@ def test_dispatch_intent_mismatch_authorizes_new_skill(tmp_path):
 
 def test_dispatch_intent_match_runs_skill(tmp_path):
     scheduler = _scheduler(
-        tmp_path, choices={"top-level category": "simplex", "same action": "same"}
+        tmp_path, choices={"logical next step": "simplex", "what does this skill do": "same"}
     )
 
     def act(ctx, request):
@@ -1215,9 +1245,9 @@ def test_dispatch_confident_leaf_winner_still_runs_intent_guard(tmp_path):
     and codegen was never reached."""
     engine = _ProbEngine(
         {
-            "top-level category": {"simplex": 1.0},
-            "skill performs": {"next_message": 0.9, "connect_link": 0.1},
-            "same action": {"different": 1.0},
+            "logical next step": {"simplex": 1.0},
+            "skill should run next": {"next_message": 0.9, "connect_link": 0.1},
+            "what does this skill do": {"different": 1.0},
         }
     )
     scheduler = Scheduler(
@@ -2113,15 +2143,15 @@ def test_resolve_repair_unknown_offer_errors(tmp_path):
     assert "no repair offer" in detail
 
 
-def test_exhausted_reentry_offers_repair(tmp_path):
-    """A failure whose retry is refused because the reentry budget is spent must
-    still surface a repair offer. Before, `updated_request` stayed truthy so the
-    offer was skipped and the failure vanished after the retry ladder."""
+def test_failed_run_offers_repair(tmp_path):
+    """A `failed` outcome offers a repair, regardless of the reentry budget: it
+    is a broken step, not a "more work" step."""
     scheduler = _scheduler(tmp_path)
-    _install_tracking_stub(scheduler)
-    skill = scheduler.tree["tracking"][0]
-    skill.act = lambda ctx, request: ActionResult(
-        action_log="connection refused", new_state="unchanged"
+    skill = Skill(
+        name="check",
+        category="tracking",
+        description="Check the delivery status of a package.",
+        act=lambda ctx, request: ActionResult(action_log="boom", new_state="x"),
     )
     request = Request("track my package")
     request.reentries = scheduler.max_reentries
@@ -2131,30 +2161,305 @@ def test_exhausted_reentry_offers_repair(tmp_path):
         summary="failed",
         action_log="connection refused",
         new_state="unchanged",
-        updated_request="track my package",
+        outcome="failed",
     )
     scheduler._finish_run(skill, request, outcome)
-    assert not any(e["kind"] == "requeued" for e in scheduler.trace.read())
+    assert not any(e["kind"] == "continued" for e in scheduler.trace.read())
     assert any(e["kind"] == "repair_offered" for e in scheduler.trace.read())
 
 
-def test_requeue_remembers_previous_result(tmp_path):
-    """A requeued retry carries the observed result forward so the next
-    assessment can detect a guaranteed no-op repeat."""
+def test_continue_routes_next_step_carries_ledger(tmp_path):
+    """A `continue` outcome re-dispatches the request with a run-ledger entry and
+    a parent-run link; the next step's ledger leads back to the original query."""
     scheduler = _scheduler(tmp_path)
-    _install_tracking_stub(scheduler)
-    skill = scheduler.tree["tracking"][0]
+    skill = Skill(
+        name="check",
+        category="tracking",
+        description="Check the delivery status of a package.",
+        act=lambda ctx, request: ActionResult(action_log="boom", new_state="x"),
+    )
     request = Request("track my package")
     outcome = RunResult(
         skill="tracking.check",
-        success=False,
-        summary="failed",
-        action_log="connection refused",
-        new_state="unchanged",
-        updated_request="track my package",
+        success=True,
+        summary="ok",
+        action_log="tracking opened",
+        new_state="opened",
+        outcome="continue",
     )
     scheduler._finish_run(skill, request, outcome)
     child = scheduler.queue.pop()
     assert child is not None
-    assert child.meta["prev_result"] == "connection refused"
-    assert any(e["kind"] == "requeued" for e in scheduler.trace.read())
+    assert child.source == "continue"
+    assert child.text == "track my package"
+    assert child.meta["parent_run"] == request.id
+    assert child.run_ledger == [
+        {"query": "track my package", "skill": "tracking.check", "outcome": "tracking opened"}
+    ]
+    assert any(e["kind"] == "continued" for e in scheduler.trace.read())
+
+
+def test_capped_continue_halts_chain_not_repair(tmp_path):
+    """A `continue` with the step budget spent stops the chain (it worked, so no
+    repair offer) rather than looping."""
+    scheduler = _scheduler(tmp_path)
+    skill = Skill(
+        name="check",
+        category="tracking",
+        description="Check the delivery status of a package.",
+        act=lambda ctx, request: ActionResult(action_log="boom", new_state="x"),
+    )
+    request = Request("track my package")
+    request.reentries = scheduler.max_reentries
+    outcome = RunResult(
+        skill="tracking.check",
+        success=True,
+        summary="ok",
+        action_log="not done yet",
+        new_state="partial",
+        outcome="continue",
+    )
+    scheduler._finish_run(skill, request, outcome)
+    assert scheduler.queue.pop() is None
+    assert not any(e["kind"] == "repair_offered" for e in scheduler.trace.read())
+    halted = [e for e in scheduler.trace.read() if e["kind"] == "chain_halted"]
+    assert halted and halted[-1]["reason"] == "budget"
+
+
+def test_repeat_continue_halts_chain(tmp_path):
+    """The monotonic guard: a `continue` whose (skill, outcome) already appears in
+    the ledger makes no progress, so the chain stops."""
+    scheduler = _scheduler(tmp_path)
+    skill = Skill(
+        name="check",
+        category="tracking",
+        description="Check the delivery status of a package.",
+        act=lambda ctx, request: ActionResult(action_log="boom", new_state="x"),
+    )
+    request = Request("track my package")
+    request.run_ledger = [
+        {"query": "track my package", "skill": "tracking.check", "outcome": "unchanged"}
+    ]
+    outcome = RunResult(
+        skill="tracking.check",
+        success=True,
+        summary="ok",
+        action_log="unchanged",
+        new_state="unchanged",
+        outcome="continue",
+    )
+    scheduler._finish_run(skill, request, outcome)
+    assert scheduler.queue.pop() is None
+    halted = [e for e in scheduler.trace.read() if e["kind"] == "chain_halted"]
+    assert halted and halted[-1]["reason"] == "repeat"
+
+
+def test_chain_continues_then_completes(tmp_path):
+    """End-to-end: a `continue` step is re-dispatched into next-step routing with
+    the ledger attached, and the chain ends when the second step reports `done`.
+    The first (intermediate) reply is marked so a `result` front end hides it."""
+    from semif_agent.decisions import DecisionResult
+
+    class ChainEngine:
+        """Deterministic two-step chain: step 1 -> continue, step 2 -> done."""
+
+        def __init__(self):
+            self.assessments = iter(["continue", "done"])
+
+        def call(self, request):
+            ids = [o.id for o in request.options]
+            q = request.question
+            if "additional work to be done" in q:
+                selected = next(self.assessments, "done")
+            elif "logical next step" in q:
+                selected = "demo"
+            elif "what does this skill do" in q:
+                selected = "same"
+            elif "Is this input a request" in q:
+                selected = "action"
+            else:
+                selected = ids[0]
+            if selected not in ids:
+                selected = ids[0]
+            return DecisionResult(
+                request=request,
+                option_ids=ids,
+                probabilities=[1.0 if i == selected else 0.0 for i in ids],
+            )
+
+    counter = {"n": 0}
+
+    def act(ctx, request):
+        counter["n"] += 1
+        return ActionResult(action_log=f"step {counter['n']} done", new_state="x")
+
+    from semif_agent.llm import LLMClient
+
+    scheduler = Scheduler(
+        engine=ChainEngine(),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(tmp_path / "seeds"),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+    )
+    scheduler.tree["demo"] = [
+        Skill(name="step", category="demo", description="Do a demo step.", act=act)
+    ]
+
+    first = scheduler.submit_request("do the thing")
+    assert first.intermediate is True
+
+    replies = scheduler.run_queue()
+    assert len(replies) == 1
+    assert replies[0].intermediate is False
+    assert "step 2 done" in replies[0].text
+
+    events = scheduler.trace.read()
+    assert any(e["kind"] == "continued" for e in events)
+    # The re-dispatched step carried the ledger and the parent link.
+    child = next(
+        e for e in events if e["kind"] == "continued"
+    )
+    assert child["step"] == 1
+
+
+def test_compound_request_runs_part_step_then_chains(tmp_path):
+    """End-to-end compound request: the leaf guard accepts the first skill as
+    `part` (not a create), the step runs, assessment says more work remains so
+    the chain continues, and the next step completes the request with the prior
+    result in its ledger. The guard does NOT force continuation — `assess:outcome`
+    is the authority, so a `part` step whose work is actually done stops cleanly."""
+    from semif_agent.decisions import DecisionResult
+    from semif_agent.llm import LLMClient
+
+    class CompoundEngine:
+        def __init__(self):
+            # Assessment is the continuation authority: step 1 has more work,
+            # step 2 (calculation already done) finishes the request.
+            self.assessments = iter(["continue", "done"])
+
+        def call(self, request):
+            ids = [o.id for o in request.options]
+            q = request.question
+            # The run ledger is rendered as a "steps already taken:" block only
+            # once a step has run, so it is the discriminator between step 1 and
+            # step 2 for the routing decisions.
+            after = "steps already taken" in request.state
+            if "Is this input a request" in q:
+                selected = "action"
+            elif "logical next step" in q:
+                selected = "simplex" if after else "calculator"
+            elif "what does this skill do" in q:
+                selected = "same" if after else "part"
+            elif "additional work to be done" in q:
+                selected = next(self.assessments, "done")
+            else:
+                selected = ids[0]
+            if selected not in ids:
+                selected = ids[0]
+            return DecisionResult(
+                request=request,
+                option_ids=ids,
+                probabilities=[1.0 if i == selected else 0.0 for i in ids],
+            )
+
+    ran = []
+
+    def calc_act(ctx, request):
+        ran.append("calculate")
+        return ActionResult(
+            action_log="Twenty-two times ten is two hundred twenty.",
+            new_state="220",
+        )
+
+    def send_act(ctx, request):
+        ran.append(("send", request.run_ledger[-1]["outcome"]))
+        return ActionResult(action_log="sent to pepper", new_state="sent")
+
+    scheduler = Scheduler(
+        engine=CompoundEngine(),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "skill_seeds": str(tmp_path / "seeds"),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+    )
+    scheduler.tree = {
+        "calculator": [
+            Skill(
+                name="calculate",
+                category="calculator",
+                description="Do arithmetic.",
+                act=calc_act,
+            )
+        ],
+        "simplex": [
+            Skill(
+                name="send_message",
+                category="simplex",
+                description="Send a SimpleX message.",
+                act=send_act,
+            )
+        ],
+    }
+
+    first = scheduler.submit_request("send the result of 22 * 10 to pepper on simplex")
+    assert first.intermediate is True
+    assert ran == ["calculate"], ran
+
+    replies = scheduler.run_queue()
+    assert len(replies) == 1
+    assert replies[0].intermediate is False
+    # The second step saw the first step's result in its ledger.
+    assert ran[-1] == ("send", "Twenty-two times ten is two hundred twenty."), ran
+
+    events = scheduler.trace.read()
+    assert any(e["kind"] == "continued" for e in events)
+    guards = [e for e in events if e["kind"] == "intent_guard"]
+    assert [g["verdict"] for g in guards] == ["part", "same"], guards
+
+
+def test_verbosity_defaults_and_decision_lines(tmp_path):
+    """Verbosity defaults to `result`; `decision` attaches the SemIf decision
+    phases (and only then)."""
+    from semif_agent.scheduler import normalize_verbosity
+
+    assert normalize_verbosity(None) == "result"
+    assert normalize_verbosity("query") == "query"
+    assert normalize_verbosity("bogus") == "result"
+
+    sched = _scheduler(tmp_path, verbosity="decision")
+    assert sched.verbosity == "decision"
+    skill = Skill(
+        name="probe",
+        category="tracking",
+        description="Probe.",
+        act=lambda ctx, request: ActionResult(action_log="ok", new_state="x"),
+    )
+    request = Request("probe it")
+    sched._run_skill(skill, request)
+    lines = sched._decision_lines(request.id)
+    assert any(line.startswith("assess:outcome") for line in lines)
+
+    quiet = _scheduler(tmp_path)
+    assert quiet.verbosity == "result"
+    assert quiet._decision_lines(request.id) == []
+
+
+def test_result_verbosity_hides_intermediate_reply(capsys):
+    from semif_agent.cli import _print_reply
+
+    reply = SchedulerReply("ran", "demo.step: ok — step 1", intermediate=True)
+    _print_reply(reply, verbosity="result")
+    assert capsys.readouterr().out == ""
+    _print_reply(reply, verbosity="query")
+    assert "step 1" in capsys.readouterr().out

@@ -127,11 +127,15 @@ choice is logged** (`navigate:category`, `navigate:leaf`, `navigate:response`).
 - **Leaf.** The leaf softmax picks only among the existing skills (a create
   option diluted its probability and let a crowded tree drift into create on a
   weak plurality). The picked skill then goes through the **intent guard**
-  (`confirm_skill_fit`, phase `navigate:intent`): an action comparison at
-  `navigation.intent_tau` asking whether the skill performs the same action the
-  request asks for. Same → run it; different → author a new leaf in that
-  category. An empty (or single-skill) category skips the softmax and goes
-  straight to the guard.
+  (`confirm_skill_fit`, phase `navigate:intent`): at `navigation.intent_tau` it
+  decides what the skill does for the request, given the steps already taken
+  (the run ledger is part of its state). `same` (it performs the next action the
+  request needs) or `part` (the request needs more than one action and this
+  skill performs one required part) → run it; `different` (it does no action the
+  request asks for) → author a new leaf in that category. The guard only decides
+  whether the skill contributes; whether more work remains is `assess:outcome`'s
+  call. An empty (or single-skill) category skips the softmax and goes straight
+  to the guard.
 - Both guards are deliberately permissive; with real descriptions the in-scope
   cases score 0.9–1.0, so a borderline over-cover routes into a plausible
   category and the leaf guard catches it.
@@ -151,12 +155,18 @@ observe baseline → act → observe outcome → assess
   a live candidate set) are returned on `ActionResult.decisions` and logged as
   training rows with the run outcome.
 - `assess` is a **SemIf decision**, not generation:
-  - `assess:outcome` — success/failure at `tau`; its state includes the resolved
-    inputs (secrets redacted) so a wrong resolution is visible.
-  - `assess:requeue` — on failure, `complete` vs `retry` (bounded by
-    `max_reentries`).
+  - `assess:outcome` — is there any *additional work* to satisfy the request?
+    Three outcomes at threshold precedence `failed > done > continue`: `done`
+    (request satisfied), `continue` (this step worked but more work is needed →
+    the scheduler routes the logical next step with a bounded run ledger),
+    `failed` (the step errored → the repair path). Its state includes the skill
+    action, the goal, the resolved inputs (secrets redacted), the bounded action
+    log, and the steps already taken.
 - The run summary is **deterministic** (same inputs ⇒ same string):
   `f"{category}.{name}: {'ok'|'failed'} — {action_log or new_state}"`.
+- Every skill's output is bounded to one **speakable budget** (`chain.result_chars`,
+  ~300 chars): the result string and its run-ledger entry. A long product belongs
+  in a file I/O side effect, not the result (see `CODEGEN.md`).
 - A skill can pause for human input two ways: `act` returns `needs_input` (act
   re-runs on resume, with `request.user_input` set), or — for a contract
   variable the runner cannot satisfy — a **pre-act** pause collects config
@@ -232,8 +242,7 @@ the request, the tree, the elicitation answers, the runtime **bridge catalog**
 | `navigate:leaf` | `skills.py:736` | request text + current category | every skill name + description (+ `create_skill`) |
 | `navigate:response` | `skills.py:634` | request text + category | canned reply names + descriptions (catchall last) |
 | `navigate:intent` | `skills.py:811` | `Requested action: <text>` + `Action of the existing skill: <description>` | `same` / `different` |
-| `assess:outcome` | `skill.py:257` | skill label + goal + action log | `success` / `failure` |
-| `assess:requeue` | `skill.py:279` | skill label + goal + action log + `outcome: failed` | `complete` / `retry` |
+| `assess:outcome` | `skill.py:311` | skill label + goal + resolved inputs + bounded action log + steps already taken | `done` / `continue` / `failed` |
 | `config:search` | `scheduler.py:1477` | skill + variable name + its semantic description | each candidate config key (+ `ask`) |
 | `config:record` | `skill.py:112` | skill + `variable = value` | `record` / `ask_again` |
 | `authoring:fidelity` | `scheduler.py:1311` | skill, request, description, `INTEGRATION` JSON, static findings, first 4000 chars of body | `accept` / `reconsider` |

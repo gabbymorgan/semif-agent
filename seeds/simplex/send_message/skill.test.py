@@ -31,9 +31,10 @@ LLM_REPLY = "a friendly hello"
 class FakeRequest:
     """Minimal stand-in for the agent's Request object (test-only)."""
 
-    def __init__(self, text, user_input=""):
+    def __init__(self, text, user_input="", run_ledger=None):
         self.text = text
         self.user_input = user_input
+        self.run_ledger = list(run_ledger or [])
 
 
 class FakeResult:
@@ -272,6 +273,49 @@ def test_message_written_by_llm_bridge():
         llm.server_close()
 
 
+def test_chained_result_is_sent():
+    """As the later step of a chain, no literal text: send the prior step's result."""
+    reset()
+    simplex = start_server(SimplexHandler)
+    llm = start_server(LlmHandler)
+    try:
+        ctx = ActionContext(
+            engine=FakeEngine(),
+            config={
+                "simplex_bridge_url": base_url(simplex),
+                "simplex_bridge_token": SIMPLEX_TOKEN,
+                "llm_bridge_url": base_url(llm),
+            },
+        )
+        request = FakeRequest(
+            "send the result of 22 * 10 to pepper on simplex",
+            run_ledger=[
+                {
+                    "query": "send the result of 22 * 10 to pepper on simplex",
+                    "skill": "calculator.calculate",
+                    "outcome": "Twenty-two times ten is two hundred twenty.",
+                }
+            ],
+        )
+        result = skill.act(ctx, request)
+
+        assert not result.needs_input, result.action_log
+        # The prior result is used verbatim; the LLM bridge must NOT be asked to
+        # recompute it.
+        assert LlmHandler.seen == [], LlmHandler.seen
+        posts = [r for r in SimplexHandler.seen if r["method"] == "POST"]
+        assert len(posts) == 1, SimplexHandler.seen
+        assert posts[0]["body"] == {
+            "recipient": "c-pepper",
+            "text": "Twenty-two times ten is two hundred twenty.",
+        }, posts[0]
+    finally:
+        simplex.shutdown()
+        simplex.server_close()
+        llm.shutdown()
+        llm.server_close()
+
+
 def test_missing_text_without_llm_asks():
     """A clear recipient but no message text and no llm bridge: ask the user."""
     reset()
@@ -360,6 +404,7 @@ def main():
     test_happy_path()
     test_ambiguous_contact_uses_engine()
     test_message_written_by_llm_bridge()
+    test_chained_result_is_sent()
     test_missing_text_without_llm_asks()
     test_unknown_contact_asks()
     test_send_refused_is_reported()

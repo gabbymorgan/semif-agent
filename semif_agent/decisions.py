@@ -72,6 +72,13 @@ class Request:
     reentries: int = 0
     resume: dict[str, Any] = field(default_factory=dict)
     user_input: str | None = None
+    #: Compact, deterministic record of the chain of skills already run toward
+    #: this request: one ``{query, skill (category.name), outcome}`` entry per
+    #: step. It threads through a continuation so the next step's routing and
+    #: the outcome assessment see what was already done; empty on a first-step
+    #: request. Bounded by construction (each outcome is bounded to the
+    #: speakable budget, and the chain is capped).
+    run_ledger: list[dict[str, Any]] = field(default_factory=list)
 
     def copy_for_requeue(self) -> "Request":
         return Request(
@@ -83,4 +90,5 @@ class Request:
             priority=self.priority,
             reentries=self.reentries + 1,
             resume=dict(self.resume),
+            run_ledger=[dict(entry) for entry in self.run_ledger],
         )

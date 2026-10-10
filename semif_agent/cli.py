@@ -485,16 +485,26 @@ def _print_approvals(scheduler: Scheduler) -> None:
         print(f"[approval] {item['id']}  new {item['kind']} {target}: {item['description']}")
 
 
-def _print_reply(reply, show_run_id: bool = False) -> None:
-    """Print a scheduler reply, optionally keeping its run id visible."""
+def _print_reply(reply, show_run_id: bool = False, verbosity: str = "result") -> None:
+    """Print a scheduler reply, honoring the configured verbosity.
+
+    "result" shows only the final answer of a request (an intermediate chain
+    step is hidden); "query" also shows intermediate steps; "decision"
+    additionally prints each SemIf decision phase for the run.
+    """
+    if getattr(reply, "intermediate", False) and verbosity == "result":
+        return
     label = f"[{reply.run_id}] " if (show_run_id and reply.run_id) else ""
     print(f"[{reply.status}] {label}{reply.text}")
+    for line in getattr(reply, "decision_lines", ()) or ():
+        print(f"    {line}")
 
 
 def _drain_queue(scheduler: Scheduler) -> None:
     """Run queued work, printing each outcome with its run id."""
+    verbosity = getattr(scheduler, "verbosity", "result")
     for reply in scheduler.run_queue():
-        _print_reply(reply, show_run_id=True)
+        _print_reply(reply, show_run_id=True, verbosity=verbosity)
 
 
 def _fatal_exit(scheduler: Scheduler) -> int | None:
@@ -646,13 +656,13 @@ def repl(scheduler: Scheduler, config: dict) -> int:
             scheduler.busy(line[5:].strip())
             print("current process set (busy).")
             continue
-        _print_reply(scheduler.submit(line))
+        _print_reply(scheduler.submit(line), verbosity=scheduler.verbosity)
         if _fatal_exit(scheduler) is not None:
             return 1
         while scheduler.pending is not None:
             hint = "" if scheduler.pending.pre_act else " [leave empty to skip]"
             answer = input(f"{scheduler.pending.question}{hint} ")
-            _print_reply(scheduler.answer(answer))
+            _print_reply(scheduler.answer(answer), verbosity=scheduler.verbosity)
             if _fatal_exit(scheduler) is not None:
                 return 1
         _drain_queue(scheduler)
@@ -669,7 +679,8 @@ def scripted(scheduler: Scheduler, path: str) -> int:
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     for row in rows:
         _print_reply(
-            scheduler.submit(str(row["text"]), source=row.get("source", "scripted"))
+            scheduler.submit(str(row["text"]), source=row.get("source", "scripted")),
+            verbosity=scheduler.verbosity,
         )
         if _fatal_exit(scheduler) is not None:
             return 1

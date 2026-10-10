@@ -12,8 +12,11 @@ probability.
   description plus `create_category`; `confirm_category_fit` confirms the
   winner's scope. `navigation.category_tau` is that guard's P(covers) floor.
 - **Leaf**: the softmax offers only existing skills; `confirm_skill_fit`
-  compares the winner's action to the request. `navigation.intent_tau` is that
-  guard's P(same) floor.
+  decides what the winner does for the request (`same` / `part` / `different`).
+  `navigation.intent_tau` is that guard's P(same or part) floor: `same` or
+  `part` runs the skill, and only `different` authors a new leaf. The guard
+  decides contribution only; whether more work remains is `assess:outcome`'s
+  call.
 
 This replays a hand-labeled eval set through the **real** decision engine and
 the **real** skill tree, measuring each guard's probability per request so the
@@ -122,7 +125,10 @@ def measure(
     confirm_skill_fit(scheduler.engine, log, trace, request, nav, tau=tau)
     events = trace.read()[before:]
     guard = next((e for e in events if e["kind"] == "intent_guard"), None)
-    return {"picked": f"{nav.category}.{nav.name}", "p": guard["probs"]["same"] if guard else None}
+    # The guard accepts a skill that is the same action OR one required part of a
+    # compound request, so the "does it contribute" mass is same + part.
+    p = (guard["probs"]["same"] + guard["probs"]["part"]) if guard else None
+    return {"picked": f"{nav.category}.{nav.name}", "p": p}
 
 
 def verdict(measured: dict, tau: float) -> str:

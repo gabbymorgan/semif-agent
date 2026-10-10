@@ -313,10 +313,11 @@ class GatewayService:
                 reply = self.scheduler.answer(msg.text)
                 if self.scheduler.pending is None:
                     self._pending_owner = None
-                self._reply(
-                    *reply_to, reply.text, kind=_reply_kind(reply.status),
-                    skill_ref=reply.skill_ref, result=reply.result,
-                )
+                if not self._hidden(reply):
+                    self._reply(
+                        *reply_to, reply.text, kind=_reply_kind(reply.status),
+                        skill_ref=reply.skill_ref, result=reply.result,
+                    )
             elif pending is not None and self._pending_owner not in (None, reply_to):
                 self._reply(
                     *reply_to,
@@ -348,10 +349,11 @@ class GatewayService:
                     self._owners[reply.run_id] = reply_to
                 if reply.status == "needs_input":
                     self._pending_owner = reply_to
-                self._reply(
-                    *reply_to, reply.text, kind=_reply_kind(reply.status),
-                    skill_ref=reply.skill_ref, result=reply.result,
-                )
+                if not self._hidden(reply):
+                    self._reply(
+                        *reply_to, reply.text, kind=_reply_kind(reply.status),
+                        skill_ref=reply.skill_ref, result=reply.result,
+                    )
             self.drain()
             self.surface(origin=reply_to)
 
@@ -362,6 +364,8 @@ class GatewayService:
             if not results:
                 break
             for reply in results:
+                if self._hidden(reply):
+                    continue
                 owner = self._owner_of(reply.run_id)
                 if reply.status == "needs_input" and owner:
                     self._pending_owner = owner
@@ -371,6 +375,17 @@ class GatewayService:
                         *target, reply.text, kind=_reply_kind(reply.status),
                         skill_ref=reply.skill_ref, result=reply.result,
                     )
+
+    def _hidden(self, reply) -> bool:
+        """Hide an intermediate chain step at `result` verbosity.
+
+        The default end-user view is just the final answer; a chained request's
+        intermediate "continue" steps are only surfaced at `query`/`decision`
+        verbosity.
+        """
+        if not getattr(reply, "intermediate", False):
+            return False
+        return getattr(self.scheduler, "verbosity", "result") == "result"
 
     def surface(self, origin: Target | None = None) -> None:
         """Send any newly posted authoring questions / repair offers."""

@@ -64,8 +64,8 @@ flowchart TD
     %% ---------- reuse vs create ----------
     PICK --> HARD{"hard-locked category?<br/>(housekeeping)"}
     HARD -- "yes" --> RUN
-    HARD -- "no" --> INTENT["SemIf choice<br/>phase 'navigate:intent'<br/>P same >= intent_tau?"]
-    INTENT -- "same" --> RUN
+    HARD -- "no" --> INTENT["SemIf choice<br/>phase 'navigate:intent'<br/>same / part / different?<br/>P same+part >= intent_tau"]
+    INTENT -- "same / part" --> RUN
     INTENT -- "different" --> CREATESKILL
 
     CREATESKILL --> LOCK{"category locked to<br/>new skills?"}
@@ -94,12 +94,11 @@ flowchart TD
     ACTNI -- "no" --> ASSESS
 
     %% ---------- assessment ----------
-    ASSESS["SemIf choice<br/>phase 'assess:outcome'<br/>P success >= tau?<br/>a definitive empty result counts as success"] --> OK{"success?"}
-    OK -- "yes" --> SUMMARY
-    OK -- "no" --> REQ["SemIf choice<br/>phase 'assess:requeue'<br/>complete vs retry"]
-    REQ -- "retry" --> REQUEUE["requeue original request<br/>bounded by max_reentries"]
-    REQUEUE -.-> PUSH
-    REQ -- "complete" --> REPAIR
+    ASSESS["SemIf choice<br/>phase 'assess:outcome'<br/>additional work to do?<br/>a definitive empty result counts as done"] --> OK{"outcome?"}
+    OK -- "done" --> SUMMARY
+    OK -- "continue" --> CHAIN["route the logical next step<br/>re-dispatch with the run ledger<br/>bounded by max_reentries + monotonic guard"]
+    CHAIN -.-> PUSH
+    OK -- "failed" --> REPAIR
 
     SUMMARY["deterministic summary<br/>category.name: ok/failed - action_log"] --> OUT1["Output: ran<br/>SchedulerReply (run_id, skill_ref, result)<br/>REPL · gateway reply · dashboard trace"]
 
@@ -112,8 +111,8 @@ flowchart TD
     classDef semfill fill:#e8f0fe,stroke:#4285f4,stroke-width:2px;
     classDef output fill:#fce8e6,stroke:#d93025;
     classDef author fill:#e6f4ea,stroke:#34a853;
-    class CAT,CATFIT,ACTG,LEAF,INTENT,ASSESS,REQ,REPAIR,RECORD semfill;
-    class REJECT,QUEUED,PENDING,NOOP,PENDINGW,BLOCKED,PAUSE1,PAUSE2,OUT1,REPAIROUT output;
+    class CAT,CATFIT,ACTG,LEAF,INTENT,ASSESS,REPAIR,RECORD semfill;
+    class REJECT,QUEUED,PENDING,NOOP,PENDINGW,BLOCKED,PAUSE1,PAUSE2,OUT1,REPAIROUT,CHAIN output;
     class CREATECAT,CREATESKILL,AUTHORING author;
 ```
 
@@ -196,10 +195,9 @@ flowchart TD
 | Category scope | does it cover? | `navigate:category_scope` | descend / create (skipped when decisive) |
 | Canned | which reply | `navigate:response` | canned line |
 | Leaf | which skill | `navigate:leaf` | skill |
-| Intent guard | same action? | `navigate:intent` | run / create (never bypassed) |
+| Intent guard | same / part / different? | `navigate:intent` | run / create (never bypassed) |
 | Config record | record or ask? | `config:record` | persisted / per-fire |
-| Outcome | did it succeed? | `assess:outcome` | ok / failed |
-| Requeue | complete or retry? | `assess:requeue` | done / requeue |
+| Outcome | additional work? | `assess:outcome` | done / continue / failed |
 | Repair | how to recover? | `repair:choice` | offer |
 | Fidelity | real action? | `authoring:fidelity` | accept / rewrite |
 | Config search | where is the value? | `config:search` | auto-populate |

@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from semif_agent.decisions import DecisionRequest, Option
-from semif_agent.skills import ActionResult
+from semif_agent.skills import ActionResult, last_result
 
 INTEGRATION = {
     "service": "simplex",
@@ -383,9 +383,14 @@ def act(ctx, request) -> ActionResult:
     display_name = _display(chosen) or recipient
 
     # --- resolve the message text -----------------------------------------
+    # Prefer the literal text the user dictated; then the result of the previous
+    # step of a chain (never re-derive a computed value with the LLM); only then
+    # ask the LLM bridge for genuinely new text.
     message_text = _message_from_query(query)
     if not message_text and user_input and not used_input_for_contact:
         message_text = user_input
+    if not message_text:
+        message_text = last_result(request)
     if not message_text:
         written, reason = _llm_message_text(ctx, query)
         if written:

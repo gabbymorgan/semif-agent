@@ -107,7 +107,7 @@ def test_act_decisions_logged_on_completion(tmp_path):
     skill = Skill(name="t.x", category="t", description="", act=act)
     scheduler = build_scheduler(
         tmp_path,
-        choices={"achieve the user's goal": "failure", "complete, or should it run again": "complete"},
+        choices={"additional work to be done": "failed"},
     )
 
     scheduler._run_skill(skill, Request("x"))
@@ -119,7 +119,8 @@ def test_act_decisions_logged_on_completion(tmp_path):
     assert len(act_rows) == 1
     assert act_rows[0]["extra"]["run_ok"] is False
     phases = [r.get("extra", {}).get("phase") for r in rows]
-    assert "assess:outcome" in phases and "assess:requeue" in phases
+    assert "assess:outcome" in phases
+    assert "assess:requeue" not in phases
 
 
 def test_busy_abandons_pending(tmp_path):

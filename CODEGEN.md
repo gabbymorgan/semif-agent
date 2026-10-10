@@ -137,9 +137,10 @@ engine/runtime concerns, not body-level tools: a body makes direct typed
 decisions and lets the runner own the model.
 
 Note that the runner's own **assessment** of whether a run succeeded
-(`assess:outcome`) is itself a SemIf decision over the body's `action_log`, the
-goal, and the resolved inputs. The body does not self-assess; it reports
-truthfully and lets SemIf judge.
+(`assess:outcome`: is there any additional work to be done to satisfy the
+request? → done / continue / failed) is itself a SemIf decision over the body's
+`action_log`, the goal, the resolved inputs, and the steps already taken. The
+body does not self-assess; it reports truthfully and lets SemIf judge.
 
 ### Choosing between deterministic code, SemIf, and LLM text
 
@@ -451,13 +452,43 @@ Rules:
   the result is a broken output.
 - **Never an empty or placeholder output.** If there is genuinely nothing (empty
   inbox, no matching event), say so explicitly — that is a real result, and a
-  **successful** run: the `assess:outcome` step treats a definitive "nothing
-  found / nothing to do" result as success. Phrase it as the answer the user
-  asked for ("checked the inbox: no unread messages"), not as an absence or an
-  error, so the assessment does not read a healthy empty result as a failure.
+  **`done`** run: the `assess:outcome` step treats a definitive "nothing found /
+  nothing to do" result as done. Phrase it as the answer the user asked for
+  ("checked the inbox: no unread messages"), not as an absence or an error, so
+  the assessment does not read a healthy empty result as a failure.
+- **Keep the result speakable — it is bounded.** A skill's output is read in a
+  chat message or heard as speech, so the runner truncates `action_log` /
+  `new_state` to one shared budget (`chain.result_chars`, ~300 characters /
+  ~20 seconds of speech) and feeds the bounded text to the assessment and the
+  run ledger. A result longer than that is a bad result. When a skill's real
+  product is long or structured (a file listing, a document body, a full
+  thread), write it to the service or a file as a **side effect** and return a
+  short summary plus a pointer (path / id) — never dump the payload into the
+  result string.
 - **Never claim success you did not observe.** If the action failed, put the
   real failure in `action_log` and set `new_state` back to `request.text` (see
   the hard requirements).
+
+### Multi-step chains
+
+A request can take more than one action ("calculate 2*10 and send the result to
+Pepper"). The runner does not ask one body to satisfy the whole request: it runs
+the **next** skill, judges the outcome, and if more work remains re-dispatches
+the request with a **run ledger** of the steps already taken. A body may
+therefore run as a later step of a chain.
+
+- `request.run_ledger` is a list of `{"query", "skill", "outcome"}` entries, one
+  per step already taken (empty on a first step). The most recent entry's
+  `outcome` is the previous step's result — the same bounded text the runner
+  shows the user.
+- **If the request depends on the previous step's result, read it — never
+  recompute or fabricate it.** `from semif_agent.skills import last_result`
+  returns `run_ledger[-1]["outcome"]` (or `""`). Do not ask the LLM bridge to
+  redo a calculation or re-fetch a value an earlier step produced; that would
+  silently invent a working value. Prefer a literal value the user stated, then
+  the prior step's result, and only then generate novel text.
+- A body still returns only its own step's `action_log` / `new_state`; the
+  runner owns the ledger and decides whether the chain continues.
 
 ### Rules (hard requirements)
 

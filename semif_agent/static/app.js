@@ -413,12 +413,14 @@ function eventNode(evt) {
   body.className = "node-question";
   if (evt.kind === "assessed") {
     body.textContent = evt.summary || "";
-    if (evt.updated_request) {
-      const req = document.createElement("div");
-      req.className = "muted";
-      req.textContent = `→ requeued: ${evt.updated_request}`;
-      node.appendChild(req);
-    }
+  } else if (evt.kind === "continued") {
+    body.textContent = `→ next step: ${evt.skill || ""}`;
+    const outcome = document.createElement("div");
+    outcome.className = "muted";
+    outcome.textContent = `outcome: ${evt.outcome || ""}`;
+    node.appendChild(outcome);
+  } else if (evt.kind === "chain_halted") {
+    body.textContent = `chain halted (${evt.reason || ""})`;
   } else if (evt.kind === "queued") {
     body.textContent = "queued";
   } else if (evt.kind === "dropped") {
