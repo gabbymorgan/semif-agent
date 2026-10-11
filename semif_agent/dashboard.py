@@ -255,8 +255,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with self.lock:
                 try:
                     body = self._read_json()
-                    reply = self.scheduler.submit_request(
-                        str(body.get("text", "")), source=str(body.get("source", "dashboard"))
+                    reply = self._complete(
+                        self.scheduler.submit_request(
+                            str(body.get("text", "")),
+                            source=str(body.get("source", "dashboard")),
+                        )
                     )
                 except Exception as exc:
                     self._send_error(500, str(exc))
@@ -277,11 +280,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with self.lock:
                 try:
                     body = self._read_json()
-                    reply = self.scheduler.answer(str(body.get("text", "")))
+                    reply = self._complete(self.scheduler.answer(str(body.get("text", ""))))
                 except Exception as exc:
                     self._send_error(500, str(exc))
                     return
-            self._send(200, {"status": reply.status, "detail": reply.text})
+            self._send(200, {"status": reply.status, "detail": reply.text, "request_id": reply.run_id})
             return
         if path == "/api/restart":
             with self.lock:
@@ -371,6 +374,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(exc))
                 return
         self._send(200, {"status": status, "detail": detail})
+
+    def _complete(self, first):
+        """Finish a request's chain and return the reply that answers it.
+
+        A `continue` assessment re-dispatches the next step onto the queue
+        rather than running it inline, so a multi-step request only completes
+        when a front end drains `Scheduler.run_queue()` — as the CLI and
+        gateway do. Without this the dashboard would run just the first step
+        and strand the rest. The last reply is the final answer (intermediate
+        steps are hidden at `result` verbosity).
+        """
+        return [first, *self._drain_chain()][-1]
+
+    def _drain_chain(self) -> list:
+        """Run queued chain steps, bounded like `GatewayService.drain`."""
+        replies = []
+        for _ in range(100):
+            batch = self.scheduler.run_queue()
+            if not batch:
+                break
+            replies.extend(batch)
+        return replies
 
     def log_message(self, format, *args):
         pass

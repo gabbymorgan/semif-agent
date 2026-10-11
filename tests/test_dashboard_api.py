@@ -307,6 +307,66 @@ def test_submit_returns_request_id_matching_trace(tmp_path):
         server.close()
 
 
+class _ChainEngine:
+    """Deterministic two-step chain: step 1 -> continue, step 2 -> done."""
+
+    def __init__(self):
+        self.assessments = iter(["continue", "done"])
+
+    def call(self, request):
+        ids = [o.id for o in request.options]
+        q = request.question
+        if "additional work to be done" in q:
+            selected = next(self.assessments, "done")
+        elif "logical next step" in q:
+            selected = "demo"
+        elif "what does this skill do" in q:
+            selected = "same"
+        elif "Is this input a request" in q:
+            selected = "action"
+        else:
+            selected = ids[0]
+        if selected not in ids:
+            selected = ids[0]
+        return DecisionResult(
+            request=request,
+            option_ids=ids,
+            probabilities=[1.0 if i == selected else 0.0 for i in ids],
+        )
+
+
+def test_submit_completes_a_multi_step_chain(tmp_path):
+    """A `continue` step is queued, not run inline, so a multi-step request only
+    finishes when a front end drains `run_queue()`. The dashboard must do that,
+    as the CLI and gateway do, or the child is stranded in the queue forever."""
+    scheduler = build_scheduler(tmp_path, engine=_ChainEngine())
+    counter = {"n": 0}
+
+    def act(ctx, request):
+        counter["n"] += 1
+        return ActionResult(action_log=f"step {counter['n']} done", new_state="x")
+
+    scheduler.tree["demo"] = [
+        Skill(name="step", category="demo", description="Do a demo step.", act=act)
+    ]
+    server = Server(scheduler)
+    try:
+        status, payload = server.post("/api/submit", {"text": "do the thing"})
+        assert status == 200
+        # The reply is the final step, not the hidden intermediate.
+        assert payload["status"] == "ran"
+        assert "step 2 done" in payload["detail"]
+        assert counter["n"] == 2
+        # Nothing is left stranded in the queue.
+        assert list(scheduler.queue.items()) == []
+        # The chain ran both steps and linked them.
+        status, trace = server.get("/api/trace")
+        kinds = [e["kind"] for run in trace["runs"] for e in run["events"]]
+        assert "continued" in kinds
+    finally:
+        server.close()
+
+
 def test_relabel_roundtrip(tmp_path):
     scheduler = build_scheduler(tmp_path)
     seed_decision(scheduler.log)
