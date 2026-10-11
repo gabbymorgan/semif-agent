@@ -854,6 +854,10 @@ screenshot, and click/fill/press/select to complete a flow. It is the first
 bridge with a heavy optional dependency, so it is **disabled by default** and
 installed with `scripts/bootstrap.sh --browser` (Playwright + Chromium land under
 `.runtime/browser`; the bridge sets `PLAYWRIGHT_BROWSERS_PATH` there at launch).
+If `playwright install` fails — notably on a host with an IPv6 address but no
+global IPv6 route, where Playwright's downloader prefers IPv6 and hangs —
+bootstrap falls back to `scripts/playwright-browsers.py`, which downloads the
+same pinned artifacts over IPv4.
 Unlike the others it owns a browser and keeps a **persistent profile**
 (`.runtime/browser/profile`) so a login you do once survives across calls and
 restarts — the browser analog of the SimpleX bridge owning its own daemon

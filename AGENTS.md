@@ -1537,7 +1537,13 @@ CLI, unit tests (24) + integration tests (2).
   `check_requirements()` deliberately **always returns ok**: `run_bridges()`
   aborts *all* bridges when one's requirements fail and this dependency is
   optional, so a missing Playwright/browser must be a per-call `503` (with an
-  install hint), never take down simplex/llm/nextcloud. Playwright's sync API is
+  install hint), never take down simplex/llm/nextcloud. Install is
+  `scripts/bootstrap.sh --browser`; when `playwright install` fails (notably on a
+  host with an IPv6 address but no global IPv6 route — Playwright's downloader
+  forces `autoSelectFamily` + a dual-stack resolver that prefers IPv6 and hangs
+  instead of falling back to IPv4), bootstrap falls back to
+  `scripts/playwright-browsers.py`, which fetches the same pinned artifacts over
+  IPv4 and lays them out where Playwright expects. Playwright's sync API is
   bound to its creating thread and the bridge serves each request on a new one,
   so the driver runs the **async** API on one dedicated event-loop thread and
   serializes whole operations behind an `asyncio.Lock`, submitting coroutines

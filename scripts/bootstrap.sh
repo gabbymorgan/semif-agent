@@ -384,8 +384,22 @@ PY
 )"
   case "$BROWSER_ENGINE" in chromium|firefox|webkit) ;; *) BROWSER_ENGINE=chromium ;; esac
   echo "== downloading Playwright browser '$BROWSER_ENGINE' into $BROWSERS"
-  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" -m playwright install "$BROWSER_ENGINE" \
-    || echo "WARN: playwright browser download failed; re-run: PLAYWRIGHT_BROWSERS_PATH=$BROWSERS $PYTHON -m playwright install $BROWSER_ENGINE" >&2
+  if ! PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" -m playwright install "$BROWSER_ENGINE"; then
+    echo "WARN: 'playwright install' failed" >&2
+    if [[ "$BROWSER_ENGINE" = chromium ]]; then
+      # Playwright's own downloader prefers IPv6 (autoSelectFamily + a custom
+      # dual-stack resolver) and can hang on a host that has an IPv6 address but
+      # no working global IPv6 route, even though the CDN serves over IPv4. The
+      # helper fetches the same pinned artifacts over IPv4 and lays them out
+      # where Playwright expects them, so the install becomes a no-op.
+      echo "== retrying over IPv4 (scripts/playwright-browsers.py)" >&2
+      PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" "$REPO_ROOT/scripts/playwright-browsers.py" \
+        --browsers-path "$BROWSERS" --engine "$BROWSER_ENGINE" \
+        || echo "WARN: browser priming failed; re-run: $PYTHON scripts/playwright-browsers.py --browsers-path $BROWSERS" >&2
+    else
+      echo "WARN: re-run: PLAYWRIGHT_BROWSERS_PATH=$BROWSERS $PYTHON -m playwright install $BROWSER_ENGINE" >&2
+    fi
+  fi
 fi
 
 # --- stage 4: GGUF --------------------------------------------------------------
