@@ -529,6 +529,78 @@ def act(ctx, request):
     rows = [r for r in scheduler.log.read() if r.get("extra", {}).get("phase") == "authoring:fidelity"]
     print(f"declared reconsider: {rows[-1]['extra']['reconsider']} {rows[-1]['predicted_probs']}")
     assert rows[-1]["extra"]["findings"] == [], "a consistent declaration has no findings"
+    assert rows[-1]["extra"]["reconsider"] is False, (
+        "a declared body with a real transport call must be accepted"
+    )
+
+
+def test_fidelity_gate_reads_the_whole_body(tmp_path):
+    """Regression: the gate ingests the WHOLE body, never a prefix.
+
+    A body whose real action sits *after* the old 4000-char cutoff (helpers and
+    padding first) must be accepted by the real engine. Before the fix the gate
+    saw only a prefix that contained no action and wrongly returned
+    `reconsider`; the raw request must also stay out of the state.
+    """
+    config = load_config()
+    require_real(config)
+    _isolate_runtime(config, tmp_path)
+    scheduler, config = build_scheduler(config)
+    scheduler.codegen = CodegenClient(
+        base_url="http://127.0.0.1:1/v1", model="test", timeout=2
+    )
+
+    padding = "# filler to push the real action past the old 4000-char cutoff\n"
+    body = (
+        '"""Check a delivery through the carrier HTTP API."""\n\n'
+        'INTEGRATION = {"service": "carrier", "transport": "http", '
+        '"config_vars": ["tracking_url"]}\n'
+        'CONTRACT = {"tracking_url": "Carrier status endpoint."}\n\n'
+        "import json\n"
+        "import urllib.request\n\n"
+        "from semif_agent.skills import ActionResult\n\n\n"
+        + padding * 60
+        + "def _post(ctx, path, payload):\n"
+        "    req = urllib.request.Request(\n"
+        '        ctx.config["tracking_url"] + path,\n'
+        "        data=json.dumps(payload).encode(),\n"
+        '        method="POST",\n'
+        "    )\n"
+        "    with urllib.request.urlopen(req, timeout=15) as response:\n"
+        '        return json.loads(response.read().decode("utf-8"))\n\n\n'
+        "def act(ctx, request):\n"
+        '    reply = _post(ctx, "/deliveries/check", {"id": "1"})\n'
+        "    return ActionResult(\n"
+        '        action_log=f"carrier said {reply[\'status\']}",\n'
+        '        new_state=reply["status"],\n'
+        "    )\n"
+    )
+    assert body.index('method="POST"') > 4000, "fixture must place the action past the old cutoff"
+
+    job = SkillWrite(
+        request=Request("check my delivery status for package 12345"),
+        category="tracking",
+        draft=SkillDraft(
+            name="check_delivery",
+            description="Check a package's delivery status.",
+            goal="POST the carrier's check endpoint and report the observed status.",
+        ),
+    )
+    scheduler._fidelity_gate(job, body)
+    row = [
+        r
+        for r in scheduler.log.read()
+        if r.get("extra", {}).get("phase") == "authoring:fidelity"
+    ][-1]
+    print(f"whole-body reconsider: {row['extra']['reconsider']} {row['predicted_probs']}")
+    assert row["extra"]["findings"] == [], "a consistent declaration has no findings"
+    assert row["extra"]["reconsider"] is False, (
+        "the gate must see the action and accept the body (whole-body ingestion)"
+    )
+    assert 'method="POST"' in row["state"], "the whole body must reach the gate"
+    assert "check my delivery status for package 12345" not in row["state"], (
+        "the raw request must not reach the gate"
+    )
 
 
 def test_create_skill_empty_category_does_not_wedge(tmp_path):

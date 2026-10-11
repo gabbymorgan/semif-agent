@@ -34,6 +34,10 @@ class WinnowConfig:
 
     base_url: str = "http://127.0.0.1:8091"
     model: str = "Winnow-12B"
+    #: The server's decision context window (`--ctx-size`). Must mirror the
+    #: running server; used to size generated skill bodies so a fidelity state
+    #: always fits. The reference deployment runs `--ctx-size 32768`.
+    context_tokens: int = 32768
     timeout: float = 120.0
     # Transient-failure retries before declaring the engine unavailable. 0 means
     # a single attempt: an unreachable remote engine is fatal by contract.
@@ -58,6 +62,10 @@ class WinnowEngine(DecisionEngine):
         self.config = config
         self._lock = threading.Lock()
         self._loaded = False
+
+    @property
+    def context_tokens(self) -> int:
+        return int(self.config.context_tokens or 32768)
 
     @property
     def loaded(self) -> bool:

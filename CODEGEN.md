@@ -550,6 +550,12 @@ therefore run as a later step of a chain.
   see how `nextcloud.create_event` caches the extracted title/description and the
   answers it collected.
 - **Fail fast on budget.** Keep the work small; do not loop or retry in code.
+- **Keep the body small — it is ingested whole.** The fidelity decision reads
+  the *entire* body, so a body that exceeds the engine's context budget is
+  rejected outright (the pipeline retries once with a "make it shorter"
+  instruction). Delegate protocol details to a bridge instead of hand-rolling a
+  client, and keep `act` to one purpose; a long body is a signal that the
+  integration belongs in a bridge.
 - **The function is `act` exactly.** The module is imported under its registered
   leaf name; the entry point is a module-level `act(ctx, request)`.
 
@@ -651,6 +657,9 @@ A generated skill is accepted only if:
 13. If it is a messaging skill, it uses a bridge service over HTTP (never a
     service's native protocol), resolves recipients with a SemIf sub-decision,
     and sends only on explicit user intent.
+14. It is small enough to be ingested whole by the fidelity decision (a body
+    over the engine's artifact budget is rejected as too long) — delegate
+    protocol details to a bridge rather than hand-rolling them.
 
 Items 1 and 7 are hard checks in the parser (`parse_skill_body`) and reject the
 body outright. The rest are not statically rejected: a missing or inconsistent

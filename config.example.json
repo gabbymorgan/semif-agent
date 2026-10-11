@@ -38,9 +38,10 @@
     "gpu_device": null,
     "gpu_split": 0,
     "winnow": {
-      "_comment": "Settings for provider == \"winnow\": a remote Winnow typed-decision server (`winnow-server`, ROCm/HIP on a dedicated GPU host) exposing POST /v1/systemone (choice questions) and /v1/chat/completions (text, used by llm.provider == \"semif\"). base_url is the server root; model is required (no default). timeout bounds each request; retries is the number of transient-failure retries before the engine is declared unavailable (0 = a single attempt; an unreachable engine is fatal by contract). api_key/api_key_env add a bearer token (usually unset on a LAN); extra_headers/user_agent pass through for custom setups. The Winnow model holds the whole GPU, so it cannot be resident alongside a large codegen model — stop one before starting the other.",
+      "_comment": "Settings for provider == \"winnow\": a remote Winnow typed-decision server (`winnow-server`, ROCm/HIP on a dedicated GPU host) exposing POST /v1/systemone (choice questions) and /v1/chat/completions (text, used by llm.provider == \"semif\"). base_url is the server root; model is required (no default). context_tokens must mirror the server's --ctx-size: generated skill bodies are sized from the active engine's context so a fidelity decision can always ingest one whole. timeout bounds each request; retries is the number of transient-failure retries before the engine is declared unavailable (0 = a single attempt; an unreachable engine is fatal by contract). api_key/api_key_env add a bearer token (usually unset on a LAN); extra_headers/user_agent pass through for custom setups. The Winnow model holds the whole GPU, so it cannot be resident alongside a large codegen model — stop one before starting the other.",
       "base_url": "http://127.0.0.1:8091",
       "model": "",
+      "context_tokens": 32768,
       "api_key": "",
       "api_key_env": "",
       "timeout": 120,
@@ -102,9 +103,10 @@
       "wait_timeout": 900
     },
     "fidelity": {
-      "_comment": "After the body lands, an authoring:fidelity SemIf decision (accept/reconsider, P(reconsider) >= tau or any static finding) checks whether it really performs the action vs simulates it (canned result, fabricated data, draft-by-default). Static INTEGRATION checks (declaration vs code) run alongside. The gate never diagnoses: a rejected body is regenerated with the raw evidence bundle, bounded by max_attempts; a still-fake body is accepted but traced/badged, never a hard authoring failure.",
+      "_comment": "After the body lands, an authoring:fidelity SemIf decision (accept/reconsider, P(reconsider) >= tau or any static finding) checks whether it really performs the action vs simulates it (canned result, fabricated data, draft-by-default). The state carries the WHOLE body (never a prefix) plus a deterministic operation inventory and the de-identified goal, and asks the positive question (is there a concrete operation that realizes the goal?). tau is this gate's own threshold, separate from the top-level tau. Static INTEGRATION checks (declaration vs code) run alongside. The gate never diagnoses: a rejected body is regenerated with the raw evidence bundle (inventory + findings included), bounded by max_attempts; a still-fake body is accepted but traced, never a hard authoring failure.",
       "enabled": true,
-      "max_attempts": 1
+      "max_attempts": 1,
+      "tau": 0.6
     },
     "repair": {
       "_comment": "A failed real run triggers a logged SemIf repair choice (retry / repair_skill / ask_user / no_repair) surfaced in the REPL and dashboard. Executing a repair is user-confirmed (a codegen write is slow); body repairs are bounded by max_attempts per skill and carry the observed failure into the regeneration.",
@@ -113,6 +115,10 @@
     },
     "test_timeout": 30,
     "test_max_attempts": 3,
+    "_artifact_budget_comment": "Generated artifacts are ingested WHOLE by a decision (the fidelity gate reads the entire skill body), so each is size-bounded. max_body_tokens/max_test_tokens are hard ceilings; 0 derives each from the ACTIVE decision engine's context (engine.context_tokens for the local GGUF, engine.winnow.context_tokens for Winnow) minus decision_reserve_tokens — the headroom for everything else in the fidelity state (goal, description, integration, findings, operation inventory, question, options, engine prefill margin). A positive value overrides the derivation: lower it if you don't want to wait on a long fidelity evaluation, raise it if your engine has a larger window. chars_per_token above converts the token budget to the char limit the parser enforces; a body over budget is rejected (ArtifactTooLong) and the codegen retry ladder asks for a shorter one.",
+    "max_body_tokens": 0,
+    "max_test_tokens": 0,
+    "decision_reserve_tokens": 1024,
     "contract_search": {
       "_comment": "After the data contract lands, run a SemIf choice per variable to auto-populate the skill config.json from the global config and the category config (data/skills/<category>/config.json). Logged as phase config:search.",
       "enabled": true

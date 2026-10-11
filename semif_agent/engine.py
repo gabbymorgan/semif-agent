@@ -53,6 +53,17 @@ class DecisionEngine(ABC):
     label: str = "engine"
 
     @property
+    def context_tokens(self) -> int:
+        """The decision context window, in tokens.
+
+        Every decision state must fit inside it, so the scheduler sizes the
+        generated skill bodies it feeds the fidelity gate from this value. A
+        provider that does not expose its window keeps the conservative local
+        default (the local 4B engine's `engine.context_tokens`).
+        """
+        return 4096
+
+    @property
     @abstractmethod
     def loaded(self) -> bool:
         """Whether the underlying model is loaded/warm."""
@@ -209,6 +220,10 @@ class SemIfEngine(DecisionEngine):
             metadata["main_gpu"] = self.config.gpu_device
         self._model, self._tokenizer, self._metadata = model, tokenizer, metadata
         return model, tokenizer, metadata
+
+    @property
+    def context_tokens(self) -> int:
+        return int(self.config.context_tokens or 4096)
 
     @property
     def loaded(self) -> bool:

@@ -26,8 +26,10 @@ from .codegen import (
     generate_skill_body,
     generate_skill_tests,
     integration_findings,
+    operation_inventory,
     parse_contract,
     regenerate_skill_body,
+    render_operation_inventory,
     run_skill_test,
     skill_contract_ref,
 )
@@ -75,6 +77,32 @@ from .trace import TraceLog
 #: top-level `new_skill_creation` config value and overridden per category in
 #: `data/skills/<category>/config.json` (same key).
 NEW_SKILL_MODES = ("allow", "deny", "ask")
+
+#: Hard floor for a derived artifact budget, so a misconfigured (tiny) engine
+#: context cannot collapse the codegen ceiling to something unusable.
+MIN_ARTIFACT_TOKENS = 256
+
+
+def artifact_token_budget(override, engine_context: int, reserve: int) -> int:
+    """The token budget for one generated artifact (skill body or test).
+
+    A positive `override` (the `codegen.max_body_tokens` / `max_test_tokens`
+    config value) wins — a user lowers it to avoid waiting on a long fidelity
+    evaluation, or raises it when the deployment's engine has a larger window.
+    Otherwise it is derived from the active engine's decision context minus the
+    reserved headroom for everything else in the decision state (the goal,
+    description, integration, findings, operation inventory, the question and
+    options, and the engine's prefill margin): the codegen runs immediately
+    before the fidelity gate, so that non-body context is already known. A hard
+    floor keeps the result usable.
+    """
+    try:
+        value = int(override or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value > 0:
+        return value
+    return max(int(engine_context) - int(reserve), MIN_ARTIFACT_TOKENS)
 
 
 def normalize_new_skill_mode(value) -> str | None:
@@ -338,6 +366,10 @@ class Scheduler:
         fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
         self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
         self.fidelity_max_attempts = int(fidelity_cfg.get("max_attempts", 1))
+        #: The fidelity gate's own threshold, separate from the top-level `tau`
+        #: so tuning run assessment does not move the real-action gate. Defaults
+        #: to `tau` when unset.
+        self.fidelity_tau = float(fidelity_cfg.get("tau", self.tau))
         repair_cfg = codegen_cfg.get("repair", {}) or {}
         self.repair_enabled = bool(repair_cfg.get("enabled", True))
         self.repair_max_attempts = int(repair_cfg.get("max_attempts", 1))
@@ -346,6 +378,25 @@ class Scheduler:
         self.contract_search = bool(
             (codegen_cfg.get("contract_search", {}) or {}).get("enabled", True)
         )
+        #: Generated artifacts are ingested *whole* by a decision (the fidelity
+        #: gate reads the entire skill body), so their size is bounded by the
+        #: active engine's decision context minus headroom for the rest of the
+        #: state. Derived here because codegen runs immediately before the gate,
+        #: so the non-body context is already known; a positive config value
+        #: overrides (lower it to avoid a long fidelity evaluation).
+        self.chars_per_token = float(codegen_cfg.get("chars_per_token", 4.0) or 4.0)
+        self.decision_reserve_tokens = max(
+            0, int(codegen_cfg.get("decision_reserve_tokens", 1024))
+        )
+        engine_context = int(getattr(engine, "context_tokens", 4096) or 4096)
+        self.max_body_tokens = artifact_token_budget(
+            codegen_cfg.get("max_body_tokens"), engine_context, self.decision_reserve_tokens
+        )
+        self.max_test_tokens = artifact_token_budget(
+            codegen_cfg.get("max_test_tokens"), engine_context, self.decision_reserve_tokens
+        )
+        self.max_body_chars = int(self.max_body_tokens * self.chars_per_token)
+        self.max_test_chars = int(self.max_test_tokens * self.chars_per_token)
         self.queue = RequestQueue(
             max_size=int(config.get("queue", {}).get("max_size", 100)),
         )
@@ -1735,6 +1786,7 @@ class Scheduler:
                     self._read_body(job.category, job.draft.name),
                     evidence,
                     reason_kind=job.reason_kind,
+                    max_chars=self.max_body_chars,
                 )
             else:
                 code = generate_skill_body(
@@ -1747,6 +1799,7 @@ class Scheduler:
                         if self.degeneration_check_factory is not None
                         else None
                     ),
+                    max_chars=self.max_body_chars,
                 )
             code = self._fidelity_gate(job, code)
             contract = parse_contract(code)
@@ -1784,13 +1837,18 @@ class Scheduler:
         """Rapid SemIf sanity gate on the body; regen once only on reconsider.
 
         `authoring:fidelity` (accept/reconsider) runs beside static findings
-        (declaration vs. code). A non-empty findings list forces reconsider.
-        The gate never diagnoses: it only triggers a rewrite, which is handed
-        the raw evidence bundle as-is. Bounded by
-        `codegen.fidelity.max_attempts`; a body that still fails is accepted
-        (never hard-fail authoring) but traced and badged `unverified`. The
-        engine is real: an EngineUnavailable propagates and the worker marks
-        the app fatal.
+        (declaration vs. code). The state carries the **whole** body — the gate
+        ingests the artifact verbatim, which is why generated bodies are
+        size-bounded (`max_body_chars`) — plus a deterministic operation
+        inventory and the de-identified goal. It asks the positive question (is
+        there a concrete operation that realizes the goal?) rather than asking
+        the model to prove a negative, and uses its own `fidelity_tau` rather
+        than the run-assessment `tau`. A non-empty findings list forces
+        reconsider. The gate never diagnoses: on reject the rewrite is handed
+        the raw evidence bundle (inventory + findings included) as-is. Bounded
+        by `codegen.fidelity.max_attempts`; a body that still fails is accepted
+        (never hard-fail authoring) but traced. The engine is real: an
+        EngineUnavailable propagates and the worker marks the app fatal.
         """
         if not self.fidelity_enabled or self.codegen is None:
             return code
@@ -1799,18 +1857,22 @@ class Scheduler:
         attempts = max(self.fidelity_max_attempts, 0)
         reviewed = code
         for attempt in range(attempts + 1):
+            inventory = operation_inventory(reviewed)
             decision = DecisionRequest(
                 state=(
                     f"[authoring fidelity] skill {job.category}.{job.draft.name}\n"
-                    f"request: {job.request.text}\n"
+                    f"goal: {job.draft.goal}\n"
                     f"description: {job.draft.description}\n"
                     f"INTEGRATION: {json.dumps(integration, sort_keys=True)}\n"
                     f"findings: {json.dumps(findings)}\n"
-                    f"body:\n{reviewed[:4000]}"
+                    f"observed operations (static inventory):\n"
+                    f"{render_operation_inventory(inventory)}\n"
+                    f"body:\n{reviewed}"
                 ),
                 question=(
-                    "Does this skill body really perform the requested action "
-                    "against the user's service, or does it simulate it?"
+                    "Does this skill body contain a concrete, side-effecting "
+                    "operation that really performs its goal against the user's "
+                    "service (not a simulation, canned result, or draft)?"
                 ),
                 options=[
                     Option("accept", "It really performs the action."),
@@ -1818,7 +1880,7 @@ class Scheduler:
                 ],
             )
             result = self.engine.call(decision)
-            reconsider = result.prob("reconsider") >= self.tau or bool(findings)
+            reconsider = result.prob("reconsider") >= self.fidelity_tau or bool(findings)
             self.log.append(
                 decision,
                 result,
@@ -1852,6 +1914,7 @@ class Scheduler:
                 "description": job.draft.description,
                 "INTEGRATION": integration,
                 "findings": findings,
+                "observed_operations": inventory,
                 "verdict": result.selected,
                 "probabilities": result.probs,
                 "previous_body": reviewed,
@@ -1864,6 +1927,7 @@ class Scheduler:
                     reviewed,
                     evidence,
                     reason_kind="fidelity",
+                    max_chars=self.max_body_chars,
                 )
             except (CodegenError, ValueError) as exc:
                 self.trace.append(
@@ -1905,13 +1969,14 @@ class Scheduler:
                         "previous_body": code,
                     },
                     reason_kind="test",
+                    max_chars=self.max_body_chars,
                 )
                 self.body_store.write_body(job.category, job.draft.name, code)
                 contract = parse_contract(code)
                 self.body_store.write_contract(job.category, job.draft.name, contract)
             test = generate_skill_tests(
                 self.codegen, job.category, job.draft, code, contract,
-                reason=reason, target=target,
+                reason=reason, target=target, max_chars=self.max_test_chars,
             )
             self.body_store.write_test(job.category, job.draft.name, test)
             passed, output = run_skill_test(

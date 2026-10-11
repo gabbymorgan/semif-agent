@@ -24,12 +24,14 @@ from semif_agent.llm import LLMClient, LLMError
 from semif_agent.log import DecisionLog
 from semif_agent.skill import RunResult
 from semif_agent.scheduler import (
+    MIN_ARTIFACT_TOKENS,
     DraftAuthor,
     PendingQuestion,
     RepairOffer,
     Scheduler,
     SchedulerReply,
     SkillWrite,
+    artifact_token_budget,
 )
 from semif_agent.skills import (
     ActionResult,
@@ -155,6 +157,66 @@ def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosit
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
         codegen=codegen,
     )
+
+
+def test_artifact_token_budget_derives_overrides_and_floors():
+    """The artifact ceiling is the engine context minus the reserve; a positive
+    config value overrides it; a hard floor keeps it usable."""
+    assert artifact_token_budget(0, 32768, 1024) == 32768 - 1024
+    assert artifact_token_budget(None, 4096, 1024) == 4096 - 1024
+    assert artifact_token_budget(2000, 32768, 1024) == 2000
+    assert artifact_token_budget(0, 100, 1024) == MIN_ARTIFACT_TOKENS
+
+
+def test_scheduler_sizes_artifact_budgets_from_engine_context(tmp_path):
+    """Body/test char ceilings are derived from the active engine's context."""
+    scheduler = _scheduler(tmp_path)
+    # ScriptedEngine exposes no context_tokens -> the conservative 4096 default.
+    assert scheduler.max_body_tokens == 4096 - 1024
+    assert scheduler.max_body_chars == int((4096 - 1024) * 4.0)
+    assert scheduler.max_test_chars == scheduler.max_body_chars
+
+
+def test_fidelity_gate_state_is_whole_body_without_the_request(tmp_path):
+    """The gate ingests the whole body plus the inventory and goal, and never
+    the raw user request (the truncation bug and the PII path, both fixed)."""
+    scheduler = _scheduler(
+        tmp_path,
+        codegen=CodegenClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=1),
+    )
+    body = '''\
+INTEGRATION = {"service": "nextcloud", "transport": "http", "config_vars": ["nextcloud_bridge_url"]}
+CONTRACT = {"nextcloud_bridge_url": "Bridge URL."}
+
+import urllib.request
+
+from semif_agent.skills import ActionResult
+
+
+def _bridge(ctx, method, path, payload=None):
+    return urllib.request.urlopen(ctx.config["nextcloud_bridge_url"] + path)
+
+
+def act(ctx, request):
+    _bridge(ctx, "POST", "/tasks/complete", payload={"uid": "1"})
+    return ActionResult(action_log="done", new_state="done")
+'''
+    job = SkillWrite(
+        request=Request("mark task Eat hot dogs as completed"),
+        category="nextcloud",
+        draft=SkillDraft(
+            name="update_task_status",
+            description="Marks a task completed.",
+            goal="Update a task's status to completed.",
+        ),
+    )
+    scheduler._fidelity_gate(job, body)
+    state = scheduler.engine.calls[-1].state
+    assert "/tasks/complete" in state, "the whole body must be present"
+    assert "POST /tasks/complete" in state, "the inventory must name the action"
+    assert "observed operations" in state
+    assert "Update a task's status to completed." in state
+    assert "Eat hot dogs" not in state, "the raw request must not reach the gate"
 
 
 def test_action_result_needs_input_defaults_none():

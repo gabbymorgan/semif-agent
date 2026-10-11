@@ -40,6 +40,18 @@ class DegenerationError(CodegenError):
     """
 
 
+class ArtifactTooLong(ValueError):
+    """A generated artifact exceeded the size budget for a decision.
+
+    A hard ceiling, not a warning: the artifact is ingested *whole* by a
+    decision (the fidelity gate reads the entire skill body), so it must fit
+    the decision engine's context with headroom for everything else in the
+    state. The budget is derived from the active engine's context; the codegen
+    retry ladder asks the model for a shorter artifact, and a body that still
+    cannot fit stubs out rather than shipping something the gate cannot read.
+    """
+
+
 def read_skill_contract(path: str | None = None) -> str:
     contract = Path(path) if path else DEFAULT_CONTRACT
     if not contract.is_file():
@@ -136,6 +148,9 @@ BODY_DIRECTIVES = (
     "employ a `ctx.engine` SemIf sub-decision over them and return the "
     "`(DecisionRequest, DecisionResult)` pairs on `ActionResult.decisions`; "
     "send only when the reusable goal calls for it.\n"
+    "Keep the body small: it is ingested whole by the decision engine's "
+    "fidelity check, so delegate protocol details to a bridge instead of "
+    "hand-rolling them, and keep `act` to one purpose.\n"
 )
 
 
@@ -256,13 +271,17 @@ def _unresolved_names(code: str) -> list[str]:
     return sorted(unresolved)
 
 
-def parse_skill_body(raw: str) -> str:
+def parse_skill_body(raw: str, max_chars: int | None = None) -> str:
     """Extract and validate a Python skill body from the model's reply.
 
     Accepts bare code, ```fenced``` code, or JSON {"code": "..."}. The body
     must parse, define a module-level `act` function, declare a valid flat
     `CONTRACT` whose keys are all read from `ctx.config`, and import every name
     it uses. Returns the cleaned source. Raises ValueError otherwise.
+
+    `max_chars` is the hard size ceiling (the scheduler derives it from the
+    active decision engine's context). A body over it raises `ArtifactTooLong`
+    so the retry ladder asks for a shorter one.
     """
     text = raw.strip()
     if "code" in text[:400] and "{" in text and "}" in text:
@@ -285,6 +304,12 @@ def parse_skill_body(raw: str) -> str:
     text = text.strip()
     if not text:
         raise ValueError("skill body is empty")
+    if max_chars is not None and len(text) > max_chars:
+        raise ArtifactTooLong(
+            f"skill body is {len(text)} chars, over the {max_chars}-char limit "
+            "for a decision-ingestible body; keep it small and delegate "
+            "protocol details to a bridge"
+        )
     try:
         module = ast.parse(text, filename="<generated>")
     except SyntaxError as exc:
@@ -538,6 +563,82 @@ def integration_findings(integration: dict, source: str, code: str) -> list[str]
     return findings
 
 
+_HTTP_VERBS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+_SUBPROCESS_FUNCS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
+_FILE_WRITE_FUNCS = frozenset({"write_text", "write_bytes", "write"})
+
+
+def _call_name(node) -> str:
+    """Best-effort dotted name of a call target (e.g. `urllib.request.urlopen`)."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def operation_inventory(code: str) -> list[str]:
+    """A compact, static inventory of the side-effecting operations in a body.
+
+    The fidelity gate reads the whole body; this inventory is its deterministic
+    companion. It names the concrete operations (HTTP verb + path, CLI run,
+    mail send, file write, timer) so the gate and its regen evidence see *what
+    the body does* at a glance, and a body that performs no operation at all is
+    legible immediately. Best-effort and purely static: a dynamic target
+    renders as `?`, an unparseable body yields nothing. Never raises.
+    """
+    try:
+        module = ast.parse(code, filename="<inventory>")
+    except SyntaxError:
+        return []
+    operations: list[str] = []
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node.func)
+        leaf = name.rsplit(".", 1)[-1]
+        args = list(node.args) + [kw.value for kw in node.keywords]
+        strings = [s for a in args if (s := _const_str(a)) is not None]
+        verbs = [s for s in strings if s.upper() in _HTTP_VERBS]
+        if verbs:
+            paths = [s for s in strings if s.startswith("/")]
+            target = paths[0] if paths else "?"
+            operations.append(f"HTTP {verbs[0].upper()} {target} (via {name or '?'})")
+            continue
+        if name in {
+            "urllib.request.urlopen",
+            "urlopen",
+            "http.client.HTTPConnection",
+            "http.client.HTTPSConnection",
+        }:
+            operations.append(f"HTTP request (via {name})")
+        elif "subprocess" in name and leaf in _SUBPROCESS_FUNCS:
+            operations.append(f"run CLI (via {name})")
+        elif "smtplib" in name and leaf in {"sendmail", "send_message"}:
+            operations.append(f"send mail (via {name})")
+        elif "imaplib" in name and leaf in {"append", "store", "copy", "expunge"}:
+            operations.append(f"mail mutation (via {name})")
+        elif "poplib" in name and leaf in {"dele", "quit"}:
+            operations.append(f"mail mutation (via {name})")
+        elif leaf in _FILE_WRITE_FUNCS or (
+            name == "open"
+            and any(s in {"w", "a", "x", "wb", "ab", "xb", "w+", "a+", "wt", "at"} for s in strings)
+        ):
+            operations.append(f"write file (via {name})")
+        elif name.startswith("ctx.timers"):
+            operations.append(f"schedule timer (via {name})")
+    if not operations:
+        operations.append("no side-effecting operation found")
+    return operations
+
+
+def render_operation_inventory(operations: list[str]) -> str:
+    """Render `operation_inventory` as a bulleted block for a decision state."""
+    return "\n".join(f"- {operation}" for operation in operations)
+
+
 def _retry_prompt(
     category: str,
     draft: SkillDraft,
@@ -556,9 +657,17 @@ def _retry_prompt(
         "is authoritative: follow it exactly.\n\n"
         f"{contract}"
     )
+    if isinstance(error, ArtifactTooLong):
+        guidance = (
+            "The previous attempt was too long to fit the decision engine's "
+            "context. Emit a SHORTER body: keep `act` minimal and delegate "
+            "protocol details to a bridge.\n"
+        )
+    else:
+        guidance = "You are looping; emit the final Python now.\n"
     user = (
         f"The previous attempt to write the skill body for {category}.{draft.name} "
-        f"was rejected: {error}. You are looping; emit the final Python now.\n"
+        f"was rejected: {error}. {guidance}"
         f"Category: {category}\n"
         f"Skill name: {draft.name}\n"
         f"Reusable goal (de-identified): {draft.goal}\n"
@@ -583,6 +692,7 @@ def generate_skill_body(
     contract: str | None = None,
     max_tokens: int | None = None,
     degeneration_check: Callable[[str], str | None] | None = None,
+    max_chars: int | None = None,
 ) -> str:
     """Author a skill body with the big model; retry up to `max_attempts`.
 
@@ -618,7 +728,7 @@ def generate_skill_body(
                 max_tokens=max_tokens,
                 degeneration_check=degeneration_check,
             )
-            return parse_skill_body(raw)
+            return parse_skill_body(raw, max_chars=max_chars)
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"skill body rejected {attempts} times: {last_error}")
@@ -756,12 +866,12 @@ def build_testgen_request_prompt(
     ]
 
 
-def parse_skill_test(raw: str) -> str:
+def parse_skill_test(raw: str, max_chars: int | None = None) -> str:
     """Extract and validate skill.test.py from the model's reply.
 
     Accepts bare code, ```fenced``` code, or JSON {"code": "..."}. The test
-    must parse as Python. Returns the cleaned source. Raises ValueError
-    otherwise.
+    must parse as Python and (when `max_chars` is set) fit the artifact size
+    budget. Returns the cleaned source. Raises ValueError otherwise.
     """
     text = raw.strip()
     if "code" in text[:400] and "{" in text and "}" in text:
@@ -784,6 +894,11 @@ def parse_skill_test(raw: str) -> str:
     text = text.strip()
     if not text:
         raise ValueError("skill test is empty")
+    if max_chars is not None and len(text) > max_chars:
+        raise ArtifactTooLong(
+            f"skill test is {len(text)} chars, over the {max_chars}-char limit "
+            "for a codegen artifact; keep fixtures compact"
+        )
     try:
         ast.parse(text, filename="<generated test>")
     except SyntaxError as exc:
@@ -800,6 +915,7 @@ def generate_skill_tests(
     contract_md: str | None = None,
     reason: str | None = None,
     target: str | None = None,
+    max_chars: int | None = None,
 ) -> str:
     """Generate skill.test.py against the finished body.
 
@@ -828,7 +944,7 @@ def generate_skill_tests(
         )
         try:
             raw = client.chat(messages)
-            return parse_skill_test(raw)
+            return parse_skill_test(raw, max_chars=max_chars)
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"testgen reply rejected {attempts} times: {last_error}")
@@ -901,6 +1017,7 @@ def regenerate_skill_body(
     evidence: dict,
     contract: str | None = None,
     reason_kind: str = "test",
+    max_chars: int | None = None,
 ) -> str:
     """Rewrite a skill body whose test, review, or real run failed.
 
@@ -925,7 +1042,7 @@ def regenerate_skill_body(
         )
         try:
             raw = client.chat(messages)
-            return parse_skill_body(raw)
+            return parse_skill_body(raw, max_chars=max_chars)
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"skill body rejected {attempts} times: {last_error}")

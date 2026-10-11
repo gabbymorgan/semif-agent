@@ -541,9 +541,10 @@ CLI, unit tests (24) + integration tests (2).
   codegen. Bodies
   must perform the real action via stdlib transports with values from
   `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
-  fidelity gate (`authoring:fidelity`, a SemIf accept/reconsider decision) plus
-  static declaration checks regenerates a simulated body once with the
-  de-identified evidence bundle, then accepts it badged `unverified`. A failed real run logs a
+  fidelity gate (`authoring:fidelity`, a SemIf accept/reconsider decision over
+  the whole body + an operation inventory) plus static declaration checks
+  regenerates a simulated body once with the de-identified evidence bundle, then
+  accepts it traced (never a hard authoring failure). A failed real run logs a
   SemIf repair choice (retry / repair_skill / ask_user / no_repair) surfaced in
   REPL/dashboard; repair writes carry a de-identified evidence bundle (a generic
   failure kind, the integration, the goal, and the previous body — never the run's
@@ -686,8 +687,11 @@ CLI, unit tests (24) + integration tests (2).
   decision log and `dream` cost are unchanged because `DecisionResult` is the
   same contract.
 - Context differs by provider (the local engine's `engine.context_tokens` vs the
-  remote server's own `--ctx-size`); a state that overflows is a fatal
-  `EngineUnavailable`, the same class as the local token limit.
+  remote server's own `--ctx-size`, mirrored in `engine.winnow.context_tokens`);
+  a state that overflows is a fatal `EngineUnavailable`, the same class as the
+  local token limit. Every engine exposes its window as `context_tokens` (a
+  `DecisionEngine` property), which the scheduler uses to size generated
+  artifacts — see "Artifact size budget".
 
 ### Environment
 - The core is pure stdlib and runs anywhere Python does. Never pip-install heavy
@@ -972,11 +976,15 @@ CLI, unit tests (24) + integration tests (2).
      name the body references must be imported/bound — both enforced by
      `parse_skill_body`).
   2. **fidelity gate** (`authoring:fidelity` SemIf decision +
-     `integration_findings`): a rapid sanity check (accept/reconsider) — is the
-     action real or simulated/declared-but-unused? It only triggers a rewrite,
-     never a diagnosis. One corrective regen with the de-identified evidence bundle
-     (`codegen.fidelity.max_attempts`), then accept with a trace rather than
-     hard-failing authoring.
+     `integration_findings`): a rapid sanity check (accept/reconsider) — does
+     the body contain a concrete, side-effecting operation that really performs
+     its goal (vs simulated/declared-but-unused)? The state carries the
+     **whole** body plus a deterministic operation inventory and the
+     de-identified goal (never the raw request), and asks the positive question;
+     its threshold is its own `codegen.fidelity.tau`. It only triggers a
+     rewrite, never a diagnosis. One corrective regen with the de-identified
+     evidence bundle (`codegen.fidelity.max_attempts`, inventory + findings
+     included), then accept with a trace rather than hard-failing authoring.
   3. **contract** (`parse_contract`): read from the body's own flat `CONTRACT`
      constant — a single flat object of snake_case variable name -> semantic
      description, for user input and SemIf only (no types/validation; that lives
@@ -1043,17 +1051,39 @@ CLI, unit tests (24) + integration tests (2).
   service/transport carries what the questions used to; the only remaining
   question queue is the repair `ask_user` path (local).
 - **Fidelity gate.** After the body lands, `authoring:fidelity` — a real SemIf
-  accept/reconsider decision (`P(reconsider) >= tau` or any static
-  `integration_findings` from the declared transport vs. real calls and declared
-  config_vars actually read) decides whether the body really performs the
-  action. The gate never diagnoses: it only triggers a rewrite, which is handed
-  the de-identified evidence bundle as-is (goal, description, raw
-  INTEGRATION, findings, SemIf verdict+probs, previous body — no request). A
-  rejected body is
-  rewritten once (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a
-  body that still fails is accepted (never hard-fail authoring) but traced
-  (`fidelity_review`, `performs_real_action=false`) and badged `unverified` in
-  the dashboard. A decision row is logged under phase `authoring:fidelity`.
+  accept/reconsider decision (`P(reconsider) >= codegen.fidelity.tau` or any
+  static `integration_findings` from the declared transport vs. real calls and
+  declared config_vars actually read) decides whether the body really performs
+  the action. **The state carries the whole body, never a prefix**, plus a
+  deterministic `operation_inventory` (the HTTP verb + path, CLI, mail, file
+  write, or timer it performs) and the de-identified goal; the raw request is
+  **not** included (it added a remote-engine PII path and no signal — the goal
+  is the reusable action). The question is positive ("is there a concrete
+  operation that realizes the goal?"), which the model answers far more
+  reliably than the old "does it simulate?" on a prefix. It never diagnoses: it
+  only triggers a rewrite, which is handed the de-identified evidence bundle
+  as-is (goal, description, raw INTEGRATION, findings, operation inventory,
+  SemIf verdict+probs, previous body). A rejected body is rewritten once
+  (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a body that still
+  fails is accepted (never hard-fail authoring) but traced (`fidelity_review`,
+  `performs_real_action=false`). A decision row is logged under phase
+  `authoring:fidelity`. (An *undeclared* INTEGRATION is what the dashboard
+  badges `unverified` — that is `integration_source`, not the fidelity verdict.)
+- **Artifact size budget.** A decision ingests a generated artifact *whole*, so
+  each is bounded: `parse_skill_body`/`parse_skill_test` reject an over-budget
+  artifact with `ArtifactTooLong` (a hard ceiling, since it is a hard limit),
+  which the codegen retry ladder answers with a shorter-artifact prompt. The
+  ceiling is derived from the **active engine's context** —
+  `engine.context_tokens` (local GGUF) or `engine.winnow.context_tokens`
+  (Winnow; must mirror the server's `--ctx-size`) — minus
+  `codegen.decision_reserve_tokens` (default 1024), the headroom for everything
+  else in the fidelity state (goal, description, integration, findings,
+  inventory, question, options, prefill margin), which is known because codegen
+  runs immediately before the gate. `codegen.max_body_tokens` /
+  `max_test_tokens` (0 = derive; a positive value overrides — lower it to avoid
+  a long fidelity evaluation) set each artifact's budget, converted to chars by
+  `chars_per_token`. This is why the gate never truncates and a body can never
+  exceed what the gate can read.
 - **Repair loop.** A failed real run (assessment failure or a raised skill
   error) logs a SemIf choice (phase `repair:choice`) offering
   `retry` / `repair_skill` / `ask_user` / `no_repair`, recorded as a

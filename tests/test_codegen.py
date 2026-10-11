@@ -17,6 +17,7 @@ import pytest
 
 from semif_agent.codegen import (
     BODY_DIRECTIVES,
+    ArtifactTooLong,
     CodegenClient,
     CodegenError,
     DegenerationError,
@@ -28,6 +29,7 @@ from semif_agent.codegen import (
     generate_skill_tests,
     infer_integration,
     integration_findings,
+    operation_inventory,
     parse_contract,
     parse_integration,
     parse_skill_body,
@@ -35,6 +37,7 @@ from semif_agent.codegen import (
     read_skill_contract,
     read_testgen_contract,
     regenerate_skill_body,
+    render_operation_inventory,
     run_skill_test,
     skill_contract_ref,
 )
@@ -1930,3 +1933,83 @@ def test_testgen_prompt_requires_loopback_fixture_and_hermeticity():
     assert "HERMETIC" in joined
     assert "loopback" in joined
     assert "never simulate the action" in joined.lower()
+
+
+# ---- artifact size budget + operation inventory ----
+
+def test_parse_skill_body_enforces_size_budget():
+    """A body over the decision-ingestible ceiling is rejected as too long.
+
+    The ceiling is hard because a decision (the fidelity gate) reads the body
+    whole; the retry ladder then asks for a shorter one.
+    """
+    assert parse_skill_body(GOOD_BODY, max_chars=100000) == GOOD_BODY.strip()
+    with pytest.raises(ArtifactTooLong):
+        parse_skill_body(GOOD_BODY, max_chars=len(GOOD_BODY) // 2)
+    # No limit means no rejection.
+    assert parse_skill_body(GOOD_BODY) == GOOD_BODY.strip()
+
+
+def test_parse_skill_test_enforces_size_budget():
+    assert parse_skill_test(GOOD_TEST, max_chars=100000) == GOOD_TEST.strip()
+    with pytest.raises(ArtifactTooLong):
+        parse_skill_test(GOOD_TEST, max_chars=10)
+
+
+def test_retry_prompt_asks_for_a_shorter_body_when_too_long():
+    draft = SkillDraft(name="probe", description="Probe the service.")
+    too_long = _retry_prompt("probe", draft, "CONTRACT", ArtifactTooLong("too long"))
+    assert "SHORTER" in json.dumps(too_long)
+    looping = _retry_prompt("probe", draft, "CONTRACT", ValueError("bad shape"))
+    assert "looping" in json.dumps(looping)
+
+
+def test_operation_inventory_finds_http_verb_and_path_via_helper():
+    """The verb + path live at the call site, not the transport helper: the
+    inventory must surface `POST /tasks/complete` for a thin-helper body."""
+    code = '''\
+import urllib.request
+
+from semif_agent.skills import ActionResult
+
+
+def _bridge(ctx, method, path, payload=None):
+    return urllib.request.urlopen(path)
+
+
+def act(ctx, request):
+    _bridge(ctx, "POST", "/tasks/complete", payload={"uid": "1"})
+    return ActionResult(action_log="ok", new_state="ok")
+'''
+    ops = operation_inventory(code)
+    assert any("HTTP POST /tasks/complete" in op for op in ops), ops
+
+
+def test_operation_inventory_flags_a_body_with_no_action():
+    code = '''\
+from semif_agent.skills import ActionResult
+
+
+def act(ctx, request):
+    return ActionResult(action_log="done", new_state="done")
+'''
+    assert operation_inventory(code) == ["no side-effecting operation found"]
+
+
+def test_operation_inventory_detects_subprocess_and_file_write():
+    code = '''\
+import subprocess
+
+
+def act(ctx, request):
+    subprocess.run(["/bin/ps", "-e"])
+    with open("out.txt", "w") as handle:
+        handle.write("x")
+'''
+    ops = operation_inventory(code)
+    assert any("run CLI" in op for op in ops), ops
+    assert any("write file" in op for op in ops), ops
+
+
+def test_render_operation_inventory_is_bulleted():
+    assert render_operation_inventory(["a", "b"]) == "- a\n- b"

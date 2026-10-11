@@ -191,9 +191,15 @@ worker. It is **asynchronous**, so the gate stays free while either model thinks
    codegen is the primarily-cloud model, so it receives only the de-identified
    spec — never the user's request, question answers, or run output.
 4. **Fidelity gate** (`authoring:fidelity` SemIf accept/reconsider decision +
-   static `integration_findings`): is the action real, or simulated? One
-   corrective regen with the de-identified evidence bundle, then accept-with-badge
-   (`unverified`) rather than hard-fail.
+   static `integration_findings`): does the body contain a concrete,
+   side-effecting operation that really performs its goal? The state carries the
+   **whole** body (never a prefix) plus a deterministic operation inventory and
+   the de-identified goal — never the raw request — and asks the positive
+   question rather than asking the model to prove a negative. Because a decision
+   ingests the body whole, generated artifacts are size-bounded
+   (`max_body_chars`/`max_test_chars`, derived from the engine's context). One
+   corrective regen with the de-identified evidence bundle (inventory + findings
+   included), then accept with a trace rather than hard-fail.
 5. **Contract** (`parse_contract`): read from the body's own `CONTRACT`
    constant — a flat map of snake_case variable name → semantic description, for
    user input and SemIf only; `contract.json` is a persisted mirror.
@@ -211,9 +217,9 @@ onto the new leaf. On failure the leaf stays a restartable stub. A whole new
 category runs the same chain deterministically:
 `create_category` → `create_skill` → async body → re-dispatch.
 
-A rejected/simulated body is traced (`fidelity_review`), badged `unverified`,
-and never blocks authoring. Codegen failures (including timeouts) surface as a
-graceful stub and are retryable with `restart <category> <skill>`.
+A rejected/simulated body is traced (`fidelity_review`) and never blocks
+authoring. Codegen failures (including timeouts) surface as a graceful stub and
+are retryable with `restart <category> <skill>`.
 
 ### What each model sees
 
@@ -245,7 +251,7 @@ receives the user's request, question answers, or run output.
 | `assess:outcome` | `skill.py:311` | skill label + goal + resolved inputs + bounded action log + steps already taken | `done` / `continue` / `failed` |
 | `config:search` | `scheduler.py:1477` | skill + variable name + its semantic description | each candidate config key (+ `ask`) |
 | `config:record` | `skill.py:112` | skill + `variable = value` | `record` / `ask_again` |
-| `authoring:fidelity` | `scheduler.py:1311` | skill, request, description, `INTEGRATION` JSON, static findings, first 4000 chars of body | `accept` / `reconsider` |
+| `authoring:fidelity` | `scheduler.py:1836` | skill, goal, description, `INTEGRATION` JSON, static findings, operation inventory, **whole** body (no raw request) | `accept` / `reconsider` |
 | `repair:choice` | `scheduler.py:658` | skill, request, integration, truncated failure | `retry` / `repair_skill` / `ask_user` / `no_repair` |
 | degeneration watchdog¹ | `cli.py:128` | `[codegen <model>]` + last 2000 chars of the stream | `continue` / `stop` |
 | `codegen_regen`¹ | `cli.py:165` | `[testgen <model>]` + last 1200 chars of the test error | `regen_code` / `regen_test` / `regen_contract` |

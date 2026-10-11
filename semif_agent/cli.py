@@ -220,6 +220,7 @@ def build_engine(config: dict, pins: dict | None = None) -> DecisionEngine:
             WinnowConfig(
                 base_url=endpoint["base_url"],
                 model=_required_model(win, "engine.winnow"),
+                context_tokens=int(win.get("context_tokens", 32768)),
                 timeout=float(win.get("timeout", 120.0)),
                 retries=int(win.get("retries", 0)),
                 api_key=endpoint["api_key"],
