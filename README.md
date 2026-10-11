@@ -857,7 +857,10 @@ installed with `scripts/bootstrap.sh --browser` (Playwright + Chromium land unde
 If `playwright install` fails — notably on a host with an IPv6 address but no
 global IPv6 route, where Playwright's downloader prefers IPv6 and hangs —
 bootstrap falls back to `scripts/playwright-browsers.py`, which downloads the
-same pinned artifacts over IPv4.
+same pinned artifacts over IPv4. To skip the managed download altogether, set
+`bridges.browser.channel` (a Playwright channel such as `chrome`/`msedge`) or
+`bridges.browser.executable_path` (a browser binary) to use an already-installed
+browser.
 Unlike the others it owns a browser and keeps a **persistent profile**
 (`.runtime/browser/profile`) so a login you do once survives across calls and
 restarts — the browser analog of the SimpleX bridge owning its own daemon

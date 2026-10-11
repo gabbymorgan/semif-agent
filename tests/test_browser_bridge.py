@@ -309,6 +309,24 @@ def test_bad_engine_falls_back_to_chromium():
     assert BrowserBridge({"engine": "WebKit"}).engine == "webkit"
 
 
+def test_executable_path_and_channel_are_plumbed():
+    bridge = BrowserBridge(
+        {"channel": "chrome", "executable_path": "/usr/bin/google-chrome"}
+    )
+    assert bridge.channel == "chrome"
+    assert bridge.executable_path == "/usr/bin/google-chrome"
+    # The real driver (no injected double) carries them; executable_path wins at
+    # launch, so the managed download is skipped entirely.
+    assert bridge.client.channel == "chrome"
+    assert bridge.client.executable_path == "/usr/bin/google-chrome"
+
+
+def test_driver_defaults_to_managed_browser():
+    driver = BrowserDriver()
+    assert driver.channel == ""
+    assert driver.executable_path == ""
+
+
 # ---- driver dependency handling ----
 
 def test_driver_unavailable_without_playwright(monkeypatch):

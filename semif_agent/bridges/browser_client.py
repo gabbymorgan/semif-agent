@@ -67,6 +67,8 @@ class BrowserDriver:
         screenshot_dir: str = "",
         default_timeout: float = DEFAULT_TIMEOUT,
         max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
+        channel: str = "",
+        executable_path: str = "",
     ):
         self.engine = engine if engine in ENGINES else DEFAULT_ENGINE
         self.headless = bool(headless)
@@ -75,6 +77,12 @@ class BrowserDriver:
         self.screenshot_dir = str(screenshot_dir or "")
         self.default_timeout = float(default_timeout)
         self.max_text_chars = max(200, int(max_text_chars))
+        #: Use an already-installed browser instead of Playwright's own build:
+        #: `channel` names a Playwright channel (`chrome`, `msedge`, ...) and
+        #: `executable_path` points at a specific binary. Both bypass the
+        #: managed-download requirement, useful where the CDN is unreachable.
+        self.channel = str(channel or "").strip()
+        self.executable_path = str(executable_path or "").strip()
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -163,11 +171,17 @@ class BrowserDriver:
             # A persistent context keeps cookies/logins on disk across calls and
             # restarts; it is the browser analog of the SimpleX bridge owning its
             # own profile.
+            launch_options = {
+                "headless": self.headless,
+                "viewport": {"width": 1280, "height": 800},
+                "timeout": self.default_timeout * 1000,
+            }
+            if self.executable_path:
+                launch_options["executable_path"] = self.executable_path
+            elif self.channel:
+                launch_options["channel"] = self.channel
             self._context = await browser_type.launch_persistent_context(
-                user_data_dir,
-                headless=self.headless,
-                viewport={"width": 1280, "height": 800},
-                timeout=self.default_timeout * 1000,
+                user_data_dir, **launch_options
             )
         except BrowserUnavailable:
             raise

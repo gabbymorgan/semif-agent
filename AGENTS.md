@@ -1543,7 +1543,10 @@ CLI, unit tests (24) + integration tests (2).
   forces `autoSelectFamily` + a dual-stack resolver that prefers IPv6 and hangs
   instead of falling back to IPv4), bootstrap falls back to
   `scripts/playwright-browsers.py`, which fetches the same pinned artifacts over
-  IPv4 and lays them out where Playwright expects. Playwright's sync API is
+  IPv4 and lays them out where Playwright expects. `bridges.browser.channel` /
+  `executable_path` instead launch an already-installed browser (a Playwright
+  channel like `chrome`/`msedge`, or a specific binary) and skip the managed
+  download entirely. Playwright's sync API is
   bound to its creating thread and the bridge serves each request on a new one,
   so the driver runs the **async** API on one dedicated event-loop thread and
   serializes whole operations behind an `asyncio.Lock`, submitting coroutines

@@ -132,6 +132,11 @@ class BrowserBridge(BridgeService):
         self.screenshot_dir = str(cfg.get("screenshot_dir") or DEFAULT_SCREENSHOT_DIR)
         self.default_timeout = float(cfg.get("default_timeout", DEFAULT_TIMEOUT))
         self.max_text_chars = int(cfg.get("max_text_chars", DEFAULT_MAX_TEXT_CHARS))
+        #: Optional escape hatch: use an installed browser instead of Playwright's
+        #: managed download. `channel` is a Playwright channel (chrome/msedge/...),
+        #: `executable_path` a specific binary; `executable_path` wins if both set.
+        self.channel = str(cfg.get("channel", "") or "").strip()
+        self.executable_path = str(cfg.get("executable_path", "") or "").strip()
         #: A test seam: inject a driver double. Production builds the real one.
         self.client = client or BrowserDriver(
             engine=self.engine,
@@ -141,6 +146,8 @@ class BrowserBridge(BridgeService):
             screenshot_dir=self.screenshot_dir,
             default_timeout=self.default_timeout,
             max_text_chars=self.max_text_chars,
+            channel=self.channel,
+            executable_path=self.executable_path,
         )
 
     # ---- lifecycle ----
