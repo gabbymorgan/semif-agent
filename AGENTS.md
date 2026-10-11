@@ -242,7 +242,9 @@ decisions.py    contract dataclasses (Option, DecisionRequest, DecisionResult,
                 Request)
 dashboard.py    stdlib http.server + JSON API (tree/trace/dream/status/
                 questions/repairs + POST submit/answer/questions/repair/restart/
-                relabel); static/ frontend served at /
+                relabel); static/ frontend served at /; submit/answer drain the
+                queue after replying (like the CLI and gateway) so a multi-step
+                `continue` chain completes instead of stranding its child
 gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 GatewayAdapter contract + Inbound/OutboundMessage. service.py:
                 GatewayService maps chats onto the single-slot scheduler
@@ -297,6 +299,12 @@ bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
                 daemon (stdlib-only `urllib`); tokens stored under
                 `.runtime/outlook/token.json` and seeded once with
                 `scripts/outlook-auth.py`; connection from `bridges.outlook`.
+                browser.py + browser_client.py: BrowserBridge — real browser
+                automation via Playwright (open/read/click/fill/screenshot),
+                owning a persistent browser profile; optional heavy dep
+                (requirements/browser.txt, `bootstrap.sh --browser`), lazy so a
+                missing browser is a per-call 503 and never blocks the other
+                bridges. Runs the async API on one dedicated event-loop thread.
                 registry.py: CATALOG, describe_bridges() (catalog injected
                 into the codegen prompts), run_bridges() (threads the scheduler's
                 `llm` client into the LLM bridge). Run with `python -m
@@ -409,7 +417,8 @@ CLI, unit tests (24) + integration tests (2).
   model sent "book a flight to japan" to `simplex` (0.49 vs create_category
   0.12); with descriptions it picks `create_category` 0.87. `Skill` carries
   `category_description`, seeded by `CATEGORY_DESCRIPTIONS` for the built-ins
-  (response/nextcloud/simplex) and read from the registry for authored
+  (response/nextcloud/simplex/time/calculator/browser) and read from the registry
+  for authored
   categories; `category_descriptions(tree)` collapses it per category so an
   empty bucket is never offered bare. The old category threshold gate
   (`create_tau`/`create_margin`) is **retired**. Leaf level: the softmax
@@ -1512,6 +1521,38 @@ CLI, unit tests (24) + integration tests (2).
   `429`/`Retry-After` backoff are handled in the client.
   `tests/test_outlook_bridge.py` drives the real client over a loopback
   `http.server` faking the token endpoint and Graph shapes.
+- **Browser bridge** (`bridges/browser.py` + `bridges/browser_client.py`).
+  Real browser automation via **Playwright** — open a URL, read a page's text or
+  links, take a screenshot, and click/fill/press/select to complete a flow —
+  behind one uniform JSON surface, so a body never bundles a browser stack. It is
+  the first bridge with a heavy optional dependency, so it is **disabled by
+  default** and installed with `scripts/bootstrap.sh --browser`
+  (`requirements/browser.txt` pins Playwright; the Chromium binary is downloaded
+  into the checkout's `.runtime/browser`, and the bridge sets
+  `PLAYWRIGHT_BROWSERS_PATH` there at launch). Unlike Nextcloud/Outlook it owns a
+  browser and keeps a **persistent profile** (`.runtime/browser/profile`), so a
+  login done once survives across calls and restarts — the browser analog of the
+  SimpleX bridge owning its own daemon (`POST /reset` with `purge=true` wipes it,
+  and `headless:false` shows the window so the operator can sign in).
+  `check_requirements()` deliberately **always returns ok**: `run_bridges()`
+  aborts *all* bridges when one's requirements fail and this dependency is
+  optional, so a missing Playwright/browser must be a per-call `503` (with an
+  install hint), never take down simplex/llm/nextcloud. Playwright's sync API is
+  bound to its creating thread and the bridge serves each request on a new one,
+  so the driver runs the **async** API on one dedicated event-loop thread and
+  serializes whole operations behind an `asyncio.Lock`, submitting coroutines
+  with `run_coroutine_threadsafe`. A real navigation/timeout/selector failure is a
+  `502` (`BrowserError`), a missing package/browser a `503`
+  (`BrowserUnavailable`), bad input a `400` — never a fabricated success. Routes
+  (reads `GET`, mutations `POST`): `/health`, `/state`, `/content`
+  (text|html, bounded), `/text`, `/links`, `/screenshot`
+  (`full_page`/`selector`/`inline`, saved under `.runtime/browser/screenshots`),
+  `/goto`, `/click` (selector or visible text), `/fill`, `/press`, `/select`,
+  `/wait`, `/back`, `/forward`, `/reset`. Bodies reach it via the derived
+  `browser_bridge_url` (+ optional `browser_bridge_token`). Three
+  `seeds/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
+  `tests/test_browser_bridge.py` exercises the routes over a loopback HTTP server
+  with an injected fake driver (no browser, no Playwright needed).
 
 ## Bridge backlog (one session per item)
 
@@ -1571,6 +1612,16 @@ covered. Deferred follow-ups:
   `create_task`, `list_contacts`, `list_files`). Deferred: writing/reusing
   Outlook app-registration guidance in the docs, and a mail-send seed that
   attaches files.
+- [x] **7. Browser bridge (Playwright)** (`bridges/browser.py` +
+  `bridges/browser_client.py`). Shipped: `BrowserBridge` exposes open/read
+  (text/links/screenshot) and act (goto/click/fill/press/select/wait/back/
+  forward/reset) over one JSON surface in front of a real Playwright browser
+  with a persistent profile; optional heavy dep installed via
+  `requirements/browser.txt` + `bootstrap.sh --browser`, lazy so a missing
+  browser is a per-call 503 and never aborts the other bridges; the async API
+  runs on one dedicated event-loop thread. Three `seeds/browser/*` skills
+  (`open_page`, `read_page`, `screenshot`). Deferred: arbitrary JS `evaluate`,
+  file upload/download, multiple tabs/contexts, and a per-URL allowlist.
 
 ### Code principles
 - **Contain installation artifacts in the repo.** Everything a machine installs

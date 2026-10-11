@@ -32,7 +32,8 @@
 #
 # Usage:
 #   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
-#                        [--codegen-model MODEL] [--copy-data SRC] [--voice] [--gpu MODE] [-h]
+#                        [--codegen-model MODEL] [--copy-data SRC] [--voice]
+#                        [--browser] [--gpu MODE] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
@@ -43,6 +44,7 @@ LLM_MODEL=""
 CODEGEN_MODEL=""
 COPY_DATA=""
 VOICE=0
+BROWSER=0
 GPU_MODE="auto"
 
 usage() {
@@ -54,6 +56,7 @@ usage() {
   echo "  --codegen-model MODEL  override codegen.model from config.json for this run"
   echo "  --copy-data SRC        rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
   echo "  --voice                install the optional voice-gateway stack + download its models"
+  echo "  --browser              install the optional browser-bridge stack (Playwright + Chromium)"
   echo "  --gpu MODE             decision-engine llama.cpp backend: auto (default; a GPU build only when engine.gpu_layers is set), vulkan, rocm, cuda, cpu"
   echo "  -h                     this help"
   exit "${1:-0}"
@@ -67,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --voice) VOICE=1; shift ;;
+    --browser) BROWSER=1; shift ;;
     --gpu) GPU_MODE="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
@@ -87,6 +91,7 @@ TOOLDIR="$RUNTIME/bin"
 SIMPLEX_DB="$RUNTIME/simplex"
 UNITS="$RUNTIME/systemd"
 USER_UNITS="$HOME/.config/systemd/user"
+BROWSERS="$RUNTIME/browser"
 PYTHON="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
@@ -358,6 +363,29 @@ if [[ "$VOICE" = 1 ]]; then
   # wheel); the onnxruntime backend does not need it, so install it --no-deps
   # (its own runtime deps are pinned in voice.txt).
   "$PIP" install --no-deps openwakeword==0.6.0
+fi
+
+# --- stage 3c: optional browser-bridge stack (--browser) -----------------------
+# Playwright + its Chromium binaries. Optional: lazy-imported, so a host without
+# it still runs every other bridge. Browsers go under the checkout's
+# .runtime/browser (the containment rule); the bridge sets PLAYWRIGHT_BROWSERS_PATH
+# to the same path at launch.
+if [[ "$BROWSER" = 1 ]]; then
+  echo "== installing browser-bridge deps into $VENV"
+  "$PIP" install -r "$REPO_ROOT/requirements/browser.txt"
+  BROWSER_ENGINE="$("$PYTHON" - "$CONFIG" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    print("chromium"); raise SystemExit(0)
+print(cfg.get("bridges", {}).get("browser", {}).get("engine", "chromium") or "chromium")
+PY
+)"
+  case "$BROWSER_ENGINE" in chromium|firefox|webkit) ;; *) BROWSER_ENGINE=chromium ;; esac
+  echo "== downloading Playwright browser '$BROWSER_ENGINE' into $BROWSERS"
+  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" -m playwright install "$BROWSER_ENGINE" \
+    || echo "WARN: playwright browser download failed; re-run: PLAYWRIGHT_BROWSERS_PATH=$BROWSERS $PYTHON -m playwright install $BROWSER_ENGINE" >&2
 fi
 
 # --- stage 4: GGUF --------------------------------------------------------------
@@ -639,6 +667,13 @@ Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
     bridges.nextcloud (url/username/app_password) — or reuse the top-level
     nextcloud_* values the nextcloud seeds collect. Skills call it at the address
     derived from bridges.nextcloud (default http://127.0.0.1:5230).
+
+Browser bridge (browser automation for skills):
+  - Disabled by default; it needs the optional Playwright stack. Enable it with
+    bridges.browser.enabled = true (install the deps with scripts/bootstrap.sh
+    --browser). It runs inside the same 'semif-bridge' process and keeps a
+    persistent browser profile under .runtime/browser/profile. Skills call it at
+    the address derived from bridges.browser (default http://127.0.0.1:5232).
 EOF
 
 if [[ "$VOICE" = 1 ]]; then
@@ -661,5 +696,26 @@ Voice command gateway (wake word + speech-to-text + text-to-speech):
     and put the input/output device indices in gateway.voice.audio.
   - Re-download / switch models any time with:
       HF_HOME="$HF_CACHE" "$PYTHON" scripts/voice-models.py --config config.json
+EOF
+fi
+
+if [[ "$BROWSER" = 1 ]]; then
+  cat <<EOF
+
+Browser bridge (browser automation for skills):
+  - The Playwright stack is installed and the '$BROWSER_ENGINE' browser is under
+    $BROWSERS. Enable it in config.json with bridges.browser.enabled = true, then
+    restart the bridge service:
+      systemctl --user restart semif-bridge.service
+  - It runs inside 'semif-bridge' (no separate daemon) and keeps a persistent
+    profile at .runtime/browser/profile, so a login you do once survives across
+    calls and restarts. Set bridges.browser.headless = false to watch the window
+    (useful the first time you sign in to a site); POST /reset with purge=true
+    wipes the stored profile.
+  - Skills call it at the address derived from bridges.browser (host/port,
+    default http://127.0.0.1:5232); the shipped seeds are browser.open_page,
+    browser.read_page, and browser.screenshot.
+  - If the bridge reports 503, the browser failed to launch — run:
+      PLAYWRIGHT_BROWSERS_PATH=$BROWSERS "$PYTHON" -m playwright install $BROWSER_ENGINE
 EOF
 fi

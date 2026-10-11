@@ -1,0 +1,21 @@
+# Browser bridge deps (optional).
+#
+# Only needed on a host that runs the browser bridge (browser automation skills).
+# Lazy-imported by semif_agent/bridges/browser_client.py, so the core stays
+# stdlib-only and every other bridge keeps running without it. Install with
+# scripts/bootstrap.sh --browser, or:
+#   .runtime/venv/bin/pip install -r requirements/browser.txt
+#   PLAYWRIGHT_BROWSERS_PATH=.runtime/browser \
+#     .runtime/venv/bin/python -m playwright install chromium
+#
+# The browser binaries are NOT shipped in the wheel: `playwright install`
+# downloads Chromium into PLAYWRIGHT_BROWSERS_PATH. bootstrap.sh points that at
+# the checkout's .runtime/browser (the containment rule); the bridge sets the
+# same env var at launch, so the binaries live with the rest of the stack. Add
+# `--with-deps` to the install command on a bare host to fetch the system
+# libraries Chromium needs (needs sudo).
+#
+# Only `chromium` is installed by default; switch bridges.browser.engine to
+# firefox/webkit and run `python -m playwright install firefox`/`webkit` for
+# those.
+playwright==1.63.0

@@ -747,6 +747,11 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
         "addition, subtraction, multiplication, division, powers and exponents, "
         "squares, cubes, square roots, cube roots, fractions, and percentages."
     ),
+    "browser": (
+        "Browser automation: opening a web page, reading its text or links, "
+        "taking a screenshot, and clicking, typing, or filling forms to carry "
+        "out a task on a website."
+    ),
     "housekeeping": (
         "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
         "cancelling the agent's own skills."

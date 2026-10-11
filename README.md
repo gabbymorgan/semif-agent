@@ -399,8 +399,9 @@ semif_agent/
   voice_transport.py neutral voice transport: mic capture, wake word, VAD,
                     speech-to-text (faster-whisper), text-to-speech (Piper)
   gateway/          messenger COMMAND intake/reply (SimpleX, LXMF, voice)
-  bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud)
-seeds/              committed starter skills (nextcloud, simplex)
+  bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud,
+                    Outlook, browser)
+seeds/              committed starter skills (nextcloud, simplex, outlook, browser)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
@@ -531,11 +532,13 @@ Key blocks:
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
 | `bridges.nextcloud` | Nextcloud bridge: host/port/token + connection (url/username/app_password/defaults) |
 | `bridges.outlook` | Outlook bridge: host/port/token + Microsoft Graph connection (client_id/tenant/defaults) |
+| `bridges.browser` | Browser bridge: host/port/token + Playwright settings (engine/headless/profile dirs) |
 | `simplex_chat` | gateway/forward ports and bot display names (binary refs come from `pins.json`) |
 | `dashboard` | bind host/port |
 
 Bridge skills read `simplex_bridge_url` / `llm_bridge_url` /
-`nextcloud_bridge_url` / `outlook_bridge_url` (+ their `_token`) from
+`nextcloud_bridge_url` / `outlook_bridge_url` / `browser_bridge_url` (+ their
+`_token`) from
 `ctx.config`; each is **derived** at startup from its `bridges.<name>`
 host/port/token, so there is no duplicate top-level key to keep in sync. A bridge
 with no block (or no port) leaves the variable unresolved and the operator is
@@ -844,6 +847,43 @@ Seven `seeds/outlook/*` skills ship (`next_message`, `send_message`,
 `next_event`, `create_event`, `create_task`, `list_contacts`, `list_files`);
 `send_message` composes the message through the LLM bridge and asks for
 confirmation before it sends.
+
+The **browser bridge** (`semif_agent/bridges/browser.py`) is real browser
+automation via **Playwright**: open a URL, read a page's text or links, take a
+screenshot, and click/fill/press/select to complete a flow. It is the first
+bridge with a heavy optional dependency, so it is **disabled by default** and
+installed with `scripts/bootstrap.sh --browser` (Playwright + Chromium land under
+`.runtime/browser`; the bridge sets `PLAYWRIGHT_BROWSERS_PATH` there at launch).
+Unlike the others it owns a browser and keeps a **persistent profile**
+(`.runtime/browser/profile`) so a login you do once survives across calls and
+restarts — the browser analog of the SimpleX bridge owning its own daemon
+(`POST /reset` with `purge=true` wipes it). A dedicated event-loop thread runs
+Playwright's async API and serializes whole operations, because the sync API is
+bound to its creating thread and the bridge serves each request on a new one.
+`check_requirements()` never blocks startup, so a host without Playwright still
+runs every other bridge; a missing package/browser is a `503` install hint on the
+call, and a real navigation/timeout/selector failure is a `502`. Skills call it
+at the address derived from `bridges.browser` (`browser_bridge_url`, + optional
+`browser_bridge_token`). Its HTTP surface:
+
+```
+GET  /health
+GET  /state                                    # current url + title
+GET  /content?format=text|html&max_chars=<n>    # whole page's rendered text
+GET  /text?selector=<css>                       # text of matching elements
+GET  /links?query=<text>&limit=<n>              # anchors (label + href)
+GET  /screenshot?full_page=<bool>&selector=<css>&inline=<bool>
+POST /goto    {"url","wait_until"?,"timeout"?}
+POST /click   {"selector"?|"text"?,"index"?,"timeout"?}
+POST /fill    {"selector","value","submit"?,"timeout"?}
+POST /press   {"key","selector"?,"timeout"?}
+POST /select  {"selector","value"?|"label"?,"timeout"?}
+POST /wait    {"selector"?|"text"?,"timeout"?}
+POST /back | /forward {"timeout"?}
+POST /reset   {"purge"?}                        # close; purge deletes the profile
+```
+
+Three `seeds/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
 
 ### Dream report
 

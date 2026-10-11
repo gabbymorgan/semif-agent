@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 
 from .base import BridgeInfo, BridgeService
+from .browser import BrowserBridge
 from .llm import LLMBridge
 from .nextcloud import NextcloudBridge
 from .outlook import OutlookBridge
@@ -24,6 +25,7 @@ CATALOG: tuple[type[BridgeService], ...] = (
     LLMBridge,
     NextcloudBridge,
     OutlookBridge,
+    BrowserBridge,
 )
 
 

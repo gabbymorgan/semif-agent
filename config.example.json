@@ -194,6 +194,20 @@
       "default_timezone": "UTC",
       "verify_tls": true,
       "timeout": 30
+    },
+    "browser": {
+      "_comment": "Browser bridge: real browser automation via Playwright — open a URL, read a page's text/links, take a screenshot, and click/fill/press/select to complete a flow — behind one uniform local JSON API, so skill bodies never bundle a browser stack. Disabled by default because it needs the optional Playwright deps + browser binaries: install with `scripts/bootstrap.sh --browser` (browsers land under .runtime/browser). The bridge keeps a PERSISTENT profile under .runtime/browser/profile, so logins/cookies survive across calls and restarts (POST /reset with purge=true wipes it); `engine` is chromium|firefox|webkit and `headless` false shows the window. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. A missing Playwright/browser is a 503 install hint, never a startup failure (the other bridges keep running).",
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 5232,
+      "token": "",
+      "engine": "chromium",
+      "headless": true,
+      "profile_dir": "",
+      "browsers_path": "",
+      "screenshot_dir": "",
+      "default_timeout": 30,
+      "max_text_chars": 20000
     }
   },
   "gateway": {

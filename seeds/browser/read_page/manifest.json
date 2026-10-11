@@ -1,0 +1,3 @@
+{
+  "description": "Read the readable text of a web page (a URL in the request, or the page the browser is already on) through the browser bridge."
+}
