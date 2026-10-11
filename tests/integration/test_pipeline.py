@@ -42,7 +42,7 @@ from semif_agent.skills import (
     build_skills,
     build_tree,
     generate_category,
-    generate_skill,
+    generate_skill_spec,
     materialize_skill,
     navigate,
 )
@@ -380,19 +380,20 @@ def test_generate_category(tmp_path):
 
 
 def test_generate_skill(tmp_path):
-    """Authoring a skill leaf stub through the real `llm` provider."""
+    """Authoring a de-identified skill spec through the real `llm` provider."""
     config = load_config()
     require_real(config)
     scheduler, config = build_scheduler(config)
-    draft = generate_skill(
+    draft = generate_skill_spec(
         scheduler.llm,
         Request("tell me if my package was delivered"),
         "tracking",
         scheduler.tree,
     )
-    print(f"draft: {draft.name!r} — {draft.description!r}")
+    print(f"draft: {draft.name!r} — {draft.description!r} / goal: {draft.goal!r}")
     assert isinstance(draft, SkillDraft)
     assert draft.name and draft.description
+    assert draft.goal
 
 
 def test_generate_skill_body_codegen(tmp_path):
@@ -415,23 +416,18 @@ def test_generate_skill_body_codegen(tmp_path):
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(
         name="check_service",
-        description="Check whether an HTTP service is reachable.",
-    )
-    requirements = {
-        "How should it connect?": (
-            "HTTP GET the service_url from config (no auth) and report the "
-            "status code; treat a non-2xx or unreachable host as a failure."
+        description="Check whether a generic HTTP service is reachable.",
+        goal=(
+            "HTTP GET the service URL from config and report the status code; "
+            "treat a non-2xx or unreachable host as a failure"
         ),
-        "Should it use a test fixture address?": "No; the endpoint comes from config.",
-    }
-    request = Request("check whether my home server is reachable")
+        integration={"service": "http_service", "transport": "http"},
+    )
     code = generate_skill_body(
         client,
-        request,
         "tracking",
         draft,
         tree,
-        requirements=requirements,
     )
     print(f"generated {len(code)} bytes of skill body")
     integration = parse_integration(code)
@@ -447,7 +443,6 @@ def test_generate_skill_body_codegen(tmp_path):
     print(f"data contract: {contract}")
     test = generate_skill_tests(
         client,
-        request,
         "tracking",
         draft,
         code,

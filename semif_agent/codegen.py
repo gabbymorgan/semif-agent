@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from .bridges.registry import describe_bridges
-from .decisions import Request
 from .provider import OpenAICompatClient, ProviderError
 from .skills import SkillDraft, tree_summary
 
@@ -104,10 +103,9 @@ class CodegenClient(OpenAICompatClient):
 BODY_DIRECTIVES = (
     "This body is a reusable module executed across many requests. It owns no "
     "working data: every required operational value is provided by the runner "
-    "through `ctx.config` under a clear snake_case name — request data from the "
-    "runner, never embed or fabricate working values, and never ask the human "
-    "for operational data. Ask the human only to refine the product goal and "
-    "requirements.\n"
+    "through `ctx.config` under a clear snake_case name — never embed or "
+    "fabricate working values, and never assume a specific user, account, "
+    "address, or value.\n"
     "Write a single `act(ctx, request)` function. Declare the required "
     "operational values as a module-level `CONTRACT` dict exactly as CODEGEN.md "
     "specifies: a flat map of variable name -> semantic description. Every key "
@@ -115,16 +113,16 @@ BODY_DIRECTIVES = (
     "values with safe defaults — read those with `ctx.config.get(...)` instead.\n"
     "Read `request.text` and derive the action's per-request arguments from it "
     "(recipient, subject/body, date, target, search terms); never declare a "
-    "query argument in CONTRACT and never ask the human for one. Return the real "
-    "result in `new_state` and a truthful `action_log` — the fetched data or the "
-    "service's real response, never an empty or placeholder output.\n"
+    "query argument in CONTRACT. Return the real result in `new_state` and a "
+    "truthful `action_log` — the fetched data or the service's real response, "
+    "never an empty or placeholder output.\n"
     "Perform the real action: if this skill interacts with an external system, "
     "`act` must call the user's configured service with a stdlib transport "
     "(urllib.request/http.client for HTTP, imaplib/smtplib/poplib for mail, "
     "subprocess for a configured local CLI) using endpoint, account, "
     "credential, and CLI-path values read from `ctx.config`. Never simulate "
     "success, never return canned output, and never default to writing a draft "
-    "unless the requirements explicitly ask for draft-only. The auto-run test "
+    "unless the reusable goal explicitly asks for draft-only. The auto-run test "
     "is a hermetic mechanics check and will not exercise the live service, so "
     "no localhost defaults, test ports, or fixture values may appear in the "
     "body.\n"
@@ -137,52 +135,38 @@ BODY_DIRECTIVES = (
     "candidates to choose from (contacts, conversations, calendars, targets), "
     "employ a `ctx.engine` SemIf sub-decision over them and return the "
     "`(DecisionRequest, DecisionResult)` pairs on `ActionResult.decisions`; "
-    "send only when the request or requirements ask for it.\n"
+    "send only when the reusable goal calls for it.\n"
 )
 
 
-def _requirements_block(requirements: dict[str, str] | None) -> str:
-    if not requirements:
-        return ""
-    lines = "\n".join(
-        f"- {question} -> {answer}" for question, answer in requirements.items()
-    )
-    return f"Requirements gathered from the product owner:\n{lines}\n"
-
-
 def _integration_hint_block(draft: SkillDraft) -> str:
-    """Advisory integration hint from elicitation: service + transport.
-
-    Never overrides the request, requirements, or CODEGEN.md contract — it only
-    biases the body writer toward the integration the questions were aiming at.
-    """
+    """Advisory integration hint from the de-identified skill spec: service +
+    transport. Never overrides the reusable goal or the CODEGEN.md contract — it
+    only biases the body writer toward the integration the spec named."""
     integration = getattr(draft, "integration", None) or {}
     service = integration.get("service")
     transport = integration.get("transport")
     if not service and not transport:
         return ""
     return (
-        "Elicitation pointed at this integration (advisory only: follow the "
-        "request, requirements, and contract if they disagree): "
+        "The skill spec points at this integration (advisory only: follow the "
+        "reusable goal and the contract if they disagree): "
         f"service={service or 'unknown'}, transport={transport or 'unknown'}.\n"
     )
 
 
 def build_skill_body_prompt(
-    request: Request,
     category: str,
     draft: SkillDraft,
     tree: dict,
     contract: str,
-    requirements: dict[str, str] | None = None,
 ) -> list[dict]:
     """Messages for the code-generation model.
 
-    The small model already chose the title + description; the big model only
-    writes the runnable body against the CODEGEN.md contract, informed by the
-    request, the category, and the existing skills so it avoids duplication.
-    `requirements` carries the answers to elicitation questions asked of the
-    human during authoring.
+    Built ONLY from the de-identified spec (goal + generic service/transport),
+    the category, the existing tree, and the CODEGEN.md contract. It never
+    carries the user's request, question answers, or any run output: codegen
+    must be able to write a reusable body from the generalized goal alone.
     """
     existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
     system = (
@@ -190,15 +174,14 @@ def build_skill_body_prompt(
         "is authoritative: follow it exactly.\n\n"
         f"{contract}"
     )
-    req_block = _requirements_block(requirements)
     user = (
-        f"Request: {request.text}\n"
         f"Category: {category}\n"
         f"Skill name: {draft.name}\n"
+        f"Reusable goal (de-identified; never embed or ask for user-specific "
+        f"values): {draft.goal}\n"
         f"Skill description: {draft.description}\n"
         f"Existing skills in this category: {existing}\n"
         f"Existing categories:\n{tree_summary(tree)}\n"
-        f"{req_block}"
         f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
@@ -556,18 +539,16 @@ def integration_findings(integration: dict, source: str, code: str) -> list[str]
 
 
 def _retry_prompt(
-    request: Request,
     category: str,
     draft: SkillDraft,
     contract: str,
     error: Exception,
-    requirements: dict[str, str] | None = None,
 ) -> list[dict]:
     """Fresh short prompt for a corrective retry.
 
     Not a growing conversation: the context resets to SMART (new request, tiny
     prompt) and the model is told in one line to stop looping and emit the
-    final Python. The elicitation answers are repeated so a retry cannot fall
+    final Python. The de-identified goal is repeated so a retry cannot fall
     back to a toy body.
     """
     system = (
@@ -578,11 +559,10 @@ def _retry_prompt(
     user = (
         f"The previous attempt to write the skill body for {category}.{draft.name} "
         f"was rejected: {error}. You are looping; emit the final Python now.\n"
-        f"Request: {request.text}\n"
         f"Category: {category}\n"
         f"Skill name: {draft.name}\n"
+        f"Reusable goal (de-identified): {draft.goal}\n"
         f"Skill description: {draft.description}\n"
-        f"{_requirements_block(requirements)}"
         f"{_integration_hint_block(draft)}"
         f"{describe_bridges()}\n"
         f"{BODY_DIRECTIVES}"
@@ -597,24 +577,23 @@ def _retry_prompt(
 
 def generate_skill_body(
     client: CodegenClient,
-    request: Request,
     category: str,
     draft: SkillDraft,
     tree: dict,
     contract: str | None = None,
     max_tokens: int | None = None,
     degeneration_check: Callable[[str], str | None] | None = None,
-    requirements: dict[str, str] | None = None,
 ) -> str:
     """Author a skill body with the big model; retry up to `max_attempts`.
 
+    Built only from the de-identified spec (goal + generic integration), the
+    category, the tree, and the CODEGEN.md contract — never the user's request.
     Every attempt uses the client's configured sampler parameters (or omits
     them when unset). A rejected parse (ValueError) retries with a fresh short
     prompt that resets the context to SMART and tells the model to emit the
     final Python now. Only an invalid parse retries; a DegenerationError or
     other CodegenError propagates immediately so the scheduler can stub out
-    gracefully. `requirements` (elicitation answers) are fed to the
-    first-attempt prompt only.
+    gracefully.
     """
     contract_text = contract if contract is not None else read_skill_contract()
     if client.stream:
@@ -624,16 +603,14 @@ def generate_skill_body(
     for attempt in range(1, attempts + 1):
         if attempt == 1:
             messages = build_skill_body_prompt(
-                request,
                 category,
                 draft,
                 tree,
                 contract_text,
-                requirements=requirements,
             )
         else:
             messages = _retry_prompt(
-                request, category, draft, contract_text, last_error, requirements
+                category, draft, contract_text, last_error
             )
         try:
             raw = client.chat(
@@ -645,197 +622,6 @@ def generate_skill_body(
         except ValueError as exc:
             last_error = exc
     raise ValueError(f"skill body rejected {attempts} times: {last_error}")
-
-
-# ---- requirements elicitation ----
-
-ELICITATION_EXAMPLES = [
-    "Should this skill really send/query/execute against the live service, or produce a reviewable draft first?",
-    "Which service or account should it use, and how should it connect (HTTP API base URL, IMAP/SMTP host, CalDAV URL, local CLI command)?",
-    "How does it authenticate with the service, and should that credential come from the app's config?",
-    "What does a successful run look like — what should it report back to you?",
-    "If the service is unreachable or refuses the action, should the run fail loudly or record 'could not complete' as the result?",
-    "Should this skill read or send through one of the available bridge services (see the catalog below), and if so which conversation or target?",
-]
-
-
-def build_elicitation_prompt(
-    request: Request,
-    category: str,
-    draft: SkillDraft,
-    tree: dict,
-    max_questions: int = 4,
-) -> list[dict]:
-    """Messages asking the big model to propose implementation questions.
-
-    The agent does real tasks against the user's actual services, so success
-    depends on pinning down how the new skill will connect. The questions
-    refine the product goal and the integration — never operational data values
-    (the runner collects those after the body is written) and never
-    config-vs-input cadence questions (the config step decides that at first
-    fire). The examples are deliberately concrete so a weaker model can mirror
-    them.
-    """
-    examples = "\n".join(f"- \"{q}\"" for q in ELICITATION_EXAMPLES)
-    existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
-    system = (
-        "You are eliciting requirements for a new skill in a local agent. The "
-        "agent performs real tasks for an everyday person against their actual "
-        "services, so success depends on understanding HOW the skill will "
-        "connect. You ask the human (the product owner) up to "
-        f"{max_questions} questions that refine the product goal and the "
-        "integration. Ask about product behavior and integration, not code.\n\n"
-        "Good example questions:\n"
-        f"{examples}\n\n"
-        "Never ask:\n"
-        "- for operational data values (passwords, API keys, addresses, "
-        "tracking numbers, hostnames) — the runner collects those after the "
-        "body is written;\n"
-        "- config-vs-input cadence questions like \"should the sender address "
-        "change?\" — the config step owns that decision at first fire;\n"
-        "- trivia you can decide yourself (variable names, formatting, "
-        "internal wording).\n\n"
-        "If the request and description already make the integration clear, "
-        "return an empty list rather than inventing questions.\n\n"
-        "Also give your best guess of the integration the questions are aiming "
-        "at, so the body writer implements exactly that. Reply with JSON only: "
-        '{"questions": ["...", "..."], "integration": {"service": '
-        '"<lowercase_snake_case or unknown>", "transport": '
-        '"<http|caldav|imap|smtp|pop|subprocess|file|compute>"}}'
-    )
-    user = (
-        f"Request: {request.text}\n"
-        f"Category: {category}\n"
-        f"Skill name: {draft.name}\n"
-        f"Skill description: {draft.description}\n"
-        f"Existing skills in this category: {existing}\n"
-        f"Existing categories:\n{tree_summary(tree)}\n"
-        f"{describe_bridges()}\n"
-    )
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-
-
-class ElicitationResult(NamedTuple):
-    """Questions for the human plus the integration they are aiming at."""
-
-    questions: list[str]
-    integration: dict
-
-
-def _parse_elicitation_object(raw: str) -> dict:
-    text = raw.strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"elicitation reply is not a JSON object: {raw!r}")
-    try:
-        return json.loads(text[start : end + 1])
-    except ValueError as exc:
-        raise ValueError(f"elicitation reply is not valid JSON: {exc}") from exc
-
-
-def parse_elicitation(raw: str) -> list[str]:
-    """Extract a JSON {"questions": [...]} list of non-empty strings."""
-    parsed = _parse_elicitation_object(raw)
-    questions = parsed.get("questions")
-    if not isinstance(questions, list):
-        raise ValueError("elicitation reply must have a `questions` list")
-    cleaned = []
-    for question in questions:
-        if isinstance(question, str) and question.strip():
-            cleaned.append(question.strip())
-    return cleaned
-
-
-def parse_elicitation_result(raw: str) -> ElicitationResult:
-    """Questions plus the model's integration hint (service + transport).
-
-    A bad or absent hint is dropped, never fatal: the questions are the point
-    and the body writer can still declare the integration itself.
-    """
-    parsed = _parse_elicitation_object(raw)
-    integration: dict = {}
-    hint = parsed.get("integration")
-    if isinstance(hint, dict):
-        service = hint.get("service")
-        transport = hint.get("transport")
-        if (
-            isinstance(service, str)
-            and _SERVICE_RE.fullmatch(service)
-            and transport in INTEGRATION_TRANSPORTS
-        ):
-            integration = {"service": service, "transport": transport}
-    return ElicitationResult(parse_elicitation(raw), integration)
-
-
-def _retry_elicitation_prompt(
-    request: Request,
-    category: str,
-    draft: SkillDraft,
-    tree: dict,
-    error: Exception,
-    max_questions: int = 4,
-) -> list[dict]:
-    messages = build_elicitation_prompt(
-        request, category, draft, tree, max_questions=max_questions
-    )
-    messages[1]["content"] += (
-        f"\nYour previous reply was rejected: {error}. Reply with JSON only: "
-        '{"questions": ["...", "..."], "integration": {"service": "...", '
-        '"transport": "..."}}'
-    )
-    return messages
-
-
-def generate_elicitation(
-    client: CodegenClient,
-    request: Request,
-    category: str,
-    draft: SkillDraft,
-    tree: dict,
-    max_questions: int = 4,
-) -> ElicitationResult:
-    """Propose implementation questions + an integration hint with the big model.
-
-    Returns an empty result when the model produced none or the reply failed to
-    parse after the retry ladder — elicitation must never block authoring.
-    """
-    attempts = max(client.max_attempts, 1)
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        if attempt == 1:
-            messages = build_elicitation_prompt(
-                request, category, draft, tree, max_questions=max_questions
-            )
-        else:
-            messages = _retry_elicitation_prompt(
-                request, category, draft, tree, last_error, max_questions=max_questions
-            )
-        try:
-            raw = client.chat(messages)
-            result = parse_elicitation_result(raw)
-            return ElicitationResult(
-                result.questions[: max(0, max_questions)], result.integration
-            )
-        except ValueError as exc:
-            last_error = exc
-    return ElicitationResult([], {})
-
-
-def generate_requirements(
-    client: CodegenClient,
-    request: Request,
-    category: str,
-    draft: SkillDraft,
-    tree: dict,
-    max_questions: int = 4,
-) -> list[str]:
-    """Question-only view of generate_elicitation (kept for callers/tests)."""
-    return generate_elicitation(
-        client, request, category, draft, tree, max_questions=max_questions
-    ).questions
 
 
 # ---- data contract + test ----
@@ -852,14 +638,15 @@ def read_testgen_contract(path: str | None = None) -> str:
 
 
 def build_testgen_base_prompt(
-    request: Request, category: str, name: str, skill_code: str, contract_md: str
+    category: str, draft: SkillDraft, skill_code: str, contract_md: str
 ) -> list[dict]:
     """The shared context for the contract + test generation calls.
 
-    Seeded with the TESTGEN.md contract and the finished skill body; the
-    contract call appends its ask, and the testgen call appends the contract
-    output (as the assistant turn) plus its own ask — the two calls share this
-    context but produce distinct artifacts.
+    Seeded with the TESTGEN.md contract, the de-identified spec, and the
+    finished skill body; the contract call appends its ask, and the testgen call
+    appends the contract output (as the assistant turn) plus its own ask — the
+    two calls share this context but produce distinct artifacts. Never carries
+    the user's request.
     """
     system = (
         "You produce the data contract and test for a skill body of a "
@@ -867,8 +654,8 @@ def build_testgen_base_prompt(
         f"{contract_md}"
     )
     user = (
-        f"Skill: {category}.{name}\n"
-        f"Request: {request.text}\n"
+        f"Skill: {category}.{draft.name}\n"
+        f"Reusable goal (de-identified): {draft.goal}\n"
         f"Finished skill body:\n```python\n{skill_code}\n```\n"
         f"{describe_bridges()}"
     )
@@ -1006,7 +793,6 @@ def parse_skill_test(raw: str) -> str:
 
 def generate_skill_tests(
     client: CodegenClient,
-    request: Request,
     category: str,
     draft: SkillDraft,
     skill_code: str,
@@ -1019,7 +805,8 @@ def generate_skill_tests(
 
     Shares the base context with the contract call (TESTGEN.md + skill.py) and
     continues it with the accepted contract, so the test stays compatible with
-    the body and the contract. Fixture data is embedded inline in the test.
+    the body and the contract. Built only from the de-identified spec — never
+    the user's request. Fixture data is embedded inline in the test.
     Escalates on parse failure; `reason` + `target` drive a corrective
     regeneration.
     """
@@ -1033,7 +820,7 @@ def generate_skill_tests(
             note = str(last_error)
         messages = build_testgen_request_prompt(
             build_testgen_base_prompt(
-                request, category, draft.name, skill_code, contract_text
+                category, draft, skill_code, contract_text
             ),
             contract,
             note=note,
@@ -1072,7 +859,6 @@ def render_evidence(evidence: dict) -> str:
 
 
 def _regen_body_prompt(
-    request: Request,
     category: str,
     draft: SkillDraft,
     contract: str,
@@ -1081,7 +867,9 @@ def _regen_body_prompt(
     reason_kind: str = "test",
 ) -> list[dict]:
     """Fresh corrective prompt carrying the raw evidence bundle, not a prose
-    diagnosis. `reason_kind` labels the corrective context in one word."""
+    diagnosis. `reason_kind` labels the corrective context in one word. Built
+    only from the de-identified spec and the evidence — never the user's
+    request."""
     system = (
         "You write runnable skill bodies for a local agent. The contract below "
         "is authoritative: follow it exactly.\n\n"
@@ -1089,7 +877,7 @@ def _regen_body_prompt(
     )
     user = (
         f"Correct a skill body for {category}.{draft.name} ({reason_kind}).\n"
-        f"Request: {request.text}\n"
+        f"Reusable goal (de-identified): {draft.goal}\n"
         f"Skill description: {draft.description}\n"
         f"Evidence:\n{render_evidence(evidence)}\n"
         f"Previous body:\n```python\n{previous_code}\n```\n"
@@ -1107,7 +895,6 @@ def _regen_body_prompt(
 
 def regenerate_skill_body(
     client: CodegenClient,
-    request: Request,
     category: str,
     draft: SkillDraft,
     previous_code: str,
@@ -1120,8 +907,9 @@ def regenerate_skill_body(
     Fresh prompt (context resets) carrying the raw evidence bundle and the
     previous body; retry ladder identical to generate_skill_body.
     `reason_kind` labels the corrective context (`test`, `fidelity`, or
-    `run_failure`). The bundle is handed through as-is — the caller includes
-    requirements and the raw failure fields, never a paraphrase. A
+    `run_failure`). The evidence bundle must be de-identified by the caller: it
+    carries only the generalized failure kind, integration, goal, and previous
+    body — never the user's request or any run output. A
     DegenerationError or other CodegenError propagates immediately.
     """
     contract_text = contract if contract is not None else read_skill_contract()
@@ -1132,7 +920,7 @@ def regenerate_skill_body(
         if attempt > 1:
             attempt_evidence["previous_parse_error"] = str(last_error)
         messages = _regen_body_prompt(
-            request, category, draft, contract_text, previous_code,
+            category, draft, contract_text, previous_code,
             attempt_evidence, reason_kind=reason_kind,
         )
         try:

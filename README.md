@@ -178,23 +178,21 @@ When navigation chooses a create branch, the scheduler queues the draft to a
 single-slot `llm` worker and the body write to a separate single-slot codegen
 worker. It is **asynchronous**, so the gate stays free while either model thinks:
 
-1. **Stub.** The small `llm` provider (`generate_skill`) authors a title +
-   description on its own worker. The stub is registered and hot-merged into the
-   running tree as
-   soon as it lands; a `skill_writing` trace event is emitted.
-2. **Elicitation** (`generate_elicitation`, default on): implementation
-   questions — which service/account, how to connect, where the credential
-   comes from, what success looks like. Every front end (REPL, dashboard,
-   gateway) defers to a question queue and the worker waits
-   (`codegen.elicitation.wait_timeout`).
-3. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
+1. **Spec.** The small `llm` provider (`generate_skill_spec`) authors a title +
+   description **and a de-identified, reusable goal** (plus the generic
+   service/transport) on its own worker. The stub is registered and hot-merged
+   into the running tree as soon as it lands; a `skill_writing` trace event is
+   emitted. The goal is the *only* task data codegen is ever shown.
+2. **Codegen body** (`generate_skill_body`): a larger OpenAI-compatible model
    (`codegen`, your configured code-capable model) writes a single `act` against `CODEGEN.md`,
    reading every operational value from `ctx.config` and declaring `INTEGRATION`
    (service / transport / config_vars) plus its own flat `CONTRACT`
-   (variable → description; every key must be read from `ctx.config`).
+   (variable → description; every key must be read from `ctx.config`). **Privacy:**
+   codegen is the primarily-cloud model, so it receives only the de-identified
+   spec — never the user's request, question answers, or run output.
 4. **Fidelity gate** (`authoring:fidelity` SemIf accept/reconsider decision +
    static `integration_findings`): is the action real, or simulated? One
-   corrective regen with the raw evidence bundle, then accept-with-badge
+   corrective regen with the de-identified evidence bundle, then accept-with-badge
    (`unverified`) rather than hard-fail.
 5. **Contract** (`parse_contract`): read from the body's own `CONTRACT`
    constant — a flat map of snake_case variable name → semantic description, for
@@ -228,11 +226,13 @@ forward pass. There is no hidden system prompt and no growing conversation:
 what you see in the table below is the entire input. Probabilities are
 conditional on exactly the supplied options.
 
-A **generative call** (`llm` for titles/descriptions, `codegen` for bodies and
-tests) is a built OpenAI-style `messages` list. Its context is assembled from
-the request, the tree, the elicitation answers, the runtime **bridge catalog**
-(`describe_bridges()`), and — for bodies and tests — the contract files
-(`CODEGEN.md`, `TESTGEN.md`).
+A **generative call** (`llm` for titles/descriptions/goals, `codegen` for bodies
+and tests) is a built OpenAI-style `messages` list. The trusted local `llm`
+context is assembled from the request and the tree; the **codegen** context is
+assembled only from the de-identified spec (goal + generic service/transport),
+the tree, the runtime **bridge catalog** (`describe_bridges()`), and — for bodies
+and tests — the contract files (`CODEGEN.md`, `TESTGEN.md`). Codegen never
+receives the user's request, question answers, or run output.
 
 #### SemIf decisions
 
@@ -257,13 +257,11 @@ the request, the tree, the elicitation answers, the runtime **bridge catalog**
 | Call | Client | System context | User context | File |
 | --- | --- | --- | --- | --- |
 | `generate_category` | `llm` | authoring instruction: propose one broad category, JSON-only | request text + full tree summary | `skills.py:896` |
-| `generate_skill` | `llm` | authoring instruction: propose one specific skill, JSON-only | request + category + existing skill names | `skills.py:947` |
-| `generate_skill_body` | `codegen` | full **CODEGEN.md** | request, category, name, description, existing skills + tree summary, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:156` |
-| body retry | `codegen` | full **CODEGEN.md** | rejection reason, request, category, name, description, elicitation answers, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:474` |
-| `generate_elicitation` | `codegen` | elicitation instructions + example questions + anti-patterns + `max_questions` | request, category, name, description, existing skills + tree summary, **bridge catalog** | `codegen.py:580` |
-| `generate_data_contract` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog** + the contract ask | `codegen.py:833` |
-| `generate_skill_tests` | `codegen` | full **TESTGEN.md** | skill, request, full body code, **bridge catalog**; continued with the accepted **contract JSON** as an assistant turn + the test-gen ask | `codegen.py:942` |
-| `regenerate_skill_body` | `codegen` | full **CODEGEN.md** | correction header, request, description, **raw evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
+| `generate_skill_spec` | `llm` | authoring instruction: propose one specific skill + a **de-identified goal** and generic service/transport, JSON-only | request + category + existing skill names | `skills.py:947` |
+| `generate_skill_body` | `codegen` | full **CODEGEN.md** | **de-identified spec** (goal + description), category, name, existing skills + tree summary, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:156` |
+| body retry | `codegen` | full **CODEGEN.md** | rejection reason, de-identified spec (goal + description), integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:474` |
+| `generate_skill_tests` | `codegen` | full **TESTGEN.md** | skill, de-identified goal, full body code, **bridge catalog**; continued with the accepted **contract JSON** as an assistant turn + the test-gen ask | `codegen.py:942` |
+| `regenerate_skill_body` | `codegen` | full **CODEGEN.md** | correction header, de-identified goal + description, **de-identified evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
 
 The **bridge catalog** is `describe_bridges()` (`bridges/registry.py:33`): each
 known bridge's name, service, description, base-URL config var, auth header +
@@ -271,9 +269,9 @@ token var, documented config vars, and endpoints. It is the single runtime
 source of bridge specifics — `CODEGEN.md` and `TESTGEN.md` carry only the generic
 pattern — so a bridge can be added without touching either contract file.
 
-The **raw evidence bundle** handed to a corrective regen carries the request,
-description, requirements, the observed failure fields (error, action log, new
-state, summary) and the previous body, rendered as-is with no prose diagnosis.
+The **evidence bundle** handed to a corrective regen is de-identified: a generic
+failure kind, the integration, the goal, and the previous body, rendered as-is
+with no prose diagnosis. It carries no request text and no run output.
 
 ### Data contracts and tiered config
 
@@ -338,7 +336,7 @@ fine-tuning loop — it is not yet the fine-tune itself.
   to the closed `response` canned tree.
 - **Real integrations by construction** — bodies must perform the real action,
   read data from `ctx.config`, declare `INTEGRATION`, and report real failures.
-- **Async skill authoring** — elicitation → body → fidelity → contract → test →
+- **Async skill authoring** — spec → body → fidelity → contract → test →
   auto-run, with a SemIf regeneration ladder on test failure. Gate stays free.
 - **Tiered config + first-fire collection** — global/category/skill config with
   a `record-vs-ask` decision per answer.
@@ -376,7 +374,7 @@ semif_agent/
                     summary; pre-act contract collection; resolved-input state
   skills.py         tree + registry, canned `response` tree, navigation,
                     create gates, intent guard, tiered config resolution
-  codegen.py        OpenAI-compatible client; body/elicitation/test generation;
+  codegen.py        OpenAI-compatible client; body/test generation;
                     parse/validate; CONTRACT + INTEGRATION extraction; test runner
   provider.py       shared OpenAI-compatible transport (SSE/budget/idle/watchdog);
                     SemIfEngineClient generates text from the in-process engine
@@ -516,7 +514,7 @@ Key blocks:
 | --- | --- |
 | `engine` | per-machine engine settings: backend, context, threads, optional GGUF path override (refs come from `pins.json`) |
 | `llm` | small model endpoint that authors new category/skill title + description |
-| `codegen` | skill-body model endpoint, timeouts, sampler, elicitation, fidelity, repair, test, degeneration watchdog, token budget |
+| `codegen` | skill-body model endpoint, timeouts, sampler, approval gate, fidelity, repair, test, degeneration watchdog, token budget |
 | `navigation` | two-stage guards: leaf `intent_tau`, category `category_tau` |
 | `tau` | decision threshold; `max_reentries` requeue bound |
 | `queue` | `max_size` |
@@ -938,7 +936,7 @@ works.
 
 **Done.** Core loop, FIFO queue, skill tree, real SemIf assessment, decision
 logging, `dream` cost pass, REPL + JSONL CLI; live `create_category` /
-`create_skill` with the async authoring pipeline (elicitation → body → fidelity →
+`create_skill` with the async authoring pipeline (spec → body → fidelity →
 contract → test → auto-run → re-dispatch); tiered config + first-fire
 collection; runtime repair loop; the closed `response` canned tree; real
 integrations with `INTEGRATION` declarations; the SimpleX command gateway and the

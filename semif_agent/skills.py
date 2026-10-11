@@ -121,17 +121,19 @@ class CategoryDraft:
 class SkillDraft:
     """An authored skill leaf stub: one specific action within a category.
 
-    `requirements` maps elicitation questions (asked of the human during
-    authoring) to their answers; they are fed to the body-writer so the body
-    reflects the refined product goal. `integration` carries the service and
-    transport the answers point at; it is fed to the body writer as an advisory
-    hint only — the CODEGEN.md contract, request, and requirements still win.
+    `goal` is the **de-identified** statement of the reusable action, authored
+    by the trusted local `llm` from the request and stripped of every
+    user-specific value (names, addresses, dates, accounts, credentials, quoted
+    content). It is the only task data the codegen endpoint is ever shown —
+    codegen never receives the request text or any user detail. `integration`
+    carries the generic service and transport (e.g. `nextcloud`/`caldav`), never
+    an account.
     """
 
     name: str
     description: str
+    goal: str = ""
     code: str = ""
-    requirements: dict[str, str] = field(default_factory=dict)
     integration: dict = field(default_factory=dict)
 
 
@@ -162,14 +164,13 @@ class CategoryRegistry:
         category: str,
         name: str,
         description: str,
-        request_text: str = "",
-        requirements: dict[str, str] | None = None,
+        goal: str = "",
     ) -> None:
         """Add a skill leaf to a category, creating the category entry if needed.
 
-        `request_text` is the originating request, kept so a later restart of the
-        stub can re-drive codegen with the same context. `requirements` are the
-        elicitation answers, kept so a restart does not have to ask again.
+        `goal` is the de-identified, reusable action statement authored by the
+        local `llm`. Neither the originating request nor any user detail is
+        persisted here (see the codegen privacy invariant).
         """
         categories = self.read()
         entry = categories.setdefault(category, {"description": "", "skills": []})
@@ -178,9 +179,7 @@ class CategoryRegistry:
         if entry_row is None:
             entry_row = {"name": name, "description": description}
             skills.append(entry_row)
-        entry_row["request_text"] = request_text
-        if requirements:
-            entry_row["requirements"] = requirements
+        entry_row["goal"] = goal
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(categories, indent=2) + "\n")
 
@@ -1717,19 +1716,31 @@ def generate_category(
 def build_skill_prompt(
     request: Request, category: str, tree: dict[str, list[Skill]]
 ) -> list[dict]:
-    """Chat messages for the decision model used as the skill author.
+    """Chat messages for the spec-authoring step (trusted local `llm`).
 
     The skill must be one specific, single-purpose action that fits inside the
-    given category — not a broad bucket. Existing skills in the category are
-    included so the model avoids duplicating them.
+    given category. Alongside the title + description the model must author a
+    **de-identified** reusable goal: the codegen endpoint never sees the original
+    request, so every user-specific value (names, addresses, dates, accounts,
+    credentials, quoted content) must be stripped and left for the script to
+    derive from the request at runtime.
     """
     system = (
         "You are the skill-tree authoring step of a local agent. A request inside "
         f"the '{category}' category did not fit any existing skill. Propose ONE "
         "new skill for this category: a specific, single-purpose action the agent "
-        "can take. Reply with JSON only: "
+        "can take. Also write a DE-IDENTIFIED reusable goal for that action: the "
+        "code writer will never see the original request, so you MUST remove every "
+        "user-specific value — names, addresses, emails, phone numbers, dates, "
+        "times, numbers, account names, hostnames, credentials, and quoted content "
+        "— and describe only the generic action plus which values it must derive "
+        "from the request at runtime. Reply with JSON only: "
         '{"title": "<short lowercase snake_case id, no spaces, generic and reusable>", '
-        '"description": "<one to two sentence description of how it benefits user>"}'
+        '"description": "<one to two sentence description of how it benefits the '
+        'user, no user-specific values>", '
+        '"goal": "<de-identified reusable action, no user-specific values>", '
+        '"service": "<generic service family in lowercase snake_case, or unknown>", '
+        '"transport": "<http|caldav|imap|smtp|pop|subprocess|file|compute>"}'
     )
     existing = ", ".join(s.name for s in tree.get(category, [])) or "(none)"
     user = (
@@ -1745,7 +1756,8 @@ def build_skill_prompt(
 
 
 def parse_skill_draft(raw: str) -> SkillDraft:
-    """Parse the model's JSON reply into a SkillDraft."""
+    """Parse the model's JSON reply into a SkillDraft (title, description, goal,
+    integration)."""
     parsed = LLMClient._parse_json(raw)
     title = str(parsed.get("title", "")).strip()
     description = str(parsed.get("description", "")).strip()
@@ -1754,12 +1766,24 @@ def parse_skill_draft(raw: str) -> SkillDraft:
     name = re.sub(r"\s+", "_", title.lower())
     if not re.fullmatch(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*", name):
         raise ValueError(f"skill title must be snake_case alnum (dots allowed): {title!r}")
-    return SkillDraft(name=name, description=description)
+    goal = str(parsed.get("goal", "")).strip() or description
+    integration: dict = {}
+    service = str(parsed.get("service", "")).strip().lower()
+    transport = str(parsed.get("transport", "")).strip().lower()
+    # Validate the advisory hint against the generic transport set; a bad or
+    # absent hint is dropped, never fatal.
+    from .codegen import INTEGRATION_TRANSPORTS
+
+    if re.fullmatch(r"[a-z0-9_]+", service) and transport in INTEGRATION_TRANSPORTS:
+        integration = {"service": service, "transport": transport}
+    return SkillDraft(
+        name=name, description=description, goal=goal, integration=integration
+    )
 
 
-def generate_skill(
+def generate_skill_spec(
     client: LLMClient, request: Request, category: str, tree: dict[str, list[Skill]]
 ) -> SkillDraft:
-    """Author a new skill leaf stub with the `llm` provider."""
-    raw = client.chat(build_skill_prompt(request, category, tree), max_tokens=128)
+    """Author a de-identified skill spec (stub) with the local `llm` provider."""
+    raw = client.chat(build_skill_prompt(request, category, tree), max_tokens=256)
     return parse_skill_draft(raw)

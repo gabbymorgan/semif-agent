@@ -51,7 +51,7 @@ from semif_agent.skills import (
     CATEGORY_DESCRIPTIONS,
     compose_state,
     generate_category,
-    generate_skill,
+    generate_skill_spec,
     last_result,
     merge_registry,
     merge_seed_store,
@@ -297,7 +297,7 @@ def test_build_tree_includes_registry_stubs(tmp_path):
     assert tree["delivery"] == []
 
 
-def test_build_skill_prompt_contains_request_category_and_skills():
+def test_build_skill_prompt_asks_for_a_deidentified_goal():
     tree = build_tree(build_skills({"skills": {}}))
     tree["tracking"] = [
         Skill(
@@ -309,6 +309,9 @@ def test_build_skill_prompt_contains_request_category_and_skills():
     messages = build_skill_prompt(Request("tracking for my drone delivery"), "tracking", tree)
     assert messages[0]["role"] == "system"
     assert "tracking" in messages[0]["content"]
+    system = messages[0]["content"]
+    assert "DE-IDENTIFIED" in system
+    assert '"goal"' in system
     joined = messages[1]["content"]
     assert "tracking for my drone delivery" in joined
     assert "tracking.check" in joined
@@ -320,6 +323,26 @@ def test_parse_skill_draft_plain_json():
     )
     assert draft.name == "track_live"
     assert "real time" in draft.description
+    # No goal supplied: it degrades to the description (both are de-identified).
+    assert draft.goal == draft.description
+
+
+def test_parse_skill_draft_reads_goal_and_integration():
+    draft = parse_skill_draft(
+        '{"title": "track_live", "description": "Follow a package.", '
+        '"goal": "poll a tracking endpoint and report status", '
+        '"service": "tracking", "transport": "http"}'
+    )
+    assert draft.goal == "poll a tracking endpoint and report status"
+    assert draft.integration == {"service": "tracking", "transport": "http"}
+
+
+def test_parse_skill_draft_drops_bad_integration_hint():
+    draft = parse_skill_draft(
+        '{"title": "track_live", "description": "Follow a package.", '
+        '"service": "Nope!", "transport": "smtp"}'
+    )
+    assert draft.integration == {}
 
 
 def test_parse_skill_draft_json_in_prose():
@@ -359,7 +382,7 @@ def test_parse_skill_draft_rejects_unclean_title():
 def test_generate_skill_without_endpoint_raises():
     client = LLMClient(base_url="http://127.0.0.1:1/v1", model="test", timeout=2)
     with pytest.raises(LLMError):
-        generate_skill(client, Request("anything"), "tracking", {})
+        generate_skill_spec(client, Request("anything"), "tracking", {})
 
 
 def test_category_registry_register_skill(tmp_path):
@@ -373,27 +396,29 @@ def test_category_registry_register_skill(tmp_path):
         {
             "name": "track_live",
             "description": "Follow a package in real time.",
-            "request_text": "",
+            "goal": "",
         }
     ]
     assert loaded["brand_new"] == {
         "description": "",
-        "skills": [{"name": "ping", "description": "Probe the service.", "request_text": ""}],
+        "skills": [{"name": "ping", "description": "Probe the service.", "goal": ""}],
     }
 
 
-def test_category_registry_register_skill_keeps_request_text(tmp_path):
+def test_category_registry_register_skill_stores_goal_not_request(tmp_path):
     registry = CategoryRegistry(str(tmp_path / "categories.json"))
     registry.register_skill(
         "delivery",
         "track_live",
         "Follow a package in real time.",
-        request_text="track my drone delivery in real time",
+        goal="poll a parcel tracking endpoint and report status",
     )
     loaded = registry.read()
-    assert loaded["delivery"]["skills"][0]["request_text"] == (
-        "track my drone delivery in real time"
-    )
+    row = loaded["delivery"]["skills"][0]
+    assert row["goal"] == "poll a parcel tracking endpoint and report status"
+    # The originating request and any user detail are never persisted.
+    assert "request_text" not in row
+    assert "requirements" not in row
 
 
 def test_merge_registry_loads_categories_and_skills(tmp_path):
@@ -1433,7 +1458,7 @@ def test_creation_approval_timeout_denies(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
-    scheduler.elicitation_wait = 0.1
+    scheduler.approval_wait = 0.1
     job = DraftAuthor(
         request=Request("book a trip"), category="travel", kind="skill"
     )
@@ -1500,7 +1525,7 @@ def test_author_skill_denied_does_not_register(tmp_path, monkeypatch):
     scheduler.new_skill_mode = "ask"
     scheduler.defer_questions = True
     monkeypatch.setattr(
-        "semif_agent.scheduler.generate_skill",
+        "semif_agent.scheduler.generate_skill_spec",
         lambda client, request, category, tree: SkillDraft(
             name="book_flight", description="Book a flight."
         ),
@@ -1852,40 +1877,6 @@ def test_unresolved_variables_respects_tiered_config(tmp_path):
     assert unresolved_variables(store, skill2, {}) == ["sender_address", "tag"]
     assert unresolved_variables(store, skill2, {}, answered={"tag": "per-fire"}) == ["sender_address"]
 
-def test_deferred_elicitation_asks_and_records(tmp_path):
-    """Opt-in elicitation runs on the codegen worker (deferred): questions are
-    posted to the question queue, the worker waits, and the answers ride the
-    draft into the body prompt."""
-    httpd, base = _pipeline_codegen_server(
-        ['{"questions": ["Draft or send?"]}']
-    )
-    try:
-        scheduler = _scheduler(tmp_path, codegen=CodegenClient(base_url=base, model="test", timeout=10))
-        scheduler.defer_questions = True
-        scheduler.elicitation_enabled = True
-        request = Request("track my package")
-        draft = SkillDraft(name="track_live", description="Follow a package.")
-        job = SkillWrite(request=request, category="tracking", draft=draft)
-
-        def answerer() -> None:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                pending = scheduler.pending_questions()
-                if pending:
-                    scheduler.answer_question(pending[0]["id"], "draft first")
-                    return
-                time.sleep(0.02)
-
-        thread = threading.Thread(target=answerer)
-        thread.start()
-        scheduler._deferred_elicit(job, scheduler.tree)
-        thread.join()
-        assert draft.requirements == {"Draft or send?": "draft first"}
-        assert any(e["kind"] == "requirements" for e in scheduler.trace.read())
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
 
 def test_async_skill_write_regen_ladder_on_failing_test(tmp_path):
     """A failing auto-run test triggers the regen decision (regen_test by
@@ -1967,97 +1958,20 @@ def test_answer_question_unknown_id_errors(tmp_path):
     assert "no pending question" in detail
 
 
-def test_post_questions_asks_one_at_a_time(tmp_path):
-    scheduler = _scheduler(tmp_path)
-    scheduler.elicitation_answer_timeout = 5.0
-    job = SkillWrite(
-        request=Request("track it"),
-        category="tracking",
-        draft=SkillDraft(name="probe", description="Probe."),
-    )
-    result: dict = {}
-    thread = threading.Thread(
-        target=lambda: result.update(scheduler._post_questions(job, ["Q1?", "Q2?"]))
-    )
-    thread.start()
+# ---- goal persistence ----
 
-    def next_pending(deadline: float) -> list:
-        while time.monotonic() < deadline:
-            pending = scheduler.pending_questions()
-            if pending:
-                return pending
-            time.sleep(0.02)
-        return []
-
-    deadline = time.monotonic() + 5
-    first = next_pending(deadline)
-    assert [q["question"] for q in first] == ["Q1?"]
-    scheduler.answer_question(first[0]["id"], "A1")
-    second = next_pending(deadline)
-    assert [q["question"] for q in second] == ["Q2?"]
-    scheduler.answer_question(second[0]["id"], "")
-    thread.join(timeout=5)
-    assert result == {"Q1?": "A1"}
-    assert scheduler.pending_questions() == []
-    kinds = [e["kind"] for e in scheduler.trace.read()]
-    assert "questions_asked" in kinds
-    # An empty answer is accepted (the question is dismissed), not a timeout.
-    assert "questions_timeout" not in kinds
-
-
-def test_post_questions_timeout_drops_remaining(tmp_path):
-    scheduler = _scheduler(tmp_path)
-    scheduler.elicitation_answer_timeout = 0.2
-    job = SkillWrite(
-        request=Request("track it"),
-        category="tracking",
-        draft=SkillDraft(name="probe", description="Probe."),
-    )
-    result: dict = {}
-    thread = threading.Thread(
-        target=lambda: result.update(scheduler._post_questions(job, ["Q1?", "Q2?"]))
-    )
-    thread.start()
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        pending = scheduler.pending_questions()
-        if pending:
-            scheduler.answer_question(pending[0]["id"], "A1")
-            break
-        time.sleep(0.02)
-    thread.join(timeout=3)
-    assert result == {"Q1?": "A1"}
-    assert scheduler.pending_questions() == []
-    events = [e for e in scheduler.trace.read() if e["kind"] == "questions_timeout"]
-    assert events and events[-1]["answered"] == 1 and events[-1]["asked"] == 2
-
-
-def test_post_questions_times_out(tmp_path):
-    scheduler = _scheduler(tmp_path)
-    scheduler.elicitation_answer_timeout = 0.1
-    job = SkillWrite(
-        request=Request("track it"),
-        category="tracking",
-        draft=SkillDraft(name="probe", description="Probe."),
-    )
-    assert scheduler._post_questions(job, ["Q?"]) == {}
-    assert scheduler.pending_questions() == []
-    assert any(e["kind"] == "questions_timeout" for e in scheduler.trace.read())
-
-
-# ---- requirements persistence ----
-
-def test_registry_stores_requirements_for_restart(tmp_path):
+def test_registry_stores_goal_for_restart(tmp_path):
     registry = CategoryRegistry(str(tmp_path / "categories.json"))
     registry.register_skill(
-        "tracking", "probe", "Probe.", request_text="track it",
-        requirements={"Which service?": "Nextcloud"},
+        "tracking", "probe", "Probe.",
+        goal="poll a tracking endpoint and report status",
     )
     row = registry.read()["tracking"]["skills"][0]
-    assert row["requirements"] == {"Which service?": "Nextcloud"}
+    assert row["goal"] == "poll a tracking endpoint and report status"
+    assert "request_text" not in row and "requirements" not in row
     scheduler = _scheduler(tmp_path)
     draft = scheduler._stub_draft("tracking", "probe")
-    assert draft.requirements == {"Which service?": "Nextcloud"}
+    assert draft.goal == "poll a tracking endpoint and report status"
 
 
 # ---- repair loop ----

@@ -520,7 +520,7 @@ echo "== verifying imports"
 "$PYTHON" -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
 
 # The small self-assessment model runs on this machine's local ollama; ensure it
-# is pulled so assess/elicitation/fidelity work without a remote dependency.
+# is pulled so assess/fidelity work without a remote dependency.
 # With llm.provider == "semif" the loaded decision engine generates the text
 # in-process, so no ollama model/endpoint is involved.
 if [[ "$LLM_PROVIDER" == "semif" ]]; then

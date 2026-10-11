@@ -488,7 +488,7 @@ def test_questions_endpoint_roundtrip(tmp_path):
         status, payload = server.get("/api/questions")
         assert status == 200
         assert payload["questions"][0]["id"] == "q1"
-        assert payload["questions"][0]["kind"] == "elicitation"
+        assert payload["questions"][0]["kind"] == "repair"
 
         status, payload = server.post("/api/questions", {"id": "q1", "text": "Nextcloud"})
         assert payload["status"] == "ok"

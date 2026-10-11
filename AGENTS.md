@@ -79,14 +79,14 @@ scheduler.py    no up-front gate: every input is dispatched
                 after the proposal is authored and before anything is
                 registered — one prompt per request, denial/timeout aborts
                 creation, surfaced via the approval queue; the body worker runs the full
-                pipeline: elicitation ->
-                codegen body (declares its own flat `CONTRACT`) -> fidelity
+                pipeline: codegen body from a **de-identified spec** (goal +
+                service/transport; codegen never sees the request, question
+                answers, or run output) that declares its own flat
+                `CONTRACT` -> fidelity
                 gate -> test -> auto-run test (SemIf regen ladder on failure,
                 code/test); config
                 search auto-populates the skill config from the full config
-                cascade; elicitation asks implementation questions one at a
-                time (all front ends defer via the question queue, `answer_timeout`
-                per question); a
+                cascade; a
                 `failed` step triggers a logged SemIf repair choice
                 (retry/repair_skill/ask_user/no_repair) surfaced to the user,
                 while a `continue` step is re-dispatched into next-step routing
@@ -199,13 +199,12 @@ codegen.py      CodegenClient (OpenAI-compatible) writes real-integration skill
                 + parse_contract / parse_integration /
                 infer_integration / integration_findings; the bridge catalog
                 (describe_bridges()) is injected into the body, retry, regen,
-                elicitation, and testgen prompts — it is the single source of
+                and testgen prompts — it is the single source of
                 bridge specifics (service, base-URL var, auth header/token var,
                 config-var docs, endpoints with error shapes), while CODEGEN.md/
                 TESTGEN.md carry only the generic pattern; the advisory
-                elicitation integration hint rides on every body/retry/regen
-                prompt; elicitation questions
-                + integration hint; TESTGEN.md drives the shared-context test
+                service/transport integration hint rides on every body/retry/regen
+                prompt; TESTGEN.md drives the shared-context test
                 call producing skill.test.py (hermetic mechanics test: inline
                 fixtures, loopback http.server for HTTP bodies, no external
                 network, no mock_data.json); run_skill_test executes
@@ -488,7 +487,7 @@ CLI, unit tests (24) + integration tests (2).
   per creation request — a new category's chained skill is covered by the
   category approval (`DraftAuthor.approved`). Denial or timeout aborts creation:
   nothing is registered, no body is written, and the request is not
-  re-dispatched; the wait reuses `codegen.elicitation.wait_timeout`. With no
+  re-dispatched; the wait reuses `codegen.approval.wait_timeout`. With no
   deferring front end `ask` denies immediately rather than stalling the worker.
   The mode is resolved by `Scheduler._category_mode` (deny for the hard-locked
   `housekeeping`/`response` categories) and checked in `_dispatch`,
@@ -534,19 +533,21 @@ CLI, unit tests (24) + integration tests (2).
   (`HARD_LOCKED_CATEGORIES`/`CANNED_CATEGORIES`) and can never be changed. The
   mode is creation-only: existing skills still run and repair/regen of an
   existing leaf is allowed.
-- **Real integrations, implementation questions, fidelity + repair** (Sep 2026):
-  elicitation is on by default and asks implementation questions (which
-  service/account, how to connect, where the credential comes from, what success
-  looks like); every front end defers via the question queue
-  (`/api/questions`, worker waits `codegen.elicitation.answer_timeout` per
-  question, one at a time). Bodies
+- **Real integrations, de-identified codegen, fidelity + repair** (Sep 2026;
+  codegen privacy Oct 2026): the codegen endpoint is the primarily-cloud model,
+  so it is shown **only a de-identified spec** — the trusted local `llm` authors a
+  reusable `goal` (plus a generic service/transport) with every user-specific
+  value stripped; the user's request, question answers, and run output never reach
+  codegen. Bodies
   must perform the real action via stdlib transports with values from
   `ctx.config` and declare `INTEGRATION` (service/transport/config_vars); a
   fidelity gate (`authoring:fidelity`, a SemIf accept/reconsider decision) plus
-  static declaration checks regenerates a simulated body once with the raw
-  evidence bundle, then accepts it badged `unverified`. A failed real run logs a
+  static declaration checks regenerates a simulated body once with the
+  de-identified evidence bundle, then accepts it badged `unverified`. A failed real run logs a
   SemIf repair choice (retry / repair_skill / ask_user / no_repair) surfaced in
-  REPL/dashboard; repair writes carry the raw observed-failure bundle and are
+  REPL/dashboard; repair writes carry a de-identified evidence bundle (a generic
+  failure kind, the integration, the goal, and the previous body — never the run's
+  action log/new state or the request) and are
   bounded by `codegen.repair.max_attempts`. Tests are hermetic mechanics checks
   (loopback `http.server` for HTTP bodies) and never certify the live
   integration — only a real run does.
@@ -757,7 +758,7 @@ CLI, unit tests (24) + integration tests (2).
 - **A local reasoning model needs thinking off for `llm`.** A reasoning model
   emits hidden chain-of-thought and puts the answer in `content`. Through the
   `/v1` compat endpoint the CoT consumes the entire reply budget, so
-  `generate_category`/`generate_skill`'s `max_tokens=128` returns
+  `generate_category`/`generate_skill_spec`'s small `max_tokens` returns
   `finish_reason: length` with `content: ""` → `JSONDecodeError` and a traced
   `draft_failed` (no category/skill is ever authored — the whole create branch
   is silently dead). `LLMClient` sends `reasoning_effort: "none"`
@@ -956,39 +957,36 @@ CLI, unit tests (24) + integration tests (2).
   subprocess in the skill folder). The provisioned host is the intended target;
   treat the endpoint as trusted.
 - Flow in `scheduler._dispatch_skill`: the request is queued to the **single-slot
-  `llm` draft worker** (small model authors title+description) → stub registered
-  + hot-merged into the tree → the body write is queued to a **separate
-  single-slot codegen worker** (the 12G codegen model can't run twice), the gate
-  stays free for new input. A category request chains the same way in one worker.
-  The codegen worker runs the full authoring pipeline:
-  1. **elicitation** (`generate_elicitation`): implementation questions +
-     integration hint. Every front end (REPL, dashboard, gateway) sets
-     `defer_questions` and the worker posts them to the question queue one at a
-     time, waiting `codegen.elicitation.answer_timeout` seconds for each (the
-     clock resets on every answer submit; a timeout stops the sequence).
-  2. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
-     repair): CODEGEN.md + request + tree + requirements answers; the body is a
+  `llm` draft worker** (small model authors title+description+a **de-identified
+  goal**) → stub registered + hot-merged into the tree → the body write is queued
+  to a **separate single-slot codegen worker** (the 12G codegen model can't run
+  twice), the gate stays free for new input. A category request chains the same
+  way in one worker. The codegen worker runs the full authoring pipeline:
+  1. **codegen body** (`generate_skill_body` / `regenerate_skill_body` on
+     repair): CODEGEN.md + the **de-identified spec** (goal + generic
+     service/transport) + tree + bridge catalog — never the request, question
+     answers, or run output; the body is a
      single `act(ctx, request)`, reads every operational value from `ctx.config`,
      performs the real action, and declares `INTEGRATION` and its own flat
      `CONTRACT` (every contract key must be read from `ctx.config`, and every
      name the body references must be imported/bound — both enforced by
      `parse_skill_body`).
-  3. **fidelity gate** (`authoring:fidelity` SemIf decision +
+  2. **fidelity gate** (`authoring:fidelity` SemIf decision +
      `integration_findings`): a rapid sanity check (accept/reconsider) — is the
      action real or simulated/declared-but-unused? It only triggers a rewrite,
-     never a diagnosis. One corrective regen with the raw evidence bundle
+     never a diagnosis. One corrective regen with the de-identified evidence bundle
      (`codegen.fidelity.max_attempts`), then accept with a trace rather than
      hard-failing authoring.
-  4. **contract** (`parse_contract`): read from the body's own flat `CONTRACT`
+  3. **contract** (`parse_contract`): read from the body's own flat `CONTRACT`
      constant — a single flat object of snake_case variable name -> semantic
      description, for user input and SemIf only (no types/validation; that lives
      in the code + test). No separate generation call; `materialize_skill`
      rewrites `contract.json` as a mirror.
-  5. **test** (`generate_skill_tests`): a shared-context call (seeded with
+  4. **test** (`generate_skill_tests`): a shared-context call (seeded with
      TESTGEN.md + `skill.py` + the body's `CONTRACT`) produces `skill.test.py` —
      hermetic mechanics, loopback fixture injects the endpoint through config,
      fixtures inline.
-  6. **auto-run test** (`run_skill_test`): subprocess in the skill folder,
+  5. **auto-run test** (`run_skill_test`): subprocess in the skill folder,
      `codegen.test_timeout`; on failure a **2-option SemIf decision**
      (`codegen_regen`, trace-only) picks code/test to regenerate (the contract
      rides in the code), the error + existing files are fed back, bounded by
@@ -1030,27 +1028,28 @@ CLI, unit tests (24) + integration tests (2).
   resolution → action → chain path; secret-named
   variables (pass/token/secret/key/credential/auth) are redacted to `***` so
   credentials never reach the decision log.
-- **Requirements elicitation (implementation questions, default on).**
-  `codegen.elicitation.enabled` asks the product owner how the new skill should
-  connect (which service/account, how to connect, where the credential comes
-  from, what success looks like, how failure should behave). Every front end
-  defers — the single-slot worker posts
-  questions to `scheduler.questions` (`GET/POST /api/questions`) one at a time
-  and waits up to `codegen.elicitation.answer_timeout` seconds for each (the
-  clock resets on every answer submit, so the next question is only shown after
-  the current is answered; a timeout stops the sequence), then proceeds with
-  whatever answers arrived (`questions_timeout` trace). Answers ride on the draft into
-  every body attempt (including retries and regens) and are persisted in the
-  registry so a `restart` does not ask again. The prompt keeps an explicit
-  anti-pattern block: never config-vs-input cadence questions ("should the
-  sender address change?"), never operational data values, never trivia.
+- **Codegen privacy (de-identified spec, no elicitation).** The codegen endpoint
+  is the primarily-cloud model, so it is shown **only a de-identified spec**. The
+  trusted local `llm` authors a reusable `goal` (plus a generic
+  service/transport) from the request, with every user-specific value stripped:
+  names, addresses, emails, phone numbers, dates, times, numbers, account names,
+  hostnames, credentials, and quoted content are removed, and the body derives
+  those from `request.text` at runtime. The user's request, question answers, and
+  run output are **never** placed in a codegen prompt (body, retry, regen, or
+  testgen); the repair/fidelity evidence bundles are reduced to a generic failure
+  kind + integration + goal + previous body. The stub's `goal` is persisted in
+  the registry so a restart/regen re-drives codegen without the request.
+  Implementation questions were removed with this change: the spec's
+  service/transport carries what the questions used to; the only remaining
+  question queue is the repair `ask_user` path (local).
 - **Fidelity gate.** After the body lands, `authoring:fidelity` — a real SemIf
   accept/reconsider decision (`P(reconsider) >= tau` or any static
   `integration_findings` from the declared transport vs. real calls and declared
   config_vars actually read) decides whether the body really performs the
   action. The gate never diagnoses: it only triggers a rewrite, which is handed
-  the raw evidence bundle as-is (request, description, requirements, raw
-  INTEGRATION, findings, SemIf verdict+probs, previous body). A rejected body is
+  the de-identified evidence bundle as-is (goal, description, raw
+  INTEGRATION, findings, SemIf verdict+probs, previous body — no request). A
+  rejected body is
   rewritten once (`codegen.fidelity.max_attempts`, reason_kind `fidelity`); a
   body that still fails is accepted (never hard-fail authoring) but traced
   (`fidelity_review`, `performs_real_action=false`) and badged `unverified` in
@@ -1361,7 +1360,7 @@ CLI, unit tests (24) + integration tests (2).
   (`BridgeInfo`: name, service, description, URL config var, other config vars
   with one-line docs, auth header + token config var, and endpoints with
   request/response/error shapes) is injected into every codegen prompt
-  (body/retry/regen/elicitation/testgen) via `describe_bridges()` and is the
+  (body/retry/regen/testgen) via `describe_bridges()` and is the
   single source of bridge specifics — CODEGEN.md/TESTGEN.md carry only the generic
   pattern. The bridge's optional shared secret is mirrored to the top-level
   `simplex_bridge_token` config var (bootstrap syncs it) so bodies can send the

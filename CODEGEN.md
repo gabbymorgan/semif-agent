@@ -194,8 +194,7 @@ The registry is a map of category -> bucket:
       {
         "name": "<leaf_name>",
         "description": "<what this leaf does, for navigation>",
-        "request_text": "<the originating request, optional>",
-        "requirements": {"<question>": "<answer>"}
+        "goal": "<the de-identified, reusable action statement>"
       }
     ]
   }
@@ -205,8 +204,10 @@ The registry is a map of category -> bucket:
 - A leaf `name` is a single snake_case token (`[a-z0-9_]+(?:\.[a-z0-9_]+)*`),
   not dotted with the category; the category is the key it lives under, and the
   runner joins them as `category.name` only when it builds the run summary.
-- `request_text` and `requirements` are recorded by the scheduler so a stub can
-  be re-driven later; the body never sets them.
+- `goal` is the de-identified, reusable action statement authored by the local
+  `llm`; the scheduler records it so a stub can be re-driven later. The
+  originating request and any user detail are never persisted here, and never
+  reach the codegen endpoint.
 
 ## Code body contract
 

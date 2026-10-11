@@ -16,7 +16,7 @@ Two boundaries matter:
   own processes (`python -m semif_agent.cli bridge`) against their own service
   daemons/profiles. This isolation is non-negotiable (see AGENTS.md).
 - **The catalog is visible to codegen.** `describe_bridges()` is injected into
-  every code-generation prompt (body, retry, regen, elicitation, testgen) and is
+  every code-generation prompt (body, retry, regen, testgen) and is
   the single source of bridge specifics: the model learns which real services it
   may build against, each one's base-URL config var, auth header/token var,
   config-var docs, and its endpoints with request/response/error shapes. CODEGEN.md

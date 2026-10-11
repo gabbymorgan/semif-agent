@@ -18,7 +18,7 @@ from semif_agent.skills import (
     build_skills,
     build_tree,
     generate_category,
-    generate_skill,
+    generate_skill_spec,
 )
 
 
@@ -106,11 +106,13 @@ def test_generate_category_via_provider():
 
 def test_generate_skill_via_provider():
     httpd, base = _fake_server(
-        '{"title": "track.live", "description": "Follow a package in real time."}'
+        '{"title": "track.live", "description": "Follow a package in real time.", '
+        '"goal": "poll a parcel tracking endpoint and report status", '
+        '"service": "tracking", "transport": "http"}'
     )
     try:
         client = LLMClient(base_url=base, model="test", timeout=10)
-        draft = generate_skill(
+        draft = generate_skill_spec(
             client,
             Request("track my drone delivery"),
             "tracking",
@@ -118,6 +120,8 @@ def test_generate_skill_via_provider():
         )
         assert isinstance(draft, SkillDraft)
         assert draft.name == "track.live"
+        assert draft.goal == "poll a parcel tracking endpoint and report status"
+        assert draft.integration == {"service": "tracking", "transport": "http"}
     finally:
         httpd.shutdown()
         httpd.server_close()

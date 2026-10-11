@@ -146,8 +146,6 @@ function eventRow(evt) {
     div.textContent = `ready: ${evt.skill}`;
   } else if (evt.kind === "codegen_regen") {
     div.textContent = `regen → ${evt.selected}`;
-  } else if (evt.kind === "requirements") {
-    div.textContent = "refinement questions asked";
   } else if (evt.kind === "skill_write_failed") {
     div.textContent = `body write failed: ${evt.skill}`;
     div.title = evt.message || "";
@@ -490,8 +488,6 @@ function eventNode(evt) {
       out.textContent = evt.reason.slice(0, 160);
       body.appendChild(out);
     }
-  } else if (evt.kind === "requirements") {
-    body.textContent = `refinement: ${(evt.questions || []).join(" | ")}`;
   } else if (evt.kind === "skill_write_failed") {
     node.classList.add("stub");
     const title = document.createElement("div");

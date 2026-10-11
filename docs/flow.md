@@ -2,7 +2,7 @@
 
 How one input travels through the agent. Every diamond marked **SemIf** is a
 real decision-engine call that is logged as a training row; the LLM only ever
-*generates* (skill drafts, bodies, questions). There is no up-front
+*generates* (skill drafts, bodies, tests). There is no up-front
 handle/ignore gate — every input is dispatched, and an explicit housekeeping
 command is routed deterministically before navigation.
 
@@ -133,7 +133,7 @@ flowchart TD
 
     DRAFT --> GEN{"category or skill?"}
     GEN -- "category" --> GC["generate_category()<br/>title + description"]
-    GEN -- "skill" --> GS["generate_skill()<br/>title + description"]
+    GEN -- "skill" --> GS["generate_skill_spec()<br/>title + description +<br/>de-identified goal +<br/>generic service/transport"]
     GC --> APPROVE
     GS --> APPROVE
 
@@ -150,11 +150,9 @@ flowchart TD
     CHAIN --> DRAFT
     REGISTER -- "skill" --> WRITE["single-slot codegen worker<br/>SkillWrite queue<br/>leaf.writing = true, trace 'skill_writing'"]
 
-    WRITE --> ELICIT["generate_elicitation()<br/>implementation questions + integration hint"]
-    ELICIT --> QS["Output: questions<br/>posted one at a time<br/>answer_timeout per question"]
-    QS -- "answers / timeout" --> BODY
+    WRITE --> BODY
 
-    BODY["generate_skill_body()<br/>or regenerate_skill_body() for<br/>repair / fidelity / test / manual regen<br/>CODEGEN.md + bridge catalog<br/>declares INTEGRATION + flat CONTRACT"] --> FID["SemIf choice<br/>phase 'authoring:fidelity'<br/>accept / reconsider<br/>+ static integration_findings"]
+    BODY["generate_skill_body()<br/>de-identified spec only: goal + service/transport<br/>or regenerate_skill_body() for<br/>repair / fidelity / test / manual regen<br/>CODEGEN.md + bridge catalog<br/>declares INTEGRATION + flat CONTRACT"] --> FID["SemIf choice<br/>phase 'authoring:fidelity'<br/>accept / reconsider<br/>+ static integration_findings"]
     FID -- "reconsider (once)" --> BODY
     FID -- "accept" --> CONTRACT["parse_contract()<br/>read body's CONTRACT constant"]
 
@@ -177,7 +175,7 @@ flowchart TD
     classDef output fill:#fce8e6,stroke:#d93025;
     classDef author fill:#e6f4ea,stroke:#34a853;
     class FID,CFG,REGEN semfill;
-    class PROMPT,ABORT,ABORT2,QS,FAIL,CANCELLED output;
+    class PROMPT,ABORT,ABORT2,FAIL,CANCELLED output;
     class START,DIRECT,BACK,MAT,REQ author;
 ```
 

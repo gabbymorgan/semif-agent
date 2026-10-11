@@ -21,18 +21,14 @@ from semif_agent.codegen import (
     CodegenError,
     DegenerationError,
     _retry_prompt,
-    build_elicitation_prompt,
     build_skill_body_prompt,
     build_testgen_base_prompt,
     extract_integration,
-    generate_requirements,
     generate_skill_body,
     generate_skill_tests,
     infer_integration,
     integration_findings,
     parse_contract,
-    parse_elicitation,
-    parse_elicitation_result,
     parse_integration,
     parse_skill_body,
     parse_skill_test,
@@ -43,7 +39,6 @@ from semif_agent.codegen import (
     skill_contract_ref,
 )
 from semif_agent.bridges.registry import describe_bridges
-from semif_agent.decisions import Request
 from semif_agent.skills import (
     Skill,
     SkillDraft,
@@ -197,7 +192,7 @@ def test_testgen_contract_embeds_fixtures_inline():
     assert "not** proof that the real integration works" in text
 
 
-def test_build_skill_body_prompt_includes_contract_request_and_draft():
+def test_build_skill_body_prompt_includes_contract_goal_and_draft():
     tree = build_tree(build_skills({"skills": {}}))
     tree["tracking"] = [
         Skill(
@@ -206,24 +201,39 @@ def test_build_skill_body_prompt_includes_contract_request_and_draft():
             description="Check the delivery status of a package.",
         )
     ]
-    draft = SkillDraft(name="probe", description="Probe the service.")
-    messages = build_skill_body_prompt(
-        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
+    draft = SkillDraft(
+        name="probe",
+        description="Probe the service.",
+        goal="query a generic service health endpoint and report its status",
     )
+    messages = build_skill_body_prompt("tracking", draft, tree, "THE CONTRACT")
     assert messages[0]["role"] == "system"
     assert "THE CONTRACT" in messages[0]["content"]
     joined = messages[1]["content"]
-    assert "check if the service is up" in joined
+    assert "query a generic service health endpoint" in joined
     assert "probe" in joined
     assert "tracking.check" in joined
+
+
+def test_build_skill_body_prompt_never_carries_the_request():
+    """The codegen endpoint must never see user-specific task data: only the
+    de-identified spec reaches it."""
+    tree = build_tree(build_skills({"skills": {}}))
+    draft = SkillDraft(
+        name="probe",
+        description="Probe the service.",
+        goal="query a generic service health endpoint",
+    )
+    messages = build_skill_body_prompt("tracking", draft, tree, "THE CONTRACT")
+    joined = messages[1]["content"]
+    assert "Request:" not in joined
+    assert "SENTINEL" not in joined
 
 
 def test_build_skill_body_prompt_directs_runner_provided_data():
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
-    messages = build_skill_body_prompt(
-        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
-    )
+    messages = build_skill_body_prompt("tracking", draft, tree, "THE CONTRACT")
     joined = messages[1]["content"]
     assert "owns no working data" in joined
     assert "`ctx.config`" in joined
@@ -231,25 +241,8 @@ def test_build_skill_body_prompt_directs_runner_provided_data():
     assert "internal/mock data model" not in joined
 
 
-def test_build_skill_body_prompt_includes_requirements():
-    tree = build_tree(build_skills({"skills": {}}))
-    draft = SkillDraft(name="probe", description="Probe the service.")
-    messages = build_skill_body_prompt(
-        Request("check if the service is up"),
-        "tracking",
-        draft,
-        tree,
-        "THE CONTRACT",
-        requirements={"Should it actually send, or draft first?": "draft first"},
-    )
-    joined = messages[1]["content"]
-    assert "Requirements gathered from the product owner" in joined
-    assert "draft first" in joined
-
-
 def test_retry_prompt_directs_runner_provided_data():
     messages = _retry_prompt(
-        Request("check if the service is up"),
         "tracking",
         SkillDraft(name="probe", description="Probe the service."),
         "THE CONTRACT",
@@ -536,7 +529,7 @@ def test_generate_skill_body_end_to_end(tmp_path):
         client = CodegenClient(base_url=base, model="test", timeout=10)
         tree = build_tree(build_skills({"skills": {}}))
         draft = SkillDraft(name="probe", description="Probe the service.")
-        code = generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+        code = generate_skill_body(client, "tracking", draft, tree)
         assert "def act" in code and "CONTRACT" in code
     finally:
         httpd.shutdown()
@@ -552,7 +545,7 @@ def test_sent_payload_system_message_contains_contract_phrase():
         client = CodegenClient(base_url=base, model="test", timeout=10)
         tree = build_tree(build_skills({"skills": {}}))
         draft = SkillDraft(name="probe", description="Probe the service.")
-        generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+        generate_skill_body(client, "tracking", draft, tree)
         sent = httpd.RequestHandlerClass.received[0]
         system = sent["messages"][0]["content"]
         assert "data/skills" in system
@@ -569,7 +562,7 @@ def test_generate_skill_body_retries_then_fails(tmp_path):
         tree = build_tree(build_skills({"skills": {}}))
         draft = SkillDraft(name="probe", description="Probe the service.")
         with pytest.raises(ValueError):
-            generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+            generate_skill_body(client, "tracking", draft, tree)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -580,7 +573,7 @@ def test_codegen_client_unreachable_raises(tmp_path):
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
     with pytest.raises(CodegenError):
-        generate_skill_body(client, Request("is the service up?"), "tracking", draft, tree)
+        generate_skill_body(client, "tracking", draft, tree)
 
 
 class _SilentOpenAI(BaseHTTPRequestHandler):
@@ -1438,7 +1431,7 @@ def test_generate_skill_body_retries_with_fresh_prompt(tmp_path):
         tree = build_tree(build_skills({"skills": {}}))
         draft = SkillDraft(name="probe", description="Probe the service.")
         code = generate_skill_body(
-            client, Request("is the service up?"), "tracking", draft, tree
+            client, "tracking", draft, tree
         )
         assert "def act" in code and "CONTRACT" in code
         reqs = httpd.RequestHandlerClass.received
@@ -1468,7 +1461,7 @@ def test_generate_skill_body_exhausts_max_attempts(tmp_path):
         draft = SkillDraft(name="probe", description="Probe the service.")
         with pytest.raises(ValueError, match="rejected 3 times"):
             generate_skill_body(
-                client, Request("is the service up?"), "tracking", draft, tree
+                client, "tracking", draft, tree
             )
         assert httpd.RequestHandlerClass.chat_calls == 3
     finally:
@@ -1537,7 +1530,6 @@ def test_degeneration_error_propagates_without_retry():
         with pytest.raises(DegenerationError, match="degeneration detected"):
             generate_skill_body(
                 client,
-                Request("is the service up?"),
                 "tracking",
                 draft,
                 tree,
@@ -1572,93 +1564,12 @@ def test_other_codegen_error_does_not_retry():
         with pytest.raises(CodegenError, match="token budget"):
             generate_skill_body(
                 client,
-                Request("is the service up?"),
                 "tracking",
                 draft,
                 tree,
                 contract="SHORT CONTRACT",
             )
         assert httpd.RequestHandlerClass.chat_calls == 1
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-# ---- elicitation ----
-
-def test_elicitation_prompt_contains_examples_and_antipatterns():
-    tree = build_tree(build_skills({"skills": {}}))
-    draft = SkillDraft(name="probe", description="Probe the service.")
-    messages = build_elicitation_prompt(
-        Request("is the service up?"), "tracking", draft, tree, max_questions=3
-    )
-    system = messages[0]["content"]
-    joined = messages[1]["content"]
-    assert "product goal" in system
-    assert "HOW the skill will connect" in system
-    assert "should the sender address change?" in system
-    assert "tracking" in joined
-    for example in (
-        "against the live service, or produce a reviewable draft",
-        "how should it connect",
-        "How does it authenticate",
-        "successful run look like",
-        "fail loudly",
-    ):
-        assert example in system
-
-
-def test_parse_elicitation():
-    assert parse_elicitation('{"questions": ["A?", "B?"]}') == ["A?", "B?"]
-    assert parse_elicitation('Sure:\n{"questions": ["  A?  "]}') == ["A?"]
-    assert parse_elicitation('{"questions": []}') == []
-    with pytest.raises(ValueError):
-        parse_elicitation("not json")
-    with pytest.raises(ValueError):
-        parse_elicitation('{"questions": "nope"}')
-
-
-def test_generate_requirements_end_to_end():
-    httpd, base = _sequenced_server(['{"questions": ["Draft or send?", "Which one?"]}'])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10)
-        tree = build_tree(build_skills({"skills": {}}))
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        questions = generate_requirements(
-            client, Request("is the service up?"), "tracking", draft, tree, max_questions=3
-        )
-        assert questions == ["Draft or send?", "Which one?"]
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_generate_requirements_truncates_to_max():
-    httpd, base = _sequenced_server(['{"questions": ["A?", "B?", "C?", "D?"]}'])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10)
-        tree = build_tree(build_skills({"skills": {}}))
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        questions = generate_requirements(
-            client, Request("is the service up?"), "tracking", draft, tree, max_questions=2
-        )
-        assert questions == ["A?", "B?"]
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_generate_requirements_degrades_on_parse_failure():
-    """Elicitation must never block authoring: a garbage reply degrades to []."""
-    httpd, base = _sequenced_server(["this is not json at all"])
-    try:
-        client = CodegenClient(base_url=base, model="test", timeout=10, max_attempts=2)
-        tree = build_tree(build_skills({"skills": {}}))
-        draft = SkillDraft(name="probe", description="Probe the service.")
-        assert generate_requirements(
-            client, Request("is the service up?"), "tracking", draft, tree
-        ) == []
-        assert httpd.RequestHandlerClass.chat_calls == 2
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1712,7 +1623,7 @@ def test_generate_skill_tests_shares_contract_context(tmp_path):
         client = CodegenClient(base_url=base, model="test", timeout=10)
         draft = SkillDraft(name="probe", description="Probe the service.")
         test = generate_skill_tests(
-            client, Request("is the service up?"), "tracking", draft, GOOD_BODY, GOOD_CONTRACT
+            client, "tracking", draft, GOOD_BODY, GOOD_CONTRACT
         )
         assert test == GOOD_TEST.strip()
         messages = httpd.RequestHandlerClass.received[0]["messages"]
@@ -1761,7 +1672,7 @@ def test_regenerate_skill_body_rewrites_from_raw_evidence(tmp_path):
         client = CodegenClient(base_url=base, model="test", timeout=10)
         draft = SkillDraft(name="probe", description="Probe the service.")
         code = regenerate_skill_body(
-            client, Request("is the service up?"), "tracking", draft, GOOD_BODY,
+            client, "tracking", draft, GOOD_BODY,
             {"test_output": "test failed with an error", "previous_body": GOOD_BODY},
         )
         assert "def act" in code and "CONTRACT" in code
@@ -1815,9 +1726,7 @@ def test_body_directives_expose_bridge_services():
 def test_body_prompts_require_real_action_and_integration():
     tree = build_tree(build_skills({"skills": {}}))
     draft = SkillDraft(name="probe", description="Probe the service.")
-    messages = build_skill_body_prompt(
-        Request("check if the service is up"), "tracking", draft, tree, "THE CONTRACT"
-    )
+    messages = build_skill_body_prompt("tracking", draft, tree, "THE CONTRACT")
     joined = messages[1]["content"]
     assert "Perform the real action" in joined
     assert "INTEGRATION" in joined
@@ -1825,7 +1734,6 @@ def test_body_prompts_require_real_action_and_integration():
     assert "service: simplex" in joined
     assert "simplex_bridge_url" in joined
     retry = _retry_prompt(
-        Request("check if the service is up"),
         "tracking",
         draft,
         "THE CONTRACT",
@@ -1843,9 +1751,7 @@ def test_body_prompt_carries_the_advisory_integration_hint():
         description="Probe the service.",
         integration={"service": "simplex", "transport": "http"},
     )
-    messages = build_skill_body_prompt(
-        Request("send a message"), "messaging", draft, tree, "THE CONTRACT"
-    )
+    messages = build_skill_body_prompt("messaging", draft, tree, "THE CONTRACT")
     joined = messages[1]["content"]
     assert "advisory only" in joined
     assert "service=simplex" in joined
@@ -1861,12 +1767,11 @@ def test_regen_prompt_includes_catalog_and_integration_hint():
         integration={"service": "simplex", "transport": "http"},
     )
     messages = _regen_body_prompt(
-        Request("send a message"),
         "messaging",
         draft,
         "THE CONTRACT",
         GOOD_BODY,
-        {"error": "boom"},
+        {"failure_kind": "a real run against the live service failed"},
         reason_kind="run_failure",
     )
     joined = messages[1]["content"]
@@ -1877,26 +1782,29 @@ def test_regen_prompt_includes_catalog_and_integration_hint():
 
 
 def test_testgen_base_prompt_includes_catalog():
+    draft = SkillDraft(name="send_message", description="Send a message.")
     messages = build_testgen_base_prompt(
-        Request("send a message"), "messaging", "send_message", GOOD_BODY, "THE CONTRACT"
+        "messaging", draft, GOOD_BODY, "THE CONTRACT"
     )
     joined = messages[1]["content"]
     assert describe_bridges().strip() in joined
     assert "simplex_bridge_url" in joined
 
 
-def test_retry_prompt_carries_requirements():
+def test_retry_prompt_carries_goal_and_not_the_request():
     messages = _retry_prompt(
-        Request("check if the service is up"),
         "tracking",
-        SkillDraft(name="probe", description="Probe the service."),
+        SkillDraft(
+            name="probe",
+            description="Probe the service.",
+            goal="query a generic service health endpoint",
+        ),
         "THE CONTRACT",
         ValueError("bad"),
-        requirements={"Which service?": "Nextcloud"},
     )
     joined = messages[1]["content"]
-    assert "Requirements gathered from the product owner" in joined
-    assert "Which service? -> Nextcloud" in joined
+    assert "query a generic service health endpoint" in joined
+    assert "Request:" not in joined
 
 
 def test_regen_prompt_hands_raw_evidence_bundle():
@@ -1904,9 +1812,9 @@ def test_regen_prompt_hands_raw_evidence_bundle():
 
     draft = SkillDraft(name="probe", description="Probe the service.")
     evidence = {
-        "request": "send the report",
+        "failure_kind": "a real run against the live service failed",
         "description": "Probe the service.",
-        "requirements": {"Should it really send?": "yes"},
+        "goal": "query a generic service health endpoint",
         "INTEGRATION": {"service": "mail", "transport": "smtp"},
         "findings": ["INTEGRATION declares transport 'smtp' but the body shows no smtp calls"],
         "verdict": "reconsider",
@@ -1914,7 +1822,6 @@ def test_regen_prompt_hands_raw_evidence_bundle():
         "previous_body": GOOD_BODY,
     }
     messages = _regen_body_prompt(
-        Request("send the report"),
         "tracking",
         draft,
         "THE CONTRACT",
@@ -1930,7 +1837,7 @@ def test_regen_prompt_hands_raw_evidence_bundle():
     assert "smtp" in joined
     # The bundle is rendered as-is, no prose diagnosis headers.
     assert "Review finding" not in joined
-    assert render_evidence(evidence).startswith("request: send the report")
+    assert render_evidence(evidence).startswith("failure_kind: a real run")
 
 
 def test_render_evidence_is_deterministic_and_handles_missing():
@@ -2009,19 +1916,6 @@ def test_integration_findings_flag_mismatches():
         code,
     )
     assert any("INTEGRATION" in finding for finding in inferred)
-
-
-def test_parse_elicitation_result_reads_integration_hint():
-    result = parse_elicitation_result(
-        '{"questions": ["Which service?"], '
-        '"integration": {"service": "nextcloud_calendar", "transport": "caldav"}}'
-    )
-    assert result.questions == ["Which service?"]
-    assert result.integration == {"service": "nextcloud_calendar", "transport": "caldav"}
-    bad = parse_elicitation_result(
-        '{"questions": [], "integration": {"service": "Nope!", "transport": "smtp"}}'
-    )
-    assert bad.integration == {}
 
 
 def test_testgen_prompt_requires_loopback_fixture_and_hermeticity():

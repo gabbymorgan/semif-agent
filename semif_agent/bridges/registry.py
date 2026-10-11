@@ -70,7 +70,7 @@ def derived_config_vars(config: dict) -> dict[str, str]:
 def describe_bridges() -> str:
     """A prompt block describing every available bridge service.
 
-    Injected into the skill-body, retry, regen, elicitation, and testgen
+    Injected into the skill-body, retry, regen, and testgen
     prompts so codegen knows which real services it may build a skill against,
     how to reach and authenticate to each one, and which `ctx.config` variables
     carry its URL, token, and other values. This is the single source of bridge
