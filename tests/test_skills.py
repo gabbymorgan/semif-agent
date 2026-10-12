@@ -1401,7 +1401,8 @@ def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
         trace=trace,
     )
     scheduler.tree = {}
-    result = scheduler._dispatch(Request("anything"))
+    request = Request("anything")
+    result = scheduler._dispatch(request)
     assert result.kind == "create_category"
     assert scheduler.fatal is None
     deadline = time.monotonic() + 5
@@ -1411,6 +1412,13 @@ def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
         time.sleep(0.02)
     assert any(e["kind"] == "draft_failed" for e in trace.read())
     assert scheduler.fatal is None
+
+    # The failure is buffered for the front end that owns the request (the
+    # voice gateway speaks it instead of leaving the user in silence).
+    notices = scheduler.drain_outbox()
+    assert notices, "a failed draft must be routable to the chat"
+    assert notices[0].run_id == request.id
+    assert "couldn't create a new category" in notices[0].text
 
 
 def _answer_approval_when_posted(scheduler, approved, timeout=5.0):
@@ -1753,6 +1761,16 @@ def test_async_skill_write_fails_gracefully_on_bad_contract(tmp_path):
         assert failed is not None, "worker must surface the failure"
         assert not leaf.writing
         assert leaf.is_noop(), "leaf must stay a restartable stub"
+
+        # The failure is buffered for the front end that owns the request, so a
+        # voice user hears it instead of the scheduler's stdout-only print.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not scheduler._outbox:
+            time.sleep(0.02)
+        notices = scheduler.drain_outbox()
+        assert notices, "a failed body write must be routable to the chat"
+        assert notices[0].run_id == request.id
+        assert "couldn't finish creating" in notices[0].text
     finally:
         httpd.shutdown()
         httpd.server_close()

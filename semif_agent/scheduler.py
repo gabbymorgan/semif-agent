@@ -656,6 +656,29 @@ class Scheduler:
             self._outbox.clear()
         return replies
 
+    def _notify_outbox(self, run_id: str, text: str) -> None:
+        """Buffer a user-facing notice for the front end that owns `run_id`.
+
+        Background paths that fail (a skill body write, a draft authoring call)
+        run off the gate with no front end to return to, so the caller only sees
+        the scheduler's own stdout. Pushing a `SchedulerReply` here lets a front
+        end's `drain_outbox()` route it to the originating chat — a voice user
+        hears that creation failed instead of silence. `status="error"` maps to
+        a `notice` on the gateway (never rewritten by `result_only`/`humanize`).
+        """
+        with self._lock:
+            self._outbox.append(
+                SchedulerReply(status="error", text=text, run_id=run_id)
+            )
+
+    @staticmethod
+    def _brief_error(exc: Exception, limit: int = 160) -> str:
+        """One collapsed, length-bounded line from an exception for speech."""
+        text = " ".join(str(exc).split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
     def _run_queue_locked(self) -> list[SchedulerReply]:
         results = []
         while self.current is None and len(self.queue) > 0:
@@ -1572,6 +1595,13 @@ class Scheduler:
                 category=job.category,
                 message=str(exc),
             )
+        self._notify_outbox(
+            job.request.id,
+            (
+                f"I couldn't create a new {job.kind} for that request — "
+                f"{self._brief_error(exc)}. Please try again."
+            ),
+        )
         print(
             f"[llm] {job.kind} authoring for {target} FAILED: {exc}. "
             "The request was not re-dispatched."
@@ -2187,6 +2217,14 @@ class Scheduler:
                 skill=job.draft.name,
                 message=str(exc),
             )
+        self._notify_outbox(
+            job.request.id,
+            (
+                f"I couldn't finish creating {job.category}.{job.draft.name} — "
+                f"{self._brief_error(exc)}. It's saved as an empty stub; ask me "
+                "to retry it."
+            ),
+        )
         print(
             f"[codegen] body write for {job.category}.{job.draft.name} FAILED: {exc}. "
             f"The leaf is a stub — restart it with `restart {job.category} {job.draft.name}`."
