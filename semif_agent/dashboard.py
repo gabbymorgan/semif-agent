@@ -389,7 +389,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _drain_chain(self) -> list:
         """Run queued chain steps, bounded like `GatewayService.drain`."""
-        replies = []
+        replies = list(self.scheduler.drain_outbox())
         for _ in range(100):
             batch = self.scheduler.run_queue()
             if not batch:

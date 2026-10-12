@@ -1700,12 +1700,20 @@ def test_async_skill_write_materializes_merges_and_requeues(tmp_path):
         assert not upgraded.is_noop()
         assert callable(upgraded.act)
 
-        # The worker drains the queue when idle (run_queue), so an empty queue
-        # is a valid end state; the requeue trace proves the push happened.
+        # The worker drains the queue when idle (run_queue_buffered), so an empty
+        # queue is a valid end state; the requeue trace proves the push happened.
         events = [e["kind"] for e in scheduler.trace.read()]
         assert "skill_requeued" in events
         assert "skill_testing" in events
         assert "skill_ready" in events
+        # The off-gate re-run's reply is buffered for a front end, not swallowed:
+        # the worker must not consume the answer to the user's own request.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not scheduler._outbox:
+            time.sleep(0.02)
+        buffered = scheduler.drain_outbox()
+        assert buffered, "the post-authoring re-run must be routable by a front end"
+        assert buffered[0].run_id == request.id
         # The full deliverable set landed in the skill folder.
         directory = scheduler.body_store.dir("tracking", "track_live")
         assert sorted(p.name for p in directory.iterdir() if not p.name.startswith("__")) == [

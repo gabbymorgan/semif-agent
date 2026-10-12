@@ -1010,7 +1010,10 @@ CLI, unit tests (24) + integration tests (2).
      `codegen.test_max_attempts`.
   On success the body is materialized (`materialize_skill`), hot-merged, the
   leaf's `writing` flag clears, and the **original request is re-queued** and
-  re-runs navigation onto the new leaf (`skill_requeued`). On
+  re-runs navigation onto the new leaf (`skill_requeued`). The worker drains it
+  with `run_queue_buffered`, so the re-run's reply lands in the scheduler's
+  outbox and a front end (`drain_outbox`) routes it to the chat — the worker
+  must not swallow the answer to the user's own request. On
   failure (`CodegenError`/`ValueError`) the user is notified, the leaf stays a
   restartable stub, and the request is NOT re-dispatched. A re-dispatched
   request whose skill is still unwritten reports the pending write instead of
@@ -1302,12 +1305,19 @@ CLI, unit tests (24) + integration tests (2).
   so a resume/repair failure never propagates into a front end. A *different* chat — **including a chat on another
   platform** — during that pause is told to wait: the single-slot scheduler must
   not silently abandon the first chat's run, and one service fronts all
-  adapters so the guard spans them. A background poll calls
-  `Scheduler.run_queue()` (routing each `[run_id] summary` to its owner) and
+  adapters so the guard spans them. A background poll drains
+  `Scheduler.drain_outbox()` (replies a background path buffered — the codegen
+  worker's post-authoring re-run, a repair retry — so an off-gate completion
+  still reaches its chat) then `Scheduler.run_queue()` (routing each
+  `[run_id] summary` to its owner) and
   surfaces newly posted authoring questions / repair offers (`defer_questions
   = True`; the service routes them by `run_id` → `(platform, chat)`, falling
   back to that platform's `home_channel`); a chat's plain reply answers the
-  question or picks the repair action (`retry`/`repair`/`ask`/`no`).
+  question or picks the repair action (`retry`/`repair`/`ask`/`no`). The
+  approval/repair vocabulary is matched **case- and punctuation-insensitively**
+  (`_normalize_action`), with a first-word fallback: speech-to-text emits
+  "Approve." / "Yes." / "retry.", and an exact lookup silently dropped those
+  into `submit_request`, so the approval timed out and nothing was created.
 - **Optional result cleanup** (`gateway/humanize.py`): a gateway-only
   presentation layer that rewrites a completed skill's result line from the
   scheduler's deterministic `<skill>: <ok|failed> — <action_log>` into one

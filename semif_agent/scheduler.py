@@ -358,6 +358,12 @@ class Scheduler:
         approval_cfg = codegen_cfg.get("approval", {}) or {}
         self.approval_wait = float(approval_cfg.get("wait_timeout", 900.0))
         self.defer_questions = False
+        #: Replies produced by a *background* drain (the codegen worker's
+        #: post-authoring re-run, a repair retry) whose caller has no front end to
+        #: hand them to. A front end's `drain_outbox()` picks them up, so a
+        #: re-run that completes off the gate still reaches the chat instead of
+        #: being swallowed. Bounded like the request queue.
+        self._outbox: deque[SchedulerReply] = deque(maxlen=256)
         #: Global new-skill creation mode: "allow" (default), "deny", or "ask".
         #: A category may override it in its category config.
         self.new_skill_mode = (
@@ -614,9 +620,41 @@ class Scheduler:
 
         Safe to call from any thread: guarded by the scheduler lock (RLock, so
         the async codegen worker can drain the queue from its completion path).
+        A *front end* calls this and routes the returned replies; a background
+        caller must use `run_queue_buffered` so its replies are not swallowed.
         """
         with self._lock:
             return self._run_queue_locked()
+
+    def run_queue_buffered(self) -> None:
+        """Drain the queue from a background path that has no front end.
+
+        Used by the codegen worker (post-authoring re-run) and the repair-retry
+        path. The replies are buffered, not returned, so a front end's
+        `drain_outbox()` can route them; returning them here would let a
+        background thread consume a reply that then never reaches the chat
+        (the voice gateway's "authoring... will re-run when it is ready" that
+        was never followed by the answer).
+        """
+        # Hold the lock across the drain and the buffer so a reply is never in
+        # neither place at once (a front-end drain sees it either in run_queue's
+        # return or in the outbox).
+        with self._lock:
+            replies = self._run_queue_locked()
+            if replies:
+                self._outbox.extend(replies)
+
+    def drain_outbox(self) -> list[SchedulerReply]:
+        """Replies a background drain buffered for the front end, oldest first.
+
+        A front end calls this before `run_queue()` so an off-gate completion
+        (a re-run after a skill body lands, a repair retry) is routed to its
+        chat. Consuming clears the buffer.
+        """
+        with self._lock:
+            replies = list(self._outbox)
+            self._outbox.clear()
+        return replies
 
     def _run_queue_locked(self) -> list[SchedulerReply]:
         results = []
@@ -1293,7 +1331,7 @@ class Scheduler:
             with self._lock:
                 offer.status = "done"
             self.trace.append("repair_retry", offer.run_id, skill=offer.skill)
-            self.run_queue()
+            self.run_queue_buffered()
             return "running", f"retrying {offer.category}.{offer.skill}"
         if chosen == "no_repair":
             self.trace.append("repair_declined", offer.run_id, skill=offer.skill)
@@ -2105,7 +2143,10 @@ class Scheduler:
             f"[codegen] body ready for {job.category}.{job.draft.name}; "
             "original request re-queued."
         )
-        self.run_queue()
+        # The re-run completes off the gate; buffer its reply so a front end
+        # (the voice gateway's poll loop, the REPL) routes it to the chat
+        # instead of the worker swallowing it.
+        self.run_queue_buffered()
 
     def _discard_cancelled_write(self, job: SkillWrite) -> None:
         """Clean up a write that was cancelled mid-flight.

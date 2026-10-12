@@ -345,6 +345,123 @@ def test_service_surfaces_and_resolves_approval(tmp_path):
     assert any("approved" in text for text in drain_outbound(service))
 
 
+# ---- service: spoken action vocabulary (punctuation, phrases) ----
+
+def test_normalize_action_strips_punctuation_and_phrases():
+    from semif_agent.gateway.service import _normalize_action
+
+    assert _normalize_action("Approve.") == "approve"
+    assert _normalize_action("Yes.") == "yes"
+    assert _normalize_action("  no!  ") == "no"
+    assert _normalize_action("yes please") == "yes"
+    assert _normalize_action("approve it") == "approve"
+    assert _normalize_action("Retry.") == "retry"
+    assert _normalize_action("never mind") == "never mind"
+    assert _normalize_action("") == ""
+    assert _normalize_action("what is 255 times 12?") == "what"
+
+
+def test_service_approval_accepts_spoken_punctuation(tmp_path):
+    # STT emits "Approve." / "Yes." with a trailing period; the exact-map lookup
+    # used to miss it and fall through to submit_request, so the approval timed
+    # out and nothing was ever created (the voice authoring failure).
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    scheduler.approvals.append(
+        PendingApproval(
+            id="a1",
+            run_id="r1",
+            kind="skill",
+            category="tracking",
+            skill="track_live",
+            description="Follow a package.",
+        )
+    )
+    service._owners["r1"] = ("simplex", "4")
+    service.surface()
+    drain_outbound(service)
+
+    service.handle_inbound(InboundMessage(text="Approve.", chat_id="4", contact_id="4"))
+    assert scheduler.pending_approvals() == []
+    assert any("approved" in text for text in drain_outbound(service))
+    assert not any(
+        e["kind"] == "submit" and e.get("text") == "Approve."
+        for e in scheduler.trace.read()
+    ), "a spoken approval must not be dispatched as a new request"
+
+
+def test_service_approval_accepts_spoken_no(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    scheduler.approvals.append(
+        PendingApproval(
+            id="a1",
+            run_id="r1",
+            kind="category",
+            category="text_analysis",
+            skill="",
+            description="Analyze text.",
+        )
+    )
+    service._owners["r1"] = ("simplex", "4")
+    service.surface()
+    drain_outbound(service)
+
+    service.handle_inbound(InboundMessage(text="No thanks.", chat_id="4", contact_id="4"))
+    assert scheduler.pending_approvals() == []
+    assert any("denied" in text for text in drain_outbound(service))
+
+
+def test_service_repair_accepts_spoken_punctuation(tmp_path):
+    from semif_agent.scheduler import RepairOffer
+
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    scheduler.repairs.append(
+        RepairOffer(
+            id="r1",
+            run_id="run1",
+            category="tracking",
+            skill="track_live",
+            selected="retry",
+            reason="failed",
+            request_text="track it",
+            failure="boom",
+        )
+    )
+    service._owners["run1"] = ("simplex", "4")
+    service.surface()
+    drain_outbound(service)
+
+    service.handle_inbound(InboundMessage(text="retry.", chat_id="4", contact_id="4"))
+    offer = next(r for r in scheduler.repairs if r.id == "r1")
+    assert offer.status == "done"
+    assert not any(
+        e["kind"] == "submit" and e.get("text") == "retry."
+        for e in scheduler.trace.read()
+    ), "a spoken repair action must not be dispatched as a new request"
+
+
+# ---- service: background-drain outbox routing ----
+
+def test_service_drain_routes_background_outbox(tmp_path):
+    # A background drain (the codegen worker's post-authoring re-run, a repair
+    # retry) buffers its reply; the front end's drain must still route it.
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)
+    request = Request("queued work", source="simplex:4")
+    scheduler.queue.push(request)
+    service._owners[request.id] = ("simplex", "4")
+
+    scheduler.run_queue_buffered()  # the off-gate completion
+    assert len(scheduler._outbox) == 1
+
+    service.drain()
+    assert drain_outbound(service), "the buffered background reply must reach the owner"
+    assert list(scheduler._outbox) == []
+
+
+
 # ---- service: result-only front end (voice) ----
 
 class FakeResultOnlyAdapter:

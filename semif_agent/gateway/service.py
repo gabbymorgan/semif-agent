@@ -37,27 +37,71 @@ _RESULT_SEP = " — "
 _REPAIR_ACTIONS = {
     "retry": "retry",
     "repair": "repair_skill",
+    "fix": "repair_skill",
     "repair_skill": "repair_skill",
     "ask": "ask_user",
     "ask_user": "ask_user",
     "no": "no_repair",
     "skip": "no_repair",
+    "cancel": "no_repair",
     "no_repair": "no_repair",
 }
 
 _APPROVAL_ACTIONS = {
     "yes": True,
     "y": True,
+    "yeah": True,
+    "yep": True,
+    "yup": True,
     "approve": True,
+    "approved": True,
     "ok": True,
+    "okay": True,
+    "sure": True,
+    "confirm": True,
+    "affirmative": True,
+    "go ahead": True,
+    "do it": True,
     "no": False,
     "n": False,
+    "nope": False,
     "deny": False,
+    "denied": False,
+    "cancel": False,
     "skip": False,
+    "never mind": False,
+    "nevermind": False,
+    "dont": False,
+    "don't": False,
+    "stop": False,
 }
 
 #: An owner target is `(platform, chat_id)`.
 Target = tuple[str, str]
+
+#: Characters stripped from the edges of a spoken reply before matching an
+#: action. STT emits sentence punctuation the fixed vocabulary does not carry
+#: ("Approve.", "Yes."), so a bare `in _APPROVAL_ACTIONS` lookup silently misses.
+_ACTION_PUNCT = " \t\r\n.,!?;:\"'()[]{}"
+
+
+def _normalize_action(text: str) -> str:
+    """Normalize a spoken reply into a command-vocabulary key.
+
+    Speech-to-text appends sentence punctuation ("Approve.", "Yes.") that the
+    fixed `_REPAIR_ACTIONS` / `_APPROVAL_ACTIONS` maps do not carry, so an exact
+    lookup drops a perfectly clear answer into `submit_request` and the pending
+    approval times out. Lowercase, strip edge whitespace/punctuation, then fall
+    back to the first word so "yes please" / "approve it" match. Returns "" for
+    empty input. This stays a deterministic command vocabulary — no model.
+    """
+    cleaned = (text or "").strip().lower().strip(_ACTION_PUNCT)
+    if not cleaned:
+        return ""
+    if cleaned in _REPAIR_ACTIONS or cleaned in _APPROVAL_ACTIONS:
+        return cleaned
+    first = cleaned.split(None, 1)[0]
+    return first.strip(_ACTION_PUNCT)
 
 
 def _result_detail(text: str) -> str:
@@ -304,6 +348,10 @@ class GatewayService:
             platform = self.platforms[0] if self.platforms else ""
         with self._route_lock:
             reply_to: Target = (platform, msg.chat_id)
+            #: A single command-vocabulary key for this reply (punctuation- and
+            #: case-insensitive), so a spoken "Approve." / "Yes." matches the
+            #: approval and repair maps exactly like a typed "yes".
+            action = _normalize_action(msg.text)
             pending = self.scheduler.pending
             if pending is not None and self._pending_owner is None:
                 self._pending_owner = self._owner_from_source(pending.request.source)
@@ -329,15 +377,16 @@ class GatewayService:
                 status, detail = self.scheduler.answer_question(question_id, msg.text)
                 self._surfaced.add(question_id)
                 self._reply(*reply_to, detail, kind="notice")
-            elif reply_to in self._repair_for_chat and msg.text.strip().lower() in _REPAIR_ACTIONS:
+            elif reply_to in self._repair_for_chat and action in _REPAIR_ACTIONS:
                 offer_id = self._repair_for_chat.pop(reply_to)
-                action = _REPAIR_ACTIONS[msg.text.strip().lower()]
-                status, detail = self.scheduler.resolve_repair(offer_id, action)
+                status, detail = self.scheduler.resolve_repair(
+                    offer_id, _REPAIR_ACTIONS[action]
+                )
                 self._surfaced.add(offer_id)
                 self._reply(*reply_to, detail, kind="notice")
-            elif reply_to in self._approval_for_chat and msg.text.strip().lower() in _APPROVAL_ACTIONS:
+            elif reply_to in self._approval_for_chat and action in _APPROVAL_ACTIONS:
                 approval_id = self._approval_for_chat.pop(reply_to)
-                approved = _APPROVAL_ACTIONS[msg.text.strip().lower()]
+                approved = _APPROVAL_ACTIONS[action]
                 status, detail = self.scheduler.answer_approval(approval_id, approved)
                 self._surfaced.add(approval_id)
                 self._reply(*reply_to, detail, kind="notice")
@@ -358,23 +407,34 @@ class GatewayService:
             self.surface(origin=reply_to)
 
     def drain(self) -> None:
-        """Run queued work and route each outcome back to its owner."""
+        """Run queued work and route each outcome back to its owner.
+
+        A background drain (the codegen worker's post-authoring re-run, a repair
+        retry) buffers its replies in the scheduler outbox; route those first so
+        an off-gate completion still reaches the chat, then drain the queue.
+        """
+        drain_outbox = getattr(self.scheduler, "drain_outbox", None)
+        if callable(drain_outbox):
+            self._route(drain_outbox())
         for _ in range(100):
             results = self.scheduler.run_queue()
             if not results:
                 break
-            for reply in results:
-                if self._hidden(reply):
-                    continue
-                owner = self._owner_of(reply.run_id)
-                if reply.status == "needs_input" and owner:
-                    self._pending_owner = owner
-                target = owner or self._fallback_target()
-                if target:
-                    self._reply(
-                        *target, reply.text, kind=_reply_kind(reply.status),
-                        skill_ref=reply.skill_ref, result=reply.result,
-                    )
+            self._route(results)
+
+    def _route(self, results) -> None:
+        for reply in results:
+            if self._hidden(reply):
+                continue
+            owner = self._owner_of(reply.run_id)
+            if reply.status == "needs_input" and owner:
+                self._pending_owner = owner
+            target = owner or self._fallback_target()
+            if target:
+                self._reply(
+                    *target, reply.text, kind=_reply_kind(reply.status),
+                    skill_ref=reply.skill_ref, result=reply.result,
+                )
 
     def _hidden(self, reply) -> bool:
         """Hide an intermediate chain step at `result` verbosity.

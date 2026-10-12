@@ -502,9 +502,13 @@ def _print_reply(reply, show_run_id: bool = False, verbosity: str = "result") ->
 
 
 def _drain_queue(scheduler: Scheduler) -> None:
-    """Run queued work, printing each outcome with its run id."""
+    """Run queued work, printing each outcome with its run id.
+
+    Routes any replies a background drain buffered (a post-authoring re-run, a
+    repair retry) before the queued work, so an off-gate completion still prints.
+    """
     verbosity = getattr(scheduler, "verbosity", "result")
-    for reply in scheduler.run_queue():
+    for reply in [*scheduler.drain_outbox(), *scheduler.run_queue()]:
         _print_reply(reply, show_run_id=True, verbosity=verbosity)
 
 
