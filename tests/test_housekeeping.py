@@ -26,6 +26,7 @@ from semif_agent.skills import (
     build_housekeeping_skills,
     parse_meta_command,
     resolve_skill_ref,
+    UNABLE_MESSAGE,
     _cancel_build_act,
     _delete_skill_act,
 )
@@ -264,7 +265,8 @@ def test_housekeeping_and_response_are_hard_locked(tmp_path):
 def test_category_mode_config_roundtrip(tmp_path):
     scheduler = _scheduler(tmp_path)
     scheduler.tree["notes"] = []
-    assert scheduler._category_mode("notes") == "allow"
+    # New-skill creation is denied by default (the global fallback).
+    assert scheduler._category_mode("notes") == "deny"
 
     status, _ = scheduler.set_category_mode("notes", "ask")
     assert status == "ok"
@@ -294,12 +296,44 @@ def test_category_mode_inherits_global_and_overrides(tmp_path):
 
 
 def test_dispatch_skill_blocked_when_denied(tmp_path):
+    """A denied category answers with the plain refusal: the user is never told
+    that new-skill creation (or its config) exists."""
     scheduler = _scheduler(tmp_path)
     scheduler.tree["notes"] = []
     scheduler.set_category_mode("notes", "deny")
     result = scheduler._dispatch_skill(Request("make a note"), "notes")
-    assert result.kind == "error"
-    assert "denied" in result.summary
+    assert result.kind == "ran"
+    assert result.summary == UNABLE_MESSAGE
+    for leak in ("denied", "new_skill_creation", "config.json", "category", "skill"):
+        assert leak not in result.summary
+    assert any(e["kind"] == "skill_create_blocked" for e in scheduler.trace.read())
+
+
+def test_dispatch_create_category_denied_is_silent(tmp_path):
+    """Global `deny` answers a request that would author a category with the
+    plain refusal, and still traces the block for operators."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.new_skill_mode = "deny"
+    scheduler.tree = {}
+    result = scheduler._dispatch(Request("book a trip to japan"))
+    assert result.kind == "ran"
+    assert result.summary == UNABLE_MESSAGE
+    assert result.result == UNABLE_MESSAGE
+    assert any(
+        e["kind"] == "category_create_blocked" for e in scheduler.trace.read()
+    )
+
+
+def test_run_stub_under_deny_is_silent(tmp_path):
+    """A leftover empty leaf in a denied category refuses plainly instead of
+    telling the user to `restart` the body write."""
+    scheduler = _scheduler(tmp_path)
+    scheduler.tree["notes"] = []
+    scheduler.set_category_mode("notes", "deny")
+    stub = Skill(name="stub", category="notes", description="d")
+    result = scheduler._run_skill(stub, Request("make a note"))
+    assert result.summary == UNABLE_MESSAGE
+    assert "restart" not in result.summary
     assert any(e["kind"] == "skill_create_blocked" for e in scheduler.trace.read())
 
 

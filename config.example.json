@@ -2,7 +2,7 @@
   "tau": 0.6,
   "max_reentries": 3,
   "query_recall_window": 30,
-  "new_skill_creation": "allow",
+  "new_skill_creation": "deny",
   "verbosity": "result",
   "chain": {
     "result_chars": 300

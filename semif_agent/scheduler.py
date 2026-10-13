@@ -47,6 +47,7 @@ from .skills import (
     DETERMINISTIC_CATEGORIES,
     HARD_LOCKED_CATEGORIES,
     HOUSEKEEPING_CATEGORY,
+    UNABLE_MESSAGE,
     ActionContext,
     CategoryRegistry,
     CreateCategory,
@@ -73,9 +74,10 @@ from .skills import (
 from .trace import TraceLog
 
 #: The tri-state governing whether a new skill (or category) may be authored.
-#: `allow` authors immediately, `deny` blocks creation outright, and `ask`
-#: authors only after the human approves the proposal. Set globally with the
-#: top-level `new_skill_creation` config value and overridden per category in
+#: `allow` authors immediately, `deny` blocks creation outright (the default —
+#: the agent leans on the committed packs), and `ask` authors only after the
+#: human approves the proposal. Set globally with the top-level
+#: `new_skill_creation` config value and overridden per category in
 #: `data/skills/<category>/config.json` (same key).
 NEW_SKILL_MODES = ("allow", "deny", "ask")
 
@@ -365,10 +367,11 @@ class Scheduler:
         #: re-run that completes off the gate still reaches the chat instead of
         #: being swallowed. Bounded like the request queue.
         self._outbox: deque[SchedulerReply] = deque(maxlen=256)
-        #: Global new-skill creation mode: "allow" (default), "deny", or "ask".
-        #: A category may override it in its category config.
+        #: Global new-skill creation mode: "deny" (default), "allow", or "ask".
+        #: A category may override it in its category config. Deny by default
+        #: keeps the agent on the committed packs; live authoring is an opt-in.
         self.new_skill_mode = (
-            normalize_new_skill_mode(config.get("new_skill_creation")) or "allow"
+            normalize_new_skill_mode(config.get("new_skill_creation")) or "deny"
         )
         fidelity_cfg = codegen_cfg.get("fidelity", {}) or {}
         self.fidelity_enabled = bool(fidelity_cfg.get("enabled", True))
@@ -898,38 +901,42 @@ class Scheduler:
     def _blocked_create(
         self, request: Request, category: str | None
     ) -> DispatchResult:
-        """Report that a denied category (or a denied category creation) will
-        not author."""
+        """A denied create door: the request cannot be served.
+
+        The block is a deterministic operator fact (traced), but the user is
+        never told about authoring: with `new_skill_creation` set to `deny`, a
+        request no existing skill covers gets the same plain refusal a closed
+        tree would give — no category, skill, or config detail leaks into the
+        reply. `category is None` is a denied new top-level category; otherwise
+        it is a denied new leaf inside `category`.
+        """
         if category is None:
             self.trace.append("category_create_blocked", request.id)
-            return DispatchResult(
-                kind="error",
-                summary=(
-                    "cannot create a new category: new-skill creation is denied "
-                    '(set new_skill_creation to "allow" or "ask" in config.json)'
-                ),
-            )
-        self.trace.append("skill_create_blocked", request.id, category=category)
+        else:
+            self.trace.append("skill_create_blocked", request.id, category=category)
         return DispatchResult(
-            kind="error",
-            summary=(
-                f"cannot create a new skill in {category}: new-skill creation "
-                f'is denied (set new_skill_creation to "allow" or "ask" in '
-                f"data/skills/{category}/config.json, or globally in config.json)"
-            ),
+            kind="ran",
+            summary=UNABLE_MESSAGE,
+            result=UNABLE_MESSAGE,
         )
 
     def _run_skill(self, skill: Skill, request: Request) -> DispatchResult:
-        if skill.writing:
-            return DispatchResult(
-                kind="error",
-                summary=(
-                    f"skill {skill.name} body is still being written; "
-                    "it will run when ready."
-                ),
-                skill=skill.name,
-            )
-        if skill.is_noop():
+        if skill.writing or skill.is_noop():
+            # A leftover in-progress/empty leaf in a denied category has no
+            # authoring path back to a runnable body, so it gets the same plain
+            # refusal as any other unservable request — never a "restart it with
+            # `restart ...`" hint that exposes the authoring machinery.
+            if self._category_locked(skill.category):
+                return self._blocked_create(request, skill.category)
+            if skill.writing:
+                return DispatchResult(
+                    kind="error",
+                    summary=(
+                        f"skill {skill.name} body is still being written; "
+                        "it will run when ready."
+                    ),
+                    skill=skill.name,
+                )
             return DispatchResult(
                 kind="error",
                 summary=(

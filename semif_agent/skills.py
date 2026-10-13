@@ -723,6 +723,13 @@ _CANNED_RESPONSES = [
 
 _RESPONSE_MESSAGES = {f"response.{name}": message for name, _, message in _CANNED_RESPONSES}
 
+#: The deterministic reply when new-skill creation is denied and no existing
+#: skill can serve the request. Unlike the `response` tree this is never
+#: navigable: it is reached only from the scheduler's deny gate. The user is
+#: deliberately never told that authoring (or config) exists — the request
+#: simply cannot be served.
+UNABLE_MESSAGE = "I'm sorry, I'm not able to help with that."
+
 # Built-in category descriptions. Authored categories carry their own
 # description from the registry, and pack categories carry theirs from the
 # pack manifest (`packs/<name>/pack.json` -> `categories`); this dict is only

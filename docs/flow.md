@@ -216,6 +216,7 @@ confirm is skipped; the **leaf** intent guard is never bypassed (the leaf softma
 has no create option, so a confident winner is only the closest existing skill,
 never a match) — it always runs and can reject into create.
 New-skill creation is gated deterministically by the tri-state
-`new_skill_creation` mode — global default (`allow` / `deny` / `ask`) with a
+`new_skill_creation` mode — global default `deny` (opt in with `allow`, or
+`ask` for approval-gated authoring) with a
 per-category override in `data/skills/<category>/config.json`; the
 `housekeeping` and `response` categories are always `deny` in code.

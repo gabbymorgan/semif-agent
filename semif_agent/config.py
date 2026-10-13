@@ -39,10 +39,12 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                          'type': 'int',
                          'doc': "Seconds a completed run's ledger stays recallable for a follow-up "
                                 'in the same chat (0 disables).'},
- 'new_skill_creation': {'default': 'allow',
+ 'new_skill_creation': {'default': 'deny',
                         'type': 'str',
-                        'doc': 'Global tri-state new-skill mode: allow | deny | ask (a category '
-                               'config overrides it).'},
+                        'doc': 'Global tri-state new-skill mode: deny (default) | allow | ask (a '
+                               'category config overrides it). Deny by default: the agent leans on '
+                               'the committed packs, and a host opts in to live skill authoring by '
+                               'setting allow.'},
  'verbosity': {'default': 'result',
                'type': 'str',
                'doc': 'REPL reply verbosity: result | query | decision.'},

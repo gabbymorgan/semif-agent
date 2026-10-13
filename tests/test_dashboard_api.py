@@ -34,6 +34,9 @@ def build_scheduler(tmp_path, engine=None):
         log=log,
         config={
             "skills": {},
+            # Dashboard mechanics tests exercise the authoring path, an opt-in
+            # now that new-skill creation is denied by default.
+            "new_skill_creation": "allow",
             "skill_packs": str(tmp_path / "seeds"),
             "skill_bodies": str(tmp_path / "skills"),
             "category_registry": str(tmp_path / "categories.json"),

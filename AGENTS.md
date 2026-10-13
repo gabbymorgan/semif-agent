@@ -10,8 +10,11 @@ basic task in plain language, and it does it:
 1. The user asks for a task ("check my email", "message Sam on SimpleX", "put
    lunch with Dana on my Nextcloud calendar").
 2. If the skill tree already knows how, the agent does it.
-3. If it does not, the agent asks the user a few questions about what they want
-   and how it should connect, generates a new skill, and then does it.
+3. If it does not, the agent says it cannot help — unless the host has opted in
+   to live skill authoring (the default is **deny**; see "New-skill creation
+   mode" below), in which case it asks a few questions and generates a new skill.
+   The primary way to extend the agent is the committed **skill packs**
+   (`packs/`), not runtime authoring.
 4. It performs the task for real, against the user's actual service. If the
    real attempt fails, it says so and offers to fix/learn. It never pretends a
    task succeeded.
@@ -113,7 +116,8 @@ scheduler.py    no up-front gate: every input is dispatched
                 monotonic-progress guard;
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
                 operate on the tree via `ctx.admin`; new-skill creation is gated by
-                a tri-state mode (`new_skill_creation`: allow/deny/ask) with a
+                a tri-state mode (`new_skill_creation`: deny/allow/ask, **deny by
+                default**) with a
                 per-category override in the category config, with
                 `housekeeping`/`response` always denied in code; front ends get a
                 structured `SchedulerReply` (status, text, run_id, skill_ref,
@@ -479,7 +483,10 @@ CLI, unit tests (24) + integration tests (2).
   softmax), and the scope guard is deliberately permissive. A request no skill
   covers (e.g. "what is 255 * 12?") authors instead of getting a canned reply,
   while a stray statement (e.g. "1+1=2") or a vague fragment (e.g. "what") still
-  gets one. All three taus are
+  gets one — **unless new-skill creation is denied** (see the tri-state mode
+  below), in which case an unservable request gets a plain refusal
+  (`skills.UNABLE_MESSAGE`, "I'm sorry, I'm not able to help with that.") and is
+  never told that authoring exists. All three taus are
   separate from the top-level `tau`, so tuning reuse-vs-create or actionability
   does not move assessment/fidelity. The guards are deliberately permissive
   (in-scope scores 0.9–1.0): a borderline over-cover routes into a plausible
@@ -497,24 +504,31 @@ CLI, unit tests (24) + integration tests (2).
   runs at the top of navigation and sends a request to authoring (this is what
   keeps "what is 255 * 12?" out of the tree; the old
   `response.unable` canned refusal is gone — an unsupported request authors a
-  skill, it is not refused). A fragment too vague/incomplete to act on (e.g.
-  "what") is non-action, so it lands on the catchall `response.clarify` rather
-  than authoring a redundant clarify skill. `response` is a `CANNED_CATEGORIES` member:
+  skill, it is not refused, **except under `new_skill_creation: deny`, where it
+  gets the plain `UNABLE_MESSAGE` refusal**). A fragment too vague/incomplete to
+  act on (e.g. "what") is non-action, so it lands on the catchall
+  `response.clarify` rather than authoring a redundant clarify skill. `response`
+  is a `CANNED_CATEGORIES` member:
   `navigate` never offers `create_skill` there (the intent guard is skipped
   too), `Scheduler._dispatch_skill`/`restart_skill` refuse to author it, and the
   runner skips `assess:outcome`/repair for it — a canned line has no side effect
   to assess. The leaf choice logs phase `navigate:response` and traces
   `response_selected`. `response.reject` (a stub that never ran) is gone.
-- **New-skill creation mode: allow / deny / ask** (Oct 2026; tri-state Oct 2026):
-  one setting governs whether the agent may author new skills/categories, as a
-  three-way mode. **Global default** is the top-level `new_skill_creation`
-  (`"allow"` default, `"deny"`, or `"ask"`); a category overrides it with its
-  own `new_skill_creation` in `data/skills/<category>/config.json` (absent =
-  inherit the global). `allow` authors immediately; `deny` blocks authoring
+- **New-skill creation mode: deny / allow / ask** (Oct 2026; tri-state Oct 2026;
+  deny-by-default Oct 2026): one setting governs whether the agent may author new
+  skills/categories, as a three-way mode. **Global default** is the top-level
+  `new_skill_creation` — **`"deny"` by default** (the agent leans on the
+  committed packs, the primary way to extend functionality), with `"allow"` an
+  explicit opt-in for a host with the resources, or `"ask"`; a category overrides
+  it with its own `new_skill_creation` in `data/skills/<category>/config.json`
+  (absent = inherit the global). `allow` authors immediately; `deny` blocks authoring
   outright (`Scheduler._blocked_create`, traced `skill_create_blocked` /
-  `category_create_blocked`); `ask` authors only after the human approves the
-  proposal. The `ask` path is the old approval gate: the single-slot `llm` draft
-  worker blocks after it authors a proposal and before anything is registered;
+  `category_create_blocked`) **and answers the request with a plain refusal**
+  (`skills.UNABLE_MESSAGE`) that never names a category, skill, or config — a
+  denied deployment gives no hint that authoring exists; `ask` authors only
+  after the human approves the proposal. The `ask` path is the old approval
+  gate: the single-slot `llm` draft worker blocks after it authors a proposal
+  and before anything is registered;
   the human approves/denies via the REPL prompt, the dashboard approvals panel
   (`GET/POST /api/approvals`), or a gateway chat reply (`yes`/`no`). One prompt
   per creation request — a new category's chained skill is covered by the

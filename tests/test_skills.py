@@ -141,6 +141,9 @@ def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosit
     SemIf decision now, so a run needs the engine to answer `assess:*`."""
     config = {
         "skills": {},
+        # Most mechanics tests exercise the authoring path, which is an opt-in
+        # now that new-skill creation is denied by default.
+        "new_skill_creation": "allow",
         "category_registry": str(tmp_path / "categories.json"),
         "skill_bodies": str(tmp_path / "skills"),
         "skill_packs": str(tmp_path / "seeds"),
@@ -1165,6 +1168,7 @@ def test_dispatch_action_tau_controls_catchall_routing(tmp_path):
             log=DecisionLog(str(tmp_path / "decisions.jsonl")),
             config={
                 "skills": {},
+                "new_skill_creation": "allow",
                 "navigation": {"action_tau": action_tau},
                 "category_registry": str(tmp_path / "categories.json"),
                 "skill_bodies": str(tmp_path / "skills"),
@@ -1209,6 +1213,7 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
             log=DecisionLog(str(tmp_path / "decisions.jsonl")),
             config={
                 "skills": {},
+                "new_skill_creation": "allow",
                 "navigation": {"intent_tau": intent_tau},
                 "category_registry": str(tmp_path / "categories.json"),
                 "skill_bodies": str(tmp_path / "skills"),
@@ -1348,6 +1353,7 @@ def test_dispatch_confident_leaf_winner_still_runs_intent_guard(tmp_path):
         log=DecisionLog(str(tmp_path / "decisions.jsonl")),
         config={
             "skills": {},
+            "new_skill_creation": "allow",
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
             "skill_packs": str(tmp_path / "seeds"),
@@ -1394,6 +1400,7 @@ def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
         log=log,
         config={
             "skills": {},
+            "new_skill_creation": "allow",
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
             "skill_packs": str(tmp_path / "seeds"),
@@ -1433,13 +1440,31 @@ def _answer_approval_when_posted(scheduler, approved, timeout=5.0):
     return False
 
 
-def test_creation_mode_allow_proceeds(tmp_path):
-    """The default (`new_skill_creation` unset -> allow) leaves creation
-    unchanged: the gate returns immediately and posts nothing."""
-    scheduler = _scheduler(tmp_path)
+def test_creation_mode_defaults_to_deny_and_allow_opts_in(tmp_path):
+    """New-skill creation is denied by default (the agent leans on the committed
+    packs); a host opts in by setting `new_skill_creation: allow`."""
+    # Unset -> deny: the gate aborts without prompting.
+    unset = Scheduler(
+        engine=ScriptedEngine(),
+        llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
+        log=DecisionLog(str(tmp_path / "decisions.jsonl")),
+        config={
+            "skills": {},
+            "category_registry": str(tmp_path / "categories.json"),
+            "skill_bodies": str(tmp_path / "skills"),
+            "skill_packs": str(tmp_path / "seeds"),
+        },
+        trace=TraceLog(str(tmp_path / "runs.jsonl")),
+    )
+    assert unset.new_skill_mode == "deny"
     job = DraftAuthor(
         request=Request("book a trip"), category=None, kind="category"
     )
+    assert unset._request_approval(job, "category", "travel", "Trips.") is False
+
+    # Explicit allow: the gate returns immediately and posts nothing.
+    scheduler = _scheduler(tmp_path)
+    assert scheduler.new_skill_mode == "allow"
     assert scheduler._request_approval(job, "category", "travel", "Trips.") is True
     assert scheduler.pending_approvals() == []
 
