@@ -87,12 +87,13 @@ A stdlib-only Python script that:
   Assert the server actually received the expected request (method, path,
   headers, body) where practical. The loopback address exists only in the test;
   the body must read its endpoint from config.
-- For a messaging skill (a body that talks to a bridge service), stand up a
-  loopback server implementing the bridge endpoints the body uses (the bridge
-  catalog injected into this prompt lists them) and assert the body built the
-  real requests. If the catalog names an auth header, set the fixture token in
-  the fixture config and assert the body sent that header. Never connect to a
-  real service daemon or a live bridge.
+- For a body that talks to a bridge service (or any fixed HTTP API), stand up a
+  loopback server implementing the endpoints the body uses (the bridge catalog
+  injected into this prompt lists a bridge's; for a direct HTTP API, mirror the
+  routes the body calls) and assert the body built the real requests. If the
+  catalog names an auth header, set the fixture token in the fixture config and
+  assert the body sent that header. Never connect to a real service daemon or a
+  live bridge.
 - For non-HTTP transports (IMAP, SMTP, subprocess, ...), exercise config
   resolution, argument construction, and error paths (missing or misconfigured
   values) without performing the real I/O.

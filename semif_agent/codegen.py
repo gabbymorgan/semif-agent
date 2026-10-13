@@ -140,17 +140,21 @@ BODY_DIRECTIVES = (
     "body.\n"
     "Declare the integration as a module-level `INTEGRATION` dict exactly as "
     "CODEGEN.md specifies: service, transport, config_vars.\n"
-    "If this skill interacts with one of the available bridge services listed "
-    "below, call that bridge over HTTP with the URL from its config variable — "
-    "never speak the service's native protocol directly (no WebSocket to "
-    "simplex-chat, no direct daemon access). Whenever you have a set of "
+    "To reach a service, call its HTTP API directly with a stdlib transport "
+    "when it is a plain HTTP API; use one of the bridge services listed below "
+    "when the service needs state/auth, a native or heavy protocol, or a "
+    "sanitized surface — and when a bridge fronts a service, call the bridge "
+    "over HTTP with the URL from its config variable rather than reaching "
+    "around it (no WebSocket to simplex-chat, no direct daemon access, no "
+    "DAV/OCS hand-rolling). Whenever you have a set of "
     "candidates to choose from (contacts, conversations, calendars, targets), "
     "employ a `ctx.engine` SemIf sub-decision over them and return the "
     "`(DecisionRequest, DecisionResult)` pairs on `ActionResult.decisions`; "
     "send only when the reusable goal calls for it.\n"
     "Keep the body small: it is ingested whole by the decision engine's "
-    "fidelity check, so delegate protocol details to a bridge instead of "
-    "hand-rolling them, and keep `act` to one purpose.\n"
+    "fidelity check, so delegate complex protocol details to a bridge instead "
+    "of hand-rolling them (a simple HTTP call needs no bridge), and keep `act` "
+    "to one purpose.\n"
 )
 
 
@@ -661,7 +665,7 @@ def _retry_prompt(
         guidance = (
             "The previous attempt was too long to fit the decision engine's "
             "context. Emit a SHORTER body: keep `act` minimal and delegate "
-            "protocol details to a bridge.\n"
+            "complex protocol details to a bridge.\n"
         )
     else:
         guidance = "You are looping; emit the final Python now.\n"

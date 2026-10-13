@@ -80,9 +80,12 @@ def describe_bridges() -> str:
     bridge needs to be running or enabled.
     """
     lines = [
-        "Available bridge services (call these over HTTP with urllib.request; "
-        "never speak a service's native protocol directly; read every value "
-        "from ctx.config):",
+        "Available bridge services — call a service's own HTTP API directly "
+        "when it is a plain HTTP API; use one of these bridges when the service "
+        "needs state/auth, a native or heavy protocol, or a sanitized surface. "
+        "For a service a bridge fronts, call the bridge over HTTP with "
+        "urllib.request rather than reaching around it; read every value from "
+        "ctx.config:",
     ]
     for info in known_infos():
         lines.append(f"- {info.name} (service: {info.service}): {info.description}")

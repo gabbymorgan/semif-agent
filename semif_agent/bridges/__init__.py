@@ -2,13 +2,14 @@
 
 A **bridge service** is a standalone process that exposes one third-party system
 (SimpleX, the local language model, Nextcloud, Microsoft Graph / Outlook, a real
-web browser via Playwright) to
-codegen-authored skill bodies
-over a local, token-guarded HTTP API. It exists so a generated body never speaks
-a system's native protocol (WebSocket, SMTP, CalDAV, an OpenAI-compatible chat
-API, a CLI's private flags) directly: it calls a small, documented, uniform HTTP
-surface instead, and the bridge owns the messy integration details and
-credentials.
+web browser via Playwright) to codegen-authored skill bodies over a local,
+token-guarded HTTP API. A skill body can call a plain HTTP API directly; a
+bridge is a deliberate choice for a system that needs state (especially auth
+state), a native or heavy protocol, or one sanitized surface. When a bridge
+fronts a service, a generated body never speaks that system's native protocol
+(WebSocket, SMTP, CalDAV, an OpenAI-compatible chat API, a CLI's private flags)
+directly: it calls a small, documented, uniform HTTP surface instead, and the
+bridge owns the messy integration details and credentials.
 
 Two boundaries matter:
 

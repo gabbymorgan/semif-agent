@@ -1715,7 +1715,8 @@ def test_skill_contract_documents_bridge_pattern_only():
     text = read_skill_contract()
     # The generic pattern lives in CODEGEN.md; the bridge specifics do not.
     assert "describe_bridges()" in text
-    assert "never speak a service's native protocol" in text
+    assert "plain HTTP API" in text
+    assert "reach around it to the service's native protocol" in text
     assert "simplex_bridge_url" not in text
     assert "/inbox/next" not in text
     assert "X-Semif-Token" not in text
@@ -1723,7 +1724,8 @@ def test_skill_contract_documents_bridge_pattern_only():
 
 def test_body_directives_expose_bridge_services():
     assert "bridge services" in BODY_DIRECTIVES
-    assert "never speak the service's native protocol" in BODY_DIRECTIVES
+    assert "plain HTTP API" in BODY_DIRECTIVES
+    assert "rather than reaching around it" in BODY_DIRECTIVES
 
 
 def test_body_prompts_require_real_action_and_integration():

@@ -354,8 +354,9 @@ fine-tuning loop — it is not yet the fine-tune itself.
 - **Messenger command gateway (SimpleX + LXMF)** — take commands and reply over DM.
 - **Voice gateway** — a local microphone front end: wake word + speech-to-text +
   text-to-speech, all local (openWakeWord / faster-whisper / Piper).
-- **Standalone bridge services** — a token-guarded localhost HTTP layer in front
-  of third-party systems, so generated bodies never speak native protocols.
+- **Standalone bridge services** — an optional token-guarded localhost HTTP
+  layer for third-party systems that need state/auth, a native protocol, or a
+  sanitized surface; a plain HTTP API is called directly.
 - **Seeds** — shipped real starter skills: `nextcloud.create_event` (the
   authoritative worked example), `nextcloud.next_event` (Nextcloud CalDAV),
   `nextcloud.create_task` (Nextcloud task list),
@@ -748,9 +749,11 @@ python -m semif_agent.cli gateway --platform voice
 
 `cli bridge` runs standalone bridges: each is a process that stands up a small,
 token-guarded localhost HTTP API in front of one third-party system (and, where
-the system needs one, owns its own daemon/profile). Generated skill bodies call
-them like any HTTP service (base URL from a config var), so they never speak a
-native protocol directly.
+the system needs one, owns its own daemon/profile). A bridge is a deliberate
+choice for a system that needs state (especially auth state), a native or heavy
+protocol, or one sanitized surface — a skill may call a plain HTTP API directly.
+When a bridge fronts a service, generated skill bodies call it like any HTTP
+service (base URL from a config var) and never speak the native protocol.
 
 The first bridge is **SimpleX** (`semif_agent/bridges/simplex.py`), with its own
 simplex-chat daemon separate from the gateway's. Its HTTP surface:

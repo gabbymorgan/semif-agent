@@ -739,7 +739,7 @@ def test_describe_bridges_renders_service_auth_and_endpoints():
     assert "/inbox/next" in text
     assert "/unread" in text
     assert "/history" in text
-    assert "never speak" in text
+    assert "rather than reaching around it" in text
 
 
 def test_read_marks_given_items_only():

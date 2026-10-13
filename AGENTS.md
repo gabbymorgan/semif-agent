@@ -1514,8 +1514,12 @@ CLI, unit tests (24) + integration tests (2).
 ### bridges (third-party API services)
 
 - **What they are.** A bridge service is a standalone process that stands up a
-  simple, secure localhost HTTP layer in front of one third-party system so a
-  codegen-authored skill body never speaks that system's native protocol.
+  simple, secure localhost HTTP layer in front of one third-party system,
+  warranted when the system needs state (especially auth state), a native or
+  heavy protocol, or one sanitized surface; a system with a plain HTTP API needs
+  no bridge — its skill calls the API directly. When a bridge fronts a service, a
+  codegen-authored skill body calls the bridge and never speaks that system's
+  native protocol.
   SimpleX is the first; adding a service means adding a class to
   `bridges/registry.py` `CATALOG`, a `pack.json` whose `config` schema carries
   its block (see `semif_agent/packs.py`; a shared, skill-less bridge like the

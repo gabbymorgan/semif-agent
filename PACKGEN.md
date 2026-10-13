@@ -35,8 +35,10 @@ Three boundaries must stay crisp:
 - A **skill** is one leaf action (`packs/<name>/skills/<category>/<leaf>/`),
   governed by `CODEGEN.md`/`TESTGEN.md`. A pack contains skills; it is not one.
 - A **bridge** is a standalone process in front of a third-party system
-  (`semif_agent/bridges/`). A pack *references* a bridge by name; it never
-  contains bridge code.
+  (`semif_agent/bridges/`), warranted when the system needs state (especially
+  auth state), a native or heavy protocol, or one sanitized surface; a system
+  with a plain HTTP API needs no bridge — its skill calls the API directly. A
+  pack *references* a bridge by name; it never contains bridge code.
 - A pack is **declarative structure** and is committed. Per-machine values are
   the split config; credentials live in `secrets.json`. A committed pack never
   holds a secret.
@@ -181,7 +183,9 @@ authored into one — and stops its bridge. The switch lives in the pack's
 ## Referencing a bridge by name
 
 A pack whose skills talk to a third-party system lists that bridge in
-`bridges` and carries its config block in `config`. The bridge itself is a
+`bridges` and carries its config block in `config`. (A pack whose skills reach a
+plain HTTP API directly needs no bridge: `bridges` stays empty and each leaf
+declares the endpoint in its own `CONTRACT`.) The bridge itself is a
 class in `semif_agent/bridges/` registered in `bridges/registry.py` `CATALOG`.
 Its `BridgeInfo` (name, service, description, URL config var, other config
 vars, auth header, endpoints) is injected into every codegen prompt via
@@ -206,8 +210,11 @@ Rules:
 ## Authoring a new bridge
 
 A **bridge** is a standalone process that stands up a simple, secure localhost
-HTTP layer in front of one third-party system, so a skill body never speaks
-that system's native protocol. Adding a service means:
+HTTP layer in front of one third-party system. Author one when a skill body
+cannot sanely talk to the system itself — because it holds auth/session state,
+needs a native or heavy protocol, or should be reached through one sanitized
+surface. A system with a plain HTTP API needs no bridge: its skill calls the API
+directly. Adding a bridge means:
 
 1. **Write the bridge class** in `semif_agent/bridges/<name>.py`, subclassing
    `BridgeService` (`semif_agent/bridges/base.py`). Set the `name` attribute and
@@ -360,8 +367,10 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/`.
 
 1. Decide the concern and the category ids; write navigation-grade category
    descriptions.
-2. If a third-party system is involved and no bridge fronts it, author the
-   bridge first (see "Authoring a new bridge") and register it in `CATALOG`.
+2. If a third-party system is involved and it needs state/auth, a native or
+   heavy protocol, or one sanitized surface, author a bridge first (see
+   "Authoring a new bridge") and register it in `CATALOG`. A system with a plain
+   HTTP API needs no bridge — the skill calls it directly.
 3. Create `packs/<name>/pack.json` with `name`, `title`, `concern`,
    `categories`, `bridges` (if any), `requires`, `enabled_by_default`, and the
    `config` schema.
