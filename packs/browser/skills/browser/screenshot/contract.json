@@ -1,4 +1,0 @@
-{
-  "browser_bridge_url": "Base URL of the local browser bridge, e.g. http://127.0.0.1:5232 (no trailing slash needed).",
-  "browser_bridge_token": "Shared secret for the browser bridge, if one is configured; sent as the X-Semif-Token header. Leave blank when the bridge requires no auth."
-}

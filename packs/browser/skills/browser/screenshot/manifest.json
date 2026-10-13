@@ -1,3 +1,0 @@
-{
-  "description": "Take a screenshot of a web page (a URL in the request, or the page the browser is already on) through the browser bridge and report the saved file."
-}

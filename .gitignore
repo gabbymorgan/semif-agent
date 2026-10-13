@@ -21,3 +21,6 @@ secrets.json
 local/
 *.egg-info/
 *.bak.*
+# Skill packs live in their own repositories (one per pack) and are cloned into
+# packs/<name>/ at setup. They are not tracked here. See PACKGEN.md.
+packs/
