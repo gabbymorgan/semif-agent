@@ -434,6 +434,12 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
         degeneration_check_factory=make_degeneration_check,
         regen_decision_factory=make_regen_decision,
     )
+    # Bridges ship with their packs; tell the registry which packs this host
+    # loaded so `describe_bridges()` (called from codegen with no config) lists
+    # the real set rather than a default-root scan.
+    from .bridges.registry import set_bridge_packs
+
+    set_bridge_packs(scheduler.packs)
     return scheduler, config
 
 

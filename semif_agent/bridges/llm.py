@@ -60,6 +60,12 @@ class LLMBridge(BridgeService):
         #: the bridge is built without one; calls then report 502, never a guess.
         self.client = client
 
+    @classmethod
+    def from_config(cls, block, config=None, trace=None, llm=None) -> "LLMBridge":
+        # The LLM bridge reuses the scheduler's already-configured `llm` client
+        # (endpoint/model/sampler configured once in the top-level `llm` block).
+        return cls(block, trace=trace, client=llm)
+
     # ---- lifecycle ----
 
     def check_requirements(self) -> tuple[bool, str | None]:

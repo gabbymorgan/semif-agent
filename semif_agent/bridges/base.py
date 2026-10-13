@@ -14,7 +14,18 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+
+def checkout_root() -> Path:
+    """The agent checkout root (anchors gitignored ``.runtime/`` artifacts).
+
+    ``semif_agent/bridges/base.py`` -> repo root. A bridge implementation ships
+    inside its pack (``packs/<name>/bridge/...``), so it must not derive the root
+    from its own ``__file__``; it uses this helper instead.
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,25 @@ class BridgeService(ABC):
         self.trace = trace
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_config(
+        cls,
+        block: dict | None,
+        config: dict | None = None,
+        trace=None,
+        llm=None,
+    ) -> "BridgeService":
+        """Build a bridge from its ``bridges.<name>`` block.
+
+        The registry constructs every bridge through this hook so a bridge that
+        needs more than its own block — the shared LLM client, or a top-level
+        fallback (e.g. Nextcloud's ``nextcloud_*`` values) — can declare that
+        itself instead of the core special-casing it by name. The default passes
+        the block and trace straight through; override in a pack bridge that
+        needs ``llm`` or the full ``config``.
+        """
+        return cls(block, trace=trace)
 
     # ---- lifecycle ----
 

@@ -11,6 +11,12 @@ fronts a service, a generated body never speaks that system's native protocol
 directly: it calls a small, documented, uniform HTTP surface instead, and the
 bridge owns the messy integration details and credentials.
 
+Bridges **ship with their pack**: the core owns only the shared contract
+(``bridges/base.py``) and the discovery registry (``bridges/registry.py``); a
+bridge implementation lives in ``packs/<name>/bridge/`` and is imported by
+convention from the pack that declares it. The one exception is the shared,
+pack-less LLM bridge (``bridges/llm.py``), which many packs call.
+
 Two boundaries matter:
 
 - **Bridges are not the gateway.** The command gateway only takes commands and
@@ -25,14 +31,19 @@ Two boundaries matter:
   and TESTGEN.md carry only the generic pattern.
 """
 
-from .base import BridgeInfo, BridgeService
+from .base import BridgeInfo, BridgeService, checkout_root
 from .inbox import MessagingInbox
 from .registry import (
     build_bridge,
     derived_config_vars,
     describe_bridges,
+    discover_bridge_classes,
     known_infos,
+    load_pack_bridge_class,
+    load_pack_bridge_module,
+    load_pack_bridge_package,
     run_bridges,
+    set_bridge_packs,
 )
 
 __all__ = [
@@ -40,8 +51,14 @@ __all__ = [
     "BridgeService",
     "MessagingInbox",
     "build_bridge",
+    "checkout_root",
     "derived_config_vars",
     "describe_bridges",
+    "discover_bridge_classes",
     "known_infos",
+    "load_pack_bridge_class",
+    "load_pack_bridge_module",
+    "load_pack_bridge_package",
     "run_bridges",
+    "set_bridge_packs",
 ]

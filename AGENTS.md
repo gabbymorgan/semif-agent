@@ -291,43 +291,42 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 `gateway.simplex` / `gateway.lxmf` / `gateway.voice`. The
                 gateway MUST NOT read history, show/create invite links, or
                 compose messages — see "gateway isolation" below.
-bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
-                and Nextcloud). base.py:
-                BridgeInfo + BridgeService (shared localhost JSON HTTP layer,
-                `X-Semif-Token` guard). inbox.py: MessagingInbox (bounded FIFO +
-                contacts learned from inbound DMs and the daemon contact list,
-                bridge-owned read cursor). simplex.py: SimplexBridge —
-                owns its OWN simplex-chat daemon/profile (separate from the
-                gateway's), buffers every inbound DM, refreshes the daemon
-                contact list on (re)connect + on demand, serves invite-link/
-                read/send plus daemon-backed unread + per-chat history.
-                llm.py: LLMBridge — a generic `POST /chat` in front of the
-                scheduler's configured `llm` client (reused, not re-configured),
-                so bodies get short generated text (e.g. an event title +
-                description) over HTTP.
-                nextcloud.py + nextcloud_client.py: NextcloudBridge — files
-                (WebDAV), calendar events + tasks (CalDAV), contacts (CardDAV),
-                and Notes (OCS) behind one JSON surface, so bodies never speak
-                DAV/OCS; no service daemon (stdlib-only), connection from
-                `bridges.nextcloud` with a fallback to the top-level
-                `nextcloud_*` values the nextcloud pack skills use.
-                outlook.py + outlook_client.py: OutlookBridge — the user's
-                Microsoft account (Outlook / Microsoft 365) over Microsoft Graph:
-                mail, calendar events, Microsoft To Do tasks, contacts, and
-                OneDrive files, plus the OAuth2 device-code + refresh flow. No
-                daemon (stdlib-only `urllib`); tokens stored under
-                `.runtime/outlook/token.json` and seeded once with
-                `packs/outlook/scripts/outlook-auth.py`; connection from `bridges.outlook`.
-                browser.py + browser_client.py: BrowserBridge — real browser
-                automation via Playwright (open/read/click/fill/screenshot),
-                owning a persistent browser profile; optional heavy dep
-                (requirements/browser.txt, `bootstrap.sh --browser`), lazy so a
-                missing browser is a per-call 503 and never blocks the other
-                bridges. Runs the async API on one dedicated event-loop thread.
-                registry.py: CATALOG, describe_bridges() (catalog injected
-                into the codegen prompts), run_bridges() (threads the scheduler's
-                `llm` client into the LLM bridge). Run with `python -m
-                semif_agent.cli bridge [--name NAME]`; config under `bridges`.
+bridges/        standalone third-party API bridges. The core keeps only the
+                shared contract + discovery: base.py: BridgeInfo +
+                BridgeService (shared localhost JSON HTTP layer,
+                `X-Semif-Token` guard, `from_config` build hook,
+                `checkout_root()` for `.runtime/` anchoring). inbox.py:
+                MessagingInbox (bounded FIFO + contacts learned from inbound DMs
+                and the daemon contact list, bridge-owned read cursor).
+                llm.py: LLMBridge — the one shared, pack-less bridge (a generic
+                `POST /chat` in front of the scheduler's configured `llm`
+                client, reused not re-configured). registry.py: discovers each
+                bridge from its pack's `bridge/` by convention (no hardcoded
+                CATALOG), describe_bridges() (catalog injected into the codegen
+                prompts), derived_config_vars(), run_bridges() (threads the
+                scheduler's `llm` client through each bridge's `from_config`).
+                The concrete bridges ship with their packs:
+                packs/simplex/bridge/simplex.py (SimplexBridge — owns its OWN
+                simplex-chat daemon/profile, separate from the gateway's,
+                buffers every inbound DM, refreshes the daemon contact list on
+                (re)connect + on demand, serves invite-link/read/send plus
+                daemon-backed unread + per-chat history);
+                packs/nextcloud/bridge/nextcloud.py + nextcloud_client.py
+                (files/WebDAV, calendar events + tasks/CalDAV, contacts/CardDAV,
+                Notes/OCS behind one JSON surface; no daemon, stdlib-only;
+                `from_config` falls back to the top-level `nextcloud_*` values);
+                packs/outlook/bridge/outlook.py + outlook_client.py (Microsoft
+                Graph: mail, calendar, To Do, contacts, OneDrive, plus the
+                OAuth2 device-code + refresh flow; tokens under
+                `.runtime/outlook/token.json`, seeded once with
+                `packs/outlook/scripts/outlook-auth.py`);
+                packs/browser/bridge/browser.py + browser_client.py (Playwright
+                open/read/click/fill/screenshot, owning a persistent browser
+                profile; optional heavy dep, lazy so a missing browser is a
+                per-call 503 and never blocks the other bridges; runs the async
+                API on one dedicated event-loop thread).
+                Run with `python -m semif_agent.cli bridge [--name NAME]`;
+                config under `bridges`.
 simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
                 adapter and the bridge (parse direct text across v7 shapes,
                 structured `/_send`, corrId→Future round-trips, contact-address
@@ -1453,13 +1452,19 @@ CLI, unit tests (24) + integration tests (2).
   needed). `tests/test_simplex_ws.py` covers the neutral protocol layer (parse
   shapes, accept ids, corrId round-trips, address show/create).
   `tests/test_bridges.py`
-  exercises `SimplexBridge` over a real loopback server (peek/pop, recipient
-  resolution, outbound routing, token/body validation, `/address` success/503/502,
-  daemon close on stop, catalog/`describe_bridges()`).
+  covers what stays in the core: the shared LLM bridge (over a real loopback
+  server) and the discovery registry (`known_infos`/`describe_bridges`/
+  `derived_config_vars`).
   `tests/test_packs.py` hermetically tests every
   `packs/<name>/skills/<category>/<leaf>/` package, including `simplex.next_message`,
   `simplex.send_message`, and
-  `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
+  `simplex.connect_link`, and runs every pack's bridge test
+  (`packs/<name>/bridge/test_<bridge>_bridge.py`: the SimpleX bridge over a real
+  loopback server — peek/pop, recipient resolution, outbound routing,
+  token/body validation, `/address` success/503/502, daemon close on stop — and
+  the Nextcloud/Outlook/Browser bridges over a loopback `http.server` with a fake
+  service or driver).
+  `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
   `speak` truncation/failure, adapter + CLI wiring) — no
   hardware, network, or heavy packages. `tests/test_voice_record.py` covers the
@@ -1491,9 +1496,9 @@ CLI, unit tests (24) + integration tests (2).
   `scripts/bootstrap.sh` into the gitignored `packs/<name>/`. The
   manifest binds the pieces that used to be scattered by convention:
   `concern`/`title`, `categories` (id -> scope description, feeding
-  `CATEGORY_DESCRIPTIONS`), `bridges` (names referencing `bridges/registry.py`
-  `CATALOG` — bridge *code* stays in `bridges/`, isolation is non-negotiable),
-  `requires` (optional deps like `playwright`), `enabled_by_default`, and a
+  `CATEGORY_DESCRIPTIONS`), `bridges` (names the pack ships under `bridge/` and
+  talks to; the core registry discovers them by convention), `requires`
+  (optional deps like `playwright`), `enabled_by_default`, and a
   `config` schema. `semif_agent/packs.py` discovers them (`PackRegistry`, which
   scans the `skill_packs` roots for `*/pack.json`; a root with no manifest is one
   implicit pack, so a plain skills directory works) and `merge_packs` loads every
@@ -1524,10 +1529,12 @@ CLI, unit tests (24) + integration tests (2).
   no bridge — its skill calls the API directly. When a bridge fronts a service, a
   codegen-authored skill body calls the bridge and never speaks that system's
   native protocol.
-  SimpleX is the first; adding a service means adding a class to
-  `bridges/registry.py` `CATALOG`, a `pack.json` whose `config` schema carries
-  its block (see `semif_agent/packs.py`; a shared, skill-less bridge like the
-  LLM bridge goes in the core `SHARED_BRIDGE_SCHEMA` instead). The catalog
+  A bridge **ships with its pack**: the pack declares it in `bridges` and ships
+  `packs/<name>/bridge/<name>.py` (+ `bridge/__init__.py` and any sibling client
+  module); the core registry imports it by convention — there is no core
+  `CATALOG` to edit. The one shared, pack-less bridge is the LLM bridge, whose
+  `config` block lives in the core `SHARED_BRIDGE_SCHEMA` (see
+  `semif_agent/packs.py`). The catalog
   (`BridgeInfo`: name, service, description, URL config var, other config vars
   with one-line docs, auth header + token config var, and endpoints with
   request/response/error shapes) is injected into every codegen prompt
@@ -1544,7 +1551,7 @@ CLI, unit tests (24) + integration tests (2).
   command gateway's. On a bootstrap-provisioned host, `scripts/bootstrap.sh`
   renders and enables `semif-simplex-forward.service` (the second daemon) and
   `semif-bridge.service` (`cli bridge`) alongside the gateway units.
-- **HTTP surface** (`bridges/base.py` + `bridges/simplex.py`): JSON in/out,
+- **HTTP surface** (`bridges/base.py` + `packs/simplex/bridge/simplex.py`): JSON in/out,
   localhost-bound, optional shared-secret `X-Semif-Token` header. `SimplexBridge`
   buffers **every** inbound DM (no allowlist — the user wants to see who reached
   the bot through its invite link) in a bounded `MessagingInbox` that owns the
@@ -1583,7 +1590,7 @@ CLI, unit tests (24) + integration tests (2).
   error) in front of the agent's language model, so a body can ask for short
   generated text over HTTP instead of speaking the OpenAI-compatible protocol
   itself. It does **not** own the model connection: `run_bridge` passes the
-  scheduler's already-configured `llm` client through `run_bridges`/`build_bridge`
+  scheduler's already-configured `llm` client through `run_bridges`/`from_config`
   into `LLMBridge`, so the endpoint/model/sampler stay configured once in the
   top-level `llm` block; the `bridges.llm` block carries only the local listener
   (`enabled`/`host`/`port`/`token`). Bodies reach it via the derived
@@ -1592,7 +1599,8 @@ CLI, unit tests (24) + integration tests (2).
   client it reports `502`, never a fabricated reply. `nextcloud.create_event` is
   the first consumer (title + description extraction, cached in `request.meta`
   across a `needs_input` resume).
-- **Nextcloud bridge** (`bridges/nextcloud.py` + `bridges/nextcloud_client.py`).
+- **Nextcloud bridge** (`packs/nextcloud/bridge/nextcloud.py` +
+  `nextcloud_client.py`).
   Wraps the account's native protocols — WebDAV files, CalDAV calendar events and
   tasks (VTODO), CardDAV contacts, and the OCS Notes API — behind one uniform
   JSON surface, so a body never speaks DAV/OCS directly. It has **no service
@@ -1601,7 +1609,7 @@ CLI, unit tests (24) + integration tests (2).
   instantly inside the existing `semif-bridge.service`. HTTP Basic auth uses the
   username + app password. The connection is configured in `bridges.nextcloud`
   (`url`/`username`/`app_password`, plus `default_calendar`/`default_addressbook`
-  and `verify_tls`/`timeout`); `build_bridge` passes the top-level
+  and `verify_tls`/`timeout`); `NextcloudBridge.from_config` passes the top-level
   `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
   `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
   the same account the nextcloud pack skills collect is configured once and a block value
@@ -1621,9 +1629,9 @@ CLI, unit tests (24) + integration tests (2).
   updates edit the stored iCalendar properties in place (preserving VALARM/
   ATTENDEE), guarded by `If-Match`; creates use `If-None-Match: *`. Calendar/
   addressbook defaults resolve from config when a request names none and the
-  account has several. `tests/test_nextcloud_bridge.py` drives the real client
-  over a loopback `http.server` faking Nextcloud's DAV/OCS shapes.
-- **Outlook bridge** (`bridges/outlook.py` + `bridges/outlook_client.py`).
+  account has several. `packs/nextcloud/bridge/test_nextcloud_bridge.py` drives
+  the real client over a loopback `http.server` faking Nextcloud's DAV/OCS shapes.
+- **Outlook bridge** (`packs/outlook/bridge/outlook.py` + `outlook_client.py`).
   Wraps the user's Microsoft account — Outlook / Microsoft 365 mail, calendar
   events, Microsoft To Do tasks, contacts, and OneDrive files — behind one
   uniform JSON surface over **Microsoft Graph**, so a body never speaks Graph or
@@ -1651,9 +1659,9 @@ CLI, unit tests (24) + integration tests (2).
   (`/contacts` search), and OneDrive (`/files` list, `/files/read`
   text-or-base64, `POST /files/write`). Graph's `@odata.nextLink` paging and
   `429`/`Retry-After` backoff are handled in the client.
-  `tests/test_outlook_bridge.py` drives the real client over a loopback
-  `http.server` faking the token endpoint and Graph shapes.
-- **Browser bridge** (`bridges/browser.py` + `bridges/browser_client.py`).
+  `packs/outlook/bridge/test_outlook_bridge.py` drives the real client over a
+  loopback `http.server` faking the token endpoint and Graph shapes.
+- **Browser bridge** (`packs/browser/bridge/browser.py` + `browser_client.py`).
   Real browser automation via **Playwright** — open a URL, read a page's text or
   links, take a screenshot, and click/fill/press/select to complete a flow —
   behind one uniform JSON surface, so a body never bundles a browser stack. It is
@@ -1692,8 +1700,9 @@ CLI, unit tests (24) + integration tests (2).
   `/wait`, `/back`, `/forward`, `/reset`. Bodies reach it via the derived
   `browser_bridge_url` (+ optional `browser_bridge_token`). Three
   `packs/browser/skills/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
-  `tests/test_browser_bridge.py` exercises the routes over a loopback HTTP server
-  with an injected fake driver (no browser, no Playwright needed).
+  `packs/browser/bridge/test_browser_bridge.py` exercises the routes over a
+  loopback HTTP server with an injected fake driver (no browser, no Playwright
+  needed).
 
 ## Bridge backlog (one session per item)
 
@@ -1701,7 +1710,7 @@ The bridge read path (`simplex.next_message`), outbound send
 (`simplex.send_message`), and contact-link lookup (`simplex.connect_link`) are
 covered. Deferred follow-ups:
 
-- [x] **1. Contact-list refresh from the daemon** (`bridges/simplex.py`,
+- [x] **1. Contact-list refresh from the daemon** (`packs/simplex/bridge/simplex.py`,
   `simplex_ws.py`). Shipped: `SimplexDaemon.contacts()` /
   `request_contacts()` query `/_contacts <userId>` (active user from `/user` →
   `activeUser.userId`, cached, falling back to the configured `user_id`) over
@@ -1710,7 +1719,7 @@ covered. Deferred follow-ups:
   /contacts`, and a send-resolution miss), so `/send` can address a contact it
   has never received from. Best-effort: a disconnected daemon keeps the cached
   set.
-- [x] **2. Message history + true unread** (`bridges/simplex.py`,
+- [x] **2. Message history + true unread** (`packs/simplex/bridge/simplex.py`,
   `simplex_ws.py`). Shipped: `SimplexDaemon.chats(unread_only, count)` /
   `request_chats()` query `/_get chats <userId> count=<n>
   {"type":"filters","favorite":false,"unread":true}` and parse
@@ -1735,17 +1744,18 @@ covered. Deferred follow-ups:
   bridge's `contact_id` / errors honestly.
 - [x] **4. LLM bridge** (`bridges/llm.py`). Shipped: `LLMBridge` exposes a
   generic `POST /chat` in front of the scheduler's configured `llm` client
-  (threaded through `run_bridges`/`build_bridge`, never re-configured), registered
-  in `CATALOG` and seeded under `bridges.llm` (its URL is derived from that block).
-  `nextcloud.create_event` extracts its title + description through it.
-- [x] **5. More bridges.** Each new third-party API gets its own `bridges/<name>.py`
-  + config block + `CATALOG` entry; the codegen prompts pick it up automatically
-  through `describe_bridges()`. Nextcloud shipped (`bridges/nextcloud.py` +
-  `bridges/nextcloud_client.py`): files/calendars/tasks/contacts/notes over one
+  (threaded through `run_bridges`/`from_config`, never re-configured), the one
+  shared core built-in, seeded under `bridges.llm` (its URL is derived from that
+  block). `nextcloud.create_event` extracts its title + description through it.
+- [x] **5. More bridges.** Each new third-party API gets its own pack
+  (`packs/<name>/bridge/<name>.py`) + config block; the core registry discovers it
+  by convention and the codegen prompts pick it up automatically
+  through `describe_bridges()`. Nextcloud shipped (`packs/nextcloud/bridge/nextcloud.py` +
+  `nextcloud_client.py`): files/calendars/tasks/contacts/notes over one
   JSON surface, no daemon, connection from `bridges.nextcloud` with a top-level
   `nextcloud_*` fallback. Future bridges follow the same shape.
-- [x] **6. Outlook / Microsoft Graph bridge** (`bridges/outlook.py` +
-  `bridges/outlook_client.py`). Shipped: the `OutlookBridge` exposes mail,
+- [x] **6. Outlook / Microsoft Graph bridge** (`packs/outlook/bridge/outlook.py` +
+  `outlook_client.py`). Shipped: the `OutlookBridge` exposes mail,
   calendar, Microsoft To Do, contacts, and OneDrive over one JSON surface in
   front of Graph; OAuth2 device-code + refresh (`packs/outlook/scripts/outlook-auth.py`, tokens
   under `.runtime/outlook/token.json`); seven `packs/outlook/skills/outlook/*` skills
@@ -1753,8 +1763,8 @@ covered. Deferred follow-ups:
   `create_task`, `list_contacts`, `list_files`). Deferred: writing/reusing
   Outlook app-registration guidance in the docs, and a mail-send seed that
   attaches files.
-- [x] **7. Browser bridge (Playwright)** (`bridges/browser.py` +
-  `bridges/browser_client.py`). Shipped: `BrowserBridge` exposes open/read
+- [x] **7. Browser bridge (Playwright)** (`packs/browser/bridge/browser.py` +
+  `browser_client.py`). Shipped: `BrowserBridge` exposes open/read
   (text/links/screenshot) and act (goto/click/fill/press/select/wait/back/
   forward/reset) over one JSON surface in front of a real Playwright browser
   with a persistent profile; optional heavy dep installed via

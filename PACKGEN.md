@@ -21,8 +21,8 @@ that would otherwise be scattered by convention:
 
 - the **concern** (what product/job this is) and its **title**;
 - its **categories** (the tree buckets it owns, each with a scope description);
-- the **bridge(s)** it talks to, referenced by name (bridge *code* stays in
-  `semif_agent/bridges` — see "Authoring a new bridge");
+- the **bridge(s)** it talks to, referenced by name — and **ships** the bridge
+  code itself under `bridge/` (see "Authoring a new bridge");
 - its **runtime requirements** (optional heavy deps);
 - its **enable flag**; and
 - its **config schema** (the defaults and validation for its settings).
@@ -36,11 +36,15 @@ Three boundaries must stay crisp:
 
 - A **skill** is one leaf action (`packs/<name>/skills/<category>/<leaf>/`),
   governed by `CODEGEN.md`/`TESTGEN.md`. A pack contains skills; it is not one.
-- A **bridge** is a standalone process in front of a third-party system
-  (`semif_agent/bridges/`), warranted when the system needs state (especially
-  auth state), a native or heavy protocol, or one sanitized surface; a system
-  with a plain HTTP API needs no bridge — its skill calls the API directly. A
-  pack *references* a bridge by name; it never contains bridge code.
+- A **bridge** is a standalone process in front of a third-party system,
+  warranted when the system needs state (especially auth state), a native or
+  heavy protocol, or one sanitized surface; a system with a plain HTTP API needs
+  no bridge — its skill calls the API directly. A bridge **ships with its pack**
+  (`packs/<name>/bridge/`); the core keeps only the shared contract
+  (`semif_agent/bridges/base.py`) and the discovery registry
+  (`semif_agent/bridges/registry.py`). The one shared, pack-less bridge is the
+  **LLM bridge** (a core built-in many packs call). A pack's `bridges` list names
+  the bridge(s) it ships; a pack never edits core bridge code.
 - A pack is **declarative structure**, committed in its own repository.
   Per-machine values are the split config; credentials live in `secrets.json`.
   A pack repo never holds a secret.
@@ -55,6 +59,11 @@ packs/<name>/
     manifest.json                 # {"description": "..."} navigation text
     contract.json                 # mirror of the body's CONTRACT — TESTGEN.md
     skill.test.py                 # hermetic mechanics test — TESTGEN.md
+  bridge/                         # only for a bridge-backed pack (see below)
+    __init__.py                   # the pack's bridge package
+    <bridge>.py                   # the BridgeService subclass (bridge name)
+    <bridge>_client.py            # optional protocol client (e.g. nextcloud_client.py)
+    test_<bridge>_bridge.py       # hermetic bridge test (loopback HTTP)
   scripts/                        # optional concern helpers (e.g. an auth or
                                   # setup script), run from the checkout
 ```
@@ -65,6 +74,9 @@ packs/<name>/
 - Every leaf carries the four artifacts above. Their contents are governed by
   `CODEGEN.md` (body + `CONTRACT` + `INTEGRATION`) and `TESTGEN.md`
   (test + `contract.json` mirror); do not restate those rules here.
+- `bridge/` ships the pack's bridge (one module per name in `bridges`, plus
+  optional sibling modules it imports relatively). It is absent for a
+  bridge-less pack. See "Authoring a new bridge".
 - `manifest.json` holds a single non-empty `description` — the navigation text
   SemIf routes on. It is the seed analog of the registry entry a generated
   skill gets from the `llm` provider.
@@ -86,7 +98,7 @@ A single JSON object. Fields (from `packs._parse_pack`):
 | `title`              | string          | no       | Human display name. Defaults to `name`. |
 | `concern`            | string          | **yes**  | One- to two-sentence statement of the product/job the pack serves. (`description` is accepted as a legacy alias.) |
 | `categories`         | object          | **yes**  | `{category_id: scope_description}` — the tree buckets this pack owns. |
-| `bridges`            | array of string | no       | Bridge names this pack talks to, referencing `bridges/registry.py` `CATALOG`. Empty for a bridge-less pack. |
+| `bridges`            | array of string | no       | Bridge names this pack ships and talks to. Each name is a `bridge/<name>.py` module in the pack; `simplex`/`llm`/`nextcloud`/`outlook`/`browser` are the shipped names. Empty for a bridge-less pack. |
 | `requires`           | array of string | no       | Optional heavy deps (e.g. `playwright`). Informational; the code's `check_requirements` is what enforces them. |
 | `enabled_by_default` | bool            | no       | Default `true`. Whether the pack loads when nothing else decides. |
 | `config`             | object          | no       | The pack's config schema (see below). |
@@ -106,7 +118,8 @@ Rules:
   Write one to two sentences naming the concrete jobs the category does.
 - **`bridges[0]` owns the config block.** For a bridge pack, the pack's `config`
   schema maps onto `bridges.<bridges[0]>`; only the first bridge gets the block
-  (a pack normally fronts one bridge).
+  (a pack normally fronts one bridge). Each name in `bridges` must have a
+  `bridge/<name>.py` module that defines its `BridgeService` subclass.
 - Keep the manifest minimal: it binds metadata and settings, nothing executable.
 
 ## The config schema
@@ -187,14 +200,16 @@ authored into one — and stops its bridge. The switch lives in the pack's
 ## Referencing a bridge by name
 
 A pack whose skills talk to a third-party system lists that bridge in
-`bridges` and carries its config block in `config`. (A pack whose skills reach a
-plain HTTP API directly needs no bridge: `bridges` stays empty and each leaf
-declares the endpoint in its own `CONTRACT`.) The bridge itself is a
-class in `semif_agent/bridges/` registered in `bridges/registry.py` `CATALOG`.
-Its `BridgeInfo` (name, service, description, URL config var, other config
-vars, auth header, endpoints) is injected into every codegen prompt via
-`describe_bridges()`, so bodies learn how to reach it without the pack
-restating protocol details.
+`bridges`, **ships** it under `bridge/`, and carries its config block in
+`config`. (A pack whose skills reach a plain HTTP API directly needs no bridge:
+`bridges` stays empty and each leaf declares the endpoint in its own
+`CONTRACT`.) The bridge itself is a `BridgeService` subclass in
+`packs/<name>/bridge/<name>.py`; the core registry imports it by convention and
+its `BridgeInfo` (name, service, description, URL config var, other config vars,
+auth header, endpoints) is injected into every codegen prompt via
+`describe_bridges()`, so bodies learn how to reach it without the pack restating
+protocol details. The one exception is the shared, pack-less **LLM bridge**
+(a core built-in).
 
 Skill-facing config is **derived**, never duplicated: `derived_config_vars`
 turns the bridge's `bridges.<name>` block (`host`/`port`/`token`) into the
@@ -207,9 +222,9 @@ Rules:
 
 - The bridge block's `enabled`/`host`/`port`/`token` are the pack's config
   schema; the URL/token config vars are derived and must not be declared again.
-- A pack references a bridge; it never imports or edits bridge code. Gateway
-  isolation is non-negotiable — read/send/address capability is a bridge, never
-  a gateway feature.
+- A pack ships its own bridge and never imports or edits another pack's or the
+  core's. Gateway isolation is non-negotiable — read/send/address capability is
+  a bridge, never a gateway feature.
 
 ## Authoring a new bridge
 
@@ -220,12 +235,14 @@ needs a native or heavy protocol, or should be reached through one sanitized
 surface. A system with a plain HTTP API needs no bridge: its skill calls the API
 directly. Adding a bridge means:
 
-1. **Write the bridge class** in `semif_agent/bridges/<name>.py`, subclassing
+1. **Write the bridge class** in the pack's `bridge/<name>.py`, subclassing
    `BridgeService` (`semif_agent/bridges/base.py`). Set the `name` attribute and
-   a module-level/class `INFO = BridgeInfo(...)`:
+   a module-level/class `INFO = BridgeInfo(...)`. Ship `bridge/__init__.py` (the
+   package marker) and any sibling modules the bridge imports relatively (e.g.
+   `bridge/<name>_client.py` for the protocol client):
 
    ```python
-   from .base import BridgeInfo, BridgeService
+   from semif_agent.bridges.base import BridgeInfo, BridgeService
 
    class WidgetBridge(BridgeService):
        name = "widget"
@@ -254,18 +271,23 @@ directly. Adding a bridge means:
    The base class owns the HTTP/JSON/auth plumbing (`start`/`stop`, the
    `X-Semif-Token` guard); a subclass implements only its routes. Override
    `start`/`stop`/`_stop_transport` only if the bridge owns a service daemon.
+   Anchor checkout-relative paths (e.g. a token store under `.runtime/`) with
+   `semif_agent.bridges.base.checkout_root()`, never from the bridge's own
+   `__file__` — the bridge ships in its pack, so its path is pack-relative.
 
-2. **Register it** in `bridges/registry.py` `CATALOG` (tuple order is
-   presentation order). That is what makes it discoverable, describable to
-   codegen, and runnable via `python -m semif_agent.cli bridge`.
+2. **Declare it** in the pack's `bridges` list and ship its module at
+   `bridge/<name>.py`. That is what makes it discoverable, describable to
+   codegen, and runnable via `python -m semif_agent.cli bridge` — there is no
+   core `CATALOG` to edit.
 
-3. **Give it a pack** whose `bridges` lists its name and whose `config` schema
-   carries its block (`enabled`/`host`/`port`/`token` plus service vars). The
-   schema is what gives the bridge its config defaults and validation.
+3. **Carry its config block** in the pack's `config` schema
+   (`enabled`/`host`/`port`/`token` plus service vars). The schema is what gives
+   the bridge its config defaults and validation.
 
-4. **`build_bridge` special-casing** is needed only when the bridge requires the
-   scheduler's configured `llm` client (pass `client=`) or top-level fallback
-   values (like Nextcloud's `nextcloud_*`). A plain bridge needs no branch.
+4. **Override `BridgeService.from_config`** only when the bridge needs more than
+   its own block: the scheduler's configured `llm` client (the shared LLM
+   bridge) or top-level fallback values (like Nextcloud's `nextcloud_*`). A
+   plain bridge uses the default and needs no override.
 
 5. **Heavy/optional deps:** `check_requirements()` must **never raise** and must
    return `(ok, install_hint)`. `run_bridges` aborts **all** bridges when one
@@ -278,10 +300,13 @@ directly. Adding a bridge means:
    missing connection/dep is a `503`, bad input a `400` — never a fabricated
    success. The bridge owns its own state (cursors, daemons); bodies keep none.
 
-7. **Test it hermetically:** add `tests/test_<name>_bridge.py` driving the real
+7. **Test it hermetically:** add `bridge/test_<name>_bridge.py` driving the real
    routes over a loopback `http.server` (inject a fake driver where a real
-   service would be needed). No external network, no real daemon. `describe_
-   bridges()` picks the new bridge up automatically.
+   service would be needed). No external network, no real daemon. Import the
+   bridge through the core registry
+   (`load_pack_bridge_module("<pack>", "<name>")`) so the test also proves the
+   pack's bridge is discoverable; `tests/test_packs.py` runs it from the
+   checkout. `describe_bridges()` picks the new bridge up automatically.
 
 8. **Regenerate** `config.example.json` and run `check-config` (see above), and
    document the bridge in `AGENTS.md` (bridges section). Never widen the
@@ -292,8 +317,8 @@ directly. Adding a bridge means:
 A new pack is accepted only if:
 
 1. `packs/<name>/pack.json` parses as JSON, declares a non-empty `concern` and
-   a non-empty `categories` map, and every `bridges` name exists in
-   `bridges/registry.py` `CATALOG`.
+   a non-empty `categories` map, and every `bridges` name has a
+   `bridge/<name>.py` module defining its `BridgeService` subclass.
 2. Every leaf under `skills/<category>/<leaf>/` is a complete skill folder
    (`skill.py`, `manifest.json`, `contract.json`, `skill.test.py`) satisfying
    `CODEGEN.md` and `TESTGEN.md`: a module-level `act`, a flat `CONTRACT` whose
@@ -309,15 +334,17 @@ A new pack is accepted only if:
    marked `secret`), maps onto `bridges.<bridges[0]>` (or `packs.<name>` for a
    bridge-less pack), and the regenerated `config.example.json` + `check-config`
    are clean.
-6. Nothing deployment-specific (hostname, address, username, absolute home
+6. A bridge-backed pack ships its bridge test (`bridge/test_<bridge>_bridge.py`)
+   and it passes hermetically (loopback HTTP, no external network, no daemon).
+7. Nothing deployment-specific (hostname, address, username, absolute home
    path, local model name) appears in any committed file —
    `tests/test_no_env_leaks.py` enforces this for the agent repo; keep a pack
    repo clean too. Secrets live in `secrets.json`.
 
-`tests/test_packs.py` enforces items 1–3 mechanically for every shipped pack
+`tests/test_packs.py` enforces items 1–6 mechanically for every shipped pack
 (valid manifest, concern + categories, integration matches code, contract flat
-and mirrored, manifest description, hermetic test passes) and keeps the shipped
-pack ids present.
+and mirrored, manifest description, hermetic skill test, hermetic bridge test)
+and keeps the shipped pack ids present.
 
 ## Worked example — a minimal bridge-less pack
 
@@ -364,9 +391,11 @@ The leaf's `skill.py` (a `compute`-transport body — no external action, empty
 `packs/essentials/skills/time/now/` is the reference for exactly this shape.
 
 For a bridge-backed pack, start from `packs/simplex/pack.json` (bridge
-reference + `host`/`port`/`token` + service vars) and
+reference + `host`/`port`/`token` + service vars), `packs/simplex/bridge/` (the
+bridge module, its package marker, and its hermetic test), and
 `packs/simplex/skills/simplex/send_message/` (a body that calls the bridge over
-HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/`.
+HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/` (its
+`bridge/nextcloud.py` overrides `from_config`).
 
 ## Checklist
 
@@ -374,19 +403,20 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/`.
    descriptions.
 2. If a third-party system is involved and it needs state/auth, a native or
    heavy protocol, or one sanitized surface, author a bridge first (see
-   "Authoring a new bridge") and register it in `CATALOG`. A system with a plain
+   "Authoring a new bridge") and ship it under `bridge/`. A system with a plain
    HTTP API needs no bridge — the skill calls it directly.
 3. Create the pack (its own repository, `pack.<name>`): `packs/<name>/pack.json`
    with `name`, `title`, `concern`, `categories`, `bridges` (if any), `requires`,
    `enabled_by_default`, and the `config` schema.
 4. Add each leaf under `skills/<category>/<leaf>/` following `CODEGEN.md` and
-   `TESTGEN.md` (`skill.py`, `manifest.json`, `contract.json`, `skill.test.py`).
+   `TESTGEN.md` (`skill.py`, `manifest.json`, `contract.json`, `skill.test.py`),
+   and each bridge under `bridge/<name>.py` with its `bridge/test_<name>_bridge.py`.
 5. Regenerate and validate config:
    `python -m semif_agent.cli check-config --write-example config.example.json`
    then `python -m semif_agent.cli check-config`.
 6. Run the tests:
    `python3 -m pytest tests/test_packs.py tests/test_codegen.py -q`
-   (plus `tests/test_<name>_bridge.py` if you added a bridge).
+   (it runs every pack's skill and bridge tests, including the new ones).
 7. Cross-link the pack/bridge in `AGENTS.md` (and `README.md` for a shipped
    pack).
 8. Verify a real run against the user's actual service — the only proof the

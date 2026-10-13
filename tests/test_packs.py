@@ -10,6 +10,8 @@ user's service is (see AGENTS.md).
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,7 @@ from semif_agent.packs import (
 
 PACKS = Path(__file__).resolve().parent.parent / "packs"
 SKILL_DIRS = sorted(path.parent for path in PACKS.glob("*/skills/*/*/skill.py"))
+BRIDGE_TESTS = sorted(PACKS.glob("*/bridge/test_*.py"))
 
 
 def seed_id(seed: Path) -> str:
@@ -152,3 +155,31 @@ def test_seed_hermetic_test_passes(seed, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", root + os.pathsep + existing)
     passed, output = run_skill_test(seed, timeout=30)
     assert passed, output
+
+
+@pytest.mark.parametrize(
+    "test_file", BRIDGE_TESTS, ids=[f"{p.parent.parent.name}/{p.name}" for p in BRIDGE_TESTS]
+)
+def test_pack_bridge_test_passes(test_file):
+    """A bridge ships with its pack; its hermetic test runs from the pack.
+
+    The bridge tests are pytest modules (they use fixtures and `pytest.raises`),
+    so they run in a subprocess with the checkout on `PYTHONPATH` — the same
+    import path a real run uses. A pack that declares a bridge but ships no test
+    is a hole; this parametrization picks up exactly the tests that exist, and
+    `test_pack_manifests_are_valid` keeps the packs present.
+    """
+    root = str(PACKS.parent)
+    env = {
+        **os.environ,
+        "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(test_file), "-q", "-p", "no:cacheprovider"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
+    assert proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")

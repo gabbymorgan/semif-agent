@@ -269,11 +269,12 @@ receives the user's request, question answers, or run output.
 | `generate_skill_tests` | `codegen` | full **TESTGEN.md** | skill, de-identified goal, full body code, **bridge catalog**; continued with the accepted **contract JSON** as an assistant turn + the test-gen ask | `codegen.py:942` |
 | `regenerate_skill_body` | `codegen` | full **CODEGEN.md** | correction header, de-identified goal + description, **de-identified evidence bundle** (rendered verbatim), previous body, integration hint, **bridge catalog**, `BODY_DIRECTIVES` | `codegen.py:1046` |
 
-The **bridge catalog** is `describe_bridges()` (`bridges/registry.py:33`): each
+The **bridge catalog** is `describe_bridges()` (`bridges/registry.py`): each
 known bridge's name, service, description, base-URL config var, auth header +
 token var, documented config vars, and endpoints. It is the single runtime
 source of bridge specifics — `CODEGEN.md` and `TESTGEN.md` carry only the generic
-pattern — so a bridge can be added without touching either contract file.
+pattern — so a bridge can be added without touching either contract file (a
+bridge ships with its pack; the registry discovers it by convention).
 
 The **evidence bundle** handed to a corrective regen is de-identified: a generic
 failure kind, the integration, the goal, and the previous body, rendered as-is
@@ -400,12 +401,13 @@ semif_agent/
   voice_transport.py neutral voice transport: mic capture, wake word, VAD,
                     speech-to-text (faster-whisper), text-to-speech (Piper)
   gateway/          messenger COMMAND intake/reply (SimpleX, LXMF, voice)
-  bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud,
-                    Outlook, browser)
+  bridges/          bridge contract + discovery (base.py, registry.py, inbox.py,
+                    llm.py); the concrete bridges ship in their packs
   config.py         layered config: index includes + !secret + schema/example
   packs.py          SkillPack + PackRegistry (bundles skills by concern/bridge)
 packs/              skill packs, each cloned from its own repo (pack.<name>)
-                    into this gitignored dir — see packs.json + PACKGEN.md
+                    into this gitignored dir — each ships its own bridge/ — see
+                    packs.json + PACKGEN.md
 scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
@@ -756,7 +758,7 @@ protocol, or one sanitized surface — a skill may call a plain HTTP API directl
 When a bridge fronts a service, generated skill bodies call it like any HTTP
 service (base URL from a config var) and never speak the native protocol.
 
-The first bridge is **SimpleX** (`semif_agent/bridges/simplex.py`), with its own
+The first bridge is **SimpleX** (`packs/simplex/bridge/simplex.py`), with its own
 simplex-chat daemon separate from the gateway's. Its HTTP surface:
 
 ```
@@ -778,10 +780,11 @@ acking is a client-side read receipt, not an API call.
 Skills call the forwarding bridge at the address derived from `bridges.simplex`
 (`simplex_bridge_url`); the bridge catalog
 is injected into every codegen prompt via `describe_bridges()`, so it is the
-single source of bridge specifics. Adding a bridge = a class + a config block +
-a `CATALOG` entry.
+single source of bridge specifics. Adding a bridge = a pack that ships its
+`bridge/<name>.py` + a config block; the core registry discovers it by convention.
 
-The **LLM bridge** (`semif_agent/bridges/llm.py`) is the second: a generic
+The **LLM bridge** (`semif_agent/bridges/llm.py`) is the shared, pack-less one: a
+generic
 
 ```
 POST /chat {"messages": [{"role","content"}, ...], "max_tokens"?: int} -> {"text": "..."}
@@ -797,7 +800,7 @@ carries just the local listener. Skills call it at the address derived from
 it returns `502`, never a fabricated reply. It starts in the same
 `semif-bridge.service` process as the other enabled bridges.
 
-The **Nextcloud bridge** (`semif_agent/bridges/nextcloud.py`) is the third: it
+The **Nextcloud bridge** (`packs/nextcloud/bridge/nextcloud.py`) is the third: it
 wraps the account's native protocols — WebDAV files, CalDAV calendar events and
 tasks, CardDAV contacts, and the OCS Notes API — behind one JSON surface, so a
 body never speaks DAV/OCS directly. It has **no service daemon** (Nextcloud is
@@ -836,7 +839,7 @@ or a bad reply) is `502` — never a fabricated success. Calendar and addressboo
 defaults resolve from `bridges.nextcloud` when a request names none and the
 account has several.
 
-The **Outlook bridge** (`semif_agent/bridges/outlook.py`) wraps the user's
+The **Outlook bridge** (`packs/outlook/bridge/outlook.py`) wraps the user's
 Microsoft account (Outlook / Microsoft 365) through **Microsoft Graph**: mail,
 calendar events, Microsoft To Do tasks, contacts, and OneDrive files. Like
 Nextcloud it has **no service daemon** (Graph is plain HTTPS) and is stdlib-only,
@@ -876,7 +879,7 @@ Seven `packs/outlook/skills/outlook/*` skills ship (`next_message`, `send_messag
 `send_message` composes the message through the LLM bridge and asks for
 confirmation before it sends.
 
-The **browser bridge** (`semif_agent/bridges/browser.py`) is real browser
+The **browser bridge** (`packs/browser/bridge/browser.py`) is real browser
 automation via **Playwright**: open a URL, read a page's text or links, take a
 screenshot, and click/fill/press/select to complete a flow. It is the first
 bridge with a heavy optional dependency, so it is **disabled by default** and

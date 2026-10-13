@@ -7,11 +7,12 @@ A pack is a folder with a ``pack.json`` manifest and a ``skills/`` store::
       skills/nextcloud/{create_event,create_task,next_event}/
 
 The manifest binds the pieces that used to be scattered by convention — the
-concern, its category descriptions, the bridge(s) it talks to, its runtime
-requirements, and its config schema/defaults — so "the Nextcloud product, its
-bridge, its skills, and its settings" are one thing. Bridge *code* stays in
-``semif_agent/bridges`` (isolation is non-negotiable); a pack references a
-bridge by name.
+concern, its category descriptions, the bridge(s) it ships and talks to, its
+runtime requirements, and its config schema/defaults — so "the Nextcloud
+product, its bridge, its skills, and its settings" are one thing. A bridge
+*ships with its pack* (``packs/<name>/bridge/``); the core keeps only the shared
+contract (``semif_agent/bridges/base.py``) and the discovery registry
+(``semif_agent/bridges/registry.py``). Gateway isolation is non-negotiable.
 
 A pack can be enabled/disabled as a unit: disabling it drops its categories from
 the tree and stops its bridge (see ``pack_enabled``). This is the same switch
