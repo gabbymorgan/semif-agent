@@ -401,14 +401,20 @@ semif_agent/
   gateway/          messenger COMMAND intake/reply (SimpleX, LXMF, voice)
   bridges/          standalone third-party API bridges (SimpleX, LLM, Nextcloud,
                     Outlook, browser)
-seeds/              committed starter skills (nextcloud, simplex, outlook, browser)
+  config.py         layered config: index includes + !secret + schema/example
+  packs.py          SkillPack + PackRegistry (bundles skills by concern/bridge)
+packs/              committed skill packs: nextcloud, simplex, outlook, browser,
+                    essentials (a pack.json manifest + skills/<category>/<leaf>/)
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
 CODEGEN.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
 AGENTS.md           the operational guide (read this before touching code)
-config.example.json per-machine config template (seeded to config.json once)
+config.json         per-machine config INDEX ({"include": [...]}); seeded once
+config/             split config fragments (core, gateway, bridges, packs/*)
+secrets.json        gitignored credentials, referenced as "!secret <key>"
+config.example.json GENERATED per-machine config reference (from the schemas)
 pins.json           committed pins: engine/GGUF/tokenizer/simplex-chat refs
 local/              gitignored: this deployment's notes (hosts, addresses, models)
 ```
@@ -451,10 +457,13 @@ On a fresh Ubuntu machine, from a checkout of this repo:
 scripts/bootstrap.sh
 ```
 
-With no `config.json` yet, the script seeds one from `config.example.json`; edit
-it to set `llm.model`/`codegen.model` (and the endpoints). Flags override those
+With no `config.json` yet, the script seeds the split config (`config-init`
+writes `config/core.json`, `config/gateway.json`, `config/bridges.json`,
+`config/packs/*.json`, the `config.json` index, and an empty `secrets.json`);
+edit those to set `llm.model`/`codegen.model` (and the endpoints), and put
+credentials in `secrets.json`. Flags override those
 values for the run only — `--llm-url`, `--codegen-url`, `--llm-model`,
-`--codegen-model` — and are never written back to `config.json`.
+`--codegen-model` — and are never written back to the config.
 
 The script is idempotent (every stage no-ops on existing state) and:
 
@@ -466,8 +475,8 @@ The script is idempotent (every stage no-ops on existing state) and:
 4. downloads and sha256-verifies the pinned GGUF into `.runtime/models/`;
 5. pre-fetches the HF tokenizer into `.runtime/hf/`;
 6. downloads and sha256-verifies the pinned `simplex-chat` binary;
-7. seeds `config.json` from `config.example.json` **only if it does not already
-   exist** — it never rewrites `config.json` (only a human edits that file);
+7. seeds the split config (`config-init`) **only if `config.json` does not
+   already exist** — it never rewrites it (only a human edits it);
 8. renders and enables systemd **user** units:
    `semif-simplex` (bot daemon), `semif-gateway` (agent gateway),
    `semif-simplex-forward` (the bridge's own daemon), `semif-bridge`;
@@ -497,23 +506,37 @@ python3 -m pytest tests/ -q --ignore=tests/integration
 
 For a full install on a machine you manage, follow the same steps bootstrap
 performs (venv, `semif-phase1 --no-deps`, `requirements/staging.txt`, GGUF,
-tokenizer cache), then create `config.json` from the template and adjust paths:
+tokenizer cache), then seed the split config and adjust paths:
 
 ```sh
-cp config.example.json config.json
+python -m semif_agent.cli config-init        # writes config/ + secrets.json
 ```
 
 ### Configuration
 
-`config.json` is **gitignored, per-machine, and required** — the agent refuses
-to start without it. `scripts/bootstrap.sh` seeds it from `config.example.json`
-once; afterwards only a human edits it (nothing writes `config.json`). Pinned
-external refs live in the committed `pins.json`, so `config.json` holds only
-per-machine settings:
+The per-machine config is **gitignored, per-machine, and required** — the agent
+refuses to start without it. `config.json` is a thin **index**
+(`{"include": ["config/core.json", "config/gateway.json", ...]}`); the fragments
+under `config/` hold the values and are deep-merged in order. Credentials live in
+the gitignored `secrets.json` and are referenced from any fragment as
+`"!secret <key>"` (there is no `api_key_env`). `scripts/bootstrap.sh` seeds the
+split config once via `config-init`; afterwards only a human edits it.
 
 ```sh
-cp config.example.json config.json   # if not already created by bootstrap
+python -m semif_agent.cli config-init          # seed config/ + secrets.json (once)
+python -m semif_agent.cli check-config         # validate against the schemas
 ```
+
+The committed `config.example.json` is **generated** from the core schema
+(`semif_agent/config.py`) and each pack's `config` schema; regenerate it after
+changing a schema:
+
+```sh
+python -m semif_agent.cli check-config --write-example config.example.json
+```
+
+Pinned external refs live in the committed `pins.json`, so the config holds only
+per-machine settings.
 
 Key blocks:
 
@@ -525,7 +548,7 @@ Key blocks:
 | `navigation` | two-stage guards: leaf `intent_tau`, category `category_tau` |
 | `tau` | decision threshold; `max_reentries` requeue bound |
 | `queue` | `max_size` |
-| `skill_bodies` / `skill_seeds` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
+| `skill_bodies` / `skill_packs` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
 | `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
@@ -777,7 +800,7 @@ plain HTTPS) and is stdlib-only (`urllib` + `xml.etree`), so it starts instantly
 in the same `semif-bridge` process. The connection (base URL, username, app
 password) is configured in `bridges.nextcloud` and falls back to the top-level
 `nextcloud_url` / `nextcloud_username` / `nextcloud_app_password` /
-`nextcloud_default_calendar` the nextcloud seeds use, so the account is
+`nextcloud_default_calendar` the nextcloud pack skills use, so the account is
 configured once. Skills call it at the address derived from `bridges.nextcloud`
 (`nextcloud_bridge_url`, + optional `nextcloud_bridge_token`). Its HTTP surface:
 
@@ -843,7 +866,7 @@ POST /files/write   {"path","content","encoding"?,"overwrite"?}
 
 A missing `client_id` or an unauthorized bridge is `503`; a real Graph failure
 (transport, HTTP error, or a bad reply) is `502` — never a fabricated success.
-Seven `seeds/outlook/*` skills ship (`next_message`, `send_message`,
+Seven `packs/outlook/skills/outlook/*` skills ship (`next_message`, `send_message`,
 `next_event`, `create_event`, `create_task`, `list_contacts`, `list_files`);
 `send_message` composes the message through the LLM bridge and asks for
 confirmation before it sends.
@@ -890,7 +913,7 @@ POST /back | /forward {"timeout"?}
 POST /reset   {"purge"?}                        # close; purge deletes the profile
 ```
 
-Three `seeds/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
+Three `packs/browser/skills/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
 
 ### Dream report
 
@@ -927,10 +950,11 @@ bodies, no external network, no `mock_data.json`. Passing it proves the code
 runs, not that the live integration works. That is what the real run and the
 repair loop are for.
 
-**Seeds** (`seeds/`) ship real starter integrations in the exact generated
-folder format, plus a `manifest.json`. `merge_seed_store` loads them into every
-tree at startup; recorded config is written to the runtime store, so the
-committed seed never holds secrets.
+**Packs** (`packs/<name>/`) ship real starter integrations in the exact generated
+folder format, plus a `manifest.json` and a `pack.json` manifest binding the
+concern to its categories, bridge, and config schema. `merge_packs` loads every
+enabled pack into the tree at startup; recorded config is written to the runtime
+store, so the committed pack never holds secrets.
 
 - `nextcloud.create_event` — create an event on Nextcloud CalDAV (the
   authoritative worked example); resolves the target calendar with a SemIf
@@ -993,7 +1017,7 @@ logging, `dream` cost pass, REPL + JSONL CLI; live `create_category` /
 contract → test → auto-run → re-dispatch); tiered config + first-fire
 collection; runtime repair loop; the closed `response` canned tree; real
 integrations with `INTEGRATION` declarations; the SimpleX command gateway and the
-standalone SimpleX bridge + seeds (contact-list refresh, daemon-backed message
+standalone SimpleX bridge + pack skills (contact-list refresh, daemon-backed message
 history / true unread); the LXMF gateway; and the voice gateway (wake word +
 speech-to-text + text-to-speech).
 

@@ -64,7 +64,20 @@ capability is a new bridge, not a gateway feature.
 ```
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard, gateway (command intake), bridge (standalone
-                third-party API bridges)
+                third-party API bridges), check-config (validate config/
+                against the core + pack schemas), config-init (seed the split
+                config/ + secrets.json)
+config.py       layered per-machine config: config.json is a thin index
+                (`{"include": [...]}`) over config/core.json + config/gateway.json
+                + config/bridges.json + config/packs/<name>.json, deep-merged in
+                order; `"!secret <key>"` resolves from the gitignored
+                secrets.json; the core schema owns defaults and, with each
+                pack's `config` schema, GENERATES config.example.json
+                (check-config --write-example) and validates a live config
+packs.py        SkillPack + PackRegistry: discovers packs/ (a `pack.json`
+                manifest + skills/<category>/<leaf>/), binds a concern to its
+                categories, bridge(s), requirements, and config schema;
+                merge_packs loads every enabled pack into the tree
 scheduler.py    no up-front gate: every input is dispatched
                 -> FIFO queue when busy; a skill run paused for input
                 (needs_input) keeps `current` busy; `answer` routes straight to
@@ -122,8 +135,10 @@ skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 (skill.py, skill.test.py, contract.json, config.json) and
                 materialize_skill / merge_skill_store
                 hot-load runnable skills from data/skills/;
-                merge_seed_store loads committed starter skills from seeds/ with
-                their recorded config read from data/skills/;
+                merge_packs (semif_agent/packs.py) loads committed pack skills
+                from packs/<name>/skills/ with their recorded config read from
+                data/skills/ (each pack bundles its concern, category scope,
+                bridge, and config schema);
                 ActionResult.needs_input pauses a run for human input;
                 Skill.integration / integration_source read the body's
                 INTEGRATION declaration (or infer it); Skill.contract is read
@@ -291,7 +306,7 @@ bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
                 and Notes (OCS) behind one JSON surface, so bodies never speak
                 DAV/OCS; no service daemon (stdlib-only), connection from
                 `bridges.nextcloud` with a fallback to the top-level
-                `nextcloud_*` values the nextcloud seeds use.
+                `nextcloud_*` values the nextcloud pack skills use.
                 outlook.py + outlook_client.py: OutlookBridge — the user's
                 Microsoft account (Outlook / Microsoft 365) over Microsoft Graph:
                 mail, calendar events, Microsoft To Do tasks, contacts, and
@@ -359,11 +374,20 @@ values are yours to choose.
 ## Git / sync
 
 - Push/pull from your git remote — never rsync/tar the code.
-- **`config.json` is gitignored, per-machine, and required** (hosts use
-  different LLM/codegen endpoints and models). `scripts/bootstrap.sh` seeds it
-  from `config.example.json` once (only when absent) and **nothing writes it
-  afterwards — only a human edits `config.json`**. `data/decisions.jsonl`,
-  `data/runs.jsonl`, and `data/drafts/` are runtime artifacts and gitignored too.
+- **`config.json` (a thin index), the `config/` fragments, and `secrets.json` are
+  gitignored, per-machine, and required** (hosts use different LLM/codegen
+  endpoints and models). `config.json` is an index (`{"include": [...]}`);
+  `config/core.json` + `config/gateway.json` + `config/bridges.json` +
+  `config/packs/<name>.json` hold the values, and `secrets.json` holds
+  credentials referenced as `"!secret <key>"`. `scripts/bootstrap.sh` seeds the
+  split config once (via `config-init`, only when `config.json` is absent) and
+  **nothing writes it afterwards — only a human edits it**. The committed
+  `config.example.json` is GENERATED from the core schema
+  (`semif_agent/config.py`) and each pack's `config` schema — regenerate it with
+  `python -m semif_agent.cli check-config --write-example config.example.json`
+  after changing a schema; validate a live config with `check-config`.
+  `data/decisions.jsonl`, `data/runs.jsonl`, and `data/drafts/` are runtime
+  artifacts and gitignored too.
 - **`pins.json` is committed and code-owned** — the single home for every
   external ref (SemIf commit, GGUF url+sha256, HF tokenizer revision,
   simplex-chat version/url+sha256). These are bumped by a git change and picked
@@ -762,6 +786,29 @@ CLI, unit tests (24) + integration tests (2).
   into `.runtime/models/` by bootstrap. Load ~34s; score ~0.9s/decision on CPU
   at 8 threads.
 
+### configuration (split + secrets)
+
+- **Three layers, mirroring Home Assistant.** Declarative structure is committed
+  (`pack.json` manifests + the core schema); per-machine values are the split
+  config; secrets are a separate gitignored file. `config.json` is a **thin
+  index** (`{"include": ["config/core.json", "config/gateway.json",
+  "config/bridges.json", "config/packs/<name>.json", ...]}`); fragments are
+  deep-merged in order (later wins). `semif_agent/config.py` owns the loader.
+- **Secrets.** A value written as `"!secret <key>"` resolves from the gitignored
+  `secrets.json` at load (the analog of HA's `!secret`). A missing key resolves
+  to `""` at load (so startup never hard-fails) and is reported by `check-config`.
+  **`api_key_env` is gone** — `secrets.json` is the one place credentials live.
+- **Schema owns defaults.** `semif_agent/config.py` `CORE_SCHEMA` (core sections)
+  plus each pack's `config` schema (bridge blocks) own every default. The
+  committed `config.example.json` is GENERATED from them
+  (`check-config --write-example config.example.json`); secret keys are emitted
+  as `"!secret <name>"`, never a real value. `check-config` validates a live
+  config (type mismatches and missing secrets are errors; unknown keys warn).
+- **Seeding.** `config-init` writes the split layout + an empty `secrets.json`
+  from the schemas (bootstrap calls it once, only when `config.json` is absent);
+  afterwards only a human edits it. `scripts/config_merge.py` is the stdlib-only
+  merger bootstrap uses before the venv exists.
+
 ### ollama
 - `bootstrap.sh` installs **no ollama**: it expects the target host to already
   run one for `llm` (and pulls `llm.model` into it), while `codegen` may be
@@ -787,10 +834,13 @@ CLI, unit tests (24) + integration tests (2).
 
 - Provision a fresh Ubuntu machine into a running host: clone `semif-agent` to
   a checkout (register its SSH key on your git host first), then run
-  `scripts/bootstrap.sh`. With no `config.json` yet it seeds one from
-  `config.example.json`; edit that to set `llm.model`/`codegen.model` and the
-  endpoints. Flags (`--llm-url`, `--codegen-url`, `--llm-model`,
-  `--codegen-model`) override the values read from `config.json` **for that run
+  `scripts/bootstrap.sh`. With no `config.json` yet it seeds the split config
+  (`config-init` writes `config/core.json`, `config/gateway.json`,
+  `config/bridges.json`, `config/packs/*.json`, the `config.json` index, and an
+  empty `secrets.json`); edit those to set `llm.model`/`codegen.model` and the
+  endpoints, and put credentials in `secrets.json`. Flags (`--llm-url`,
+  `--codegen-url`, `--llm-model`,
+  `--codegen-model`) override the values read from the merged config **for that run
   only** and are never written back. `--voice` additionally installs the
   optional voice-gateway stack (`requirements/voice.txt` + system
   `libportaudio2` + `alsa-utils`) and downloads its models into `.runtime/voice/` via
@@ -828,9 +878,12 @@ CLI, unit tests (24) + integration tests (2).
   that we intentionally do not install — the llama.cpp CPU path doesn't need
   them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Do not "fix" them
   by installing torch.
-- Seeds `config.json` from `config.example.json` (only when absent) and **never
-  writes it again** — only a human edits `config.json`. `config.example.json`
-  ships the provisioned defaults, so a seeded `config.json` already has
+- Seeds the split config (`config-init`: `config/core.json`,
+  `config/gateway.json`, `config/bridges.json`, `config/packs/*.json`, the
+  `config.json` index, and an empty `secrets.json`) only when `config.json` is
+  absent, and **never writes it again** — only a human edits it. The committed
+  `config.example.json` is GENERATED from the core + pack schemas and ships the
+  provisioned defaults, so a seeded config already has
   `codegen.timeout: 3600`, the SimpleX gateway enabled
   (`gateway.simplex.enabled = true`, `ws_url` from `simplex_chat.port`) and the
   standalone forwarding bridge enabled (`bridges.simplex.enabled = true`,
@@ -838,7 +891,7 @@ CLI, unit tests (24) + integration tests (2).
   the LLM bridge enabled (`bridges.llm.enabled = true`; it reuses the `llm`
   model);
   the operator sets `llm.model`/`llm.base_url` and `codegen.model`/
-  `codegen.base_url`. Bootstrap renders/enables four user services:
+  `codegen.base_url`, and puts credentials in `secrets.json`. Bootstrap renders/enables four user services:
   `semif-simplex.service` (the command `simplex-chat` bot daemon,
   `--create-bot-display-name` on `simplex_chat.port`), `semif-gateway.service`
   (`.runtime/venv/bin/python -m semif_agent.cli gateway`),
@@ -881,8 +934,8 @@ CLI, unit tests (24) + integration tests (2).
   inference API instead of local ollama: set `llm.provider` / `codegen.provider`
   to `"opencode"` (default `"ollama"`), set `model` to a **Chat Completions**
   family id (`kimi-k2.7-code`, `glm-5.3`, `deepseek-v4.1-flash`, `qwen3.8-max`,
-  the free models, …), and give `api_key` (literal) or `api_key_env` (env var
-  name — preferred). `build_scheduler` maps `"opencode"` → `ConsoleLLMClient` /
+  the free models, …), and set `api_key` to `"!secret <key>"` with the key in
+  `secrets.json` (a literal `api_key` also works). `build_scheduler` maps `"opencode"` → `ConsoleLLMClient` /
   `ConsoleCodegenClient`, which keep the existing error contracts
   (`LLMError` / `CodegenError` / `DegenerationError`) and the same opt-in
   sampler behavior (none sent unless configured). The `OpenAICompatClient`
@@ -922,39 +975,49 @@ CLI, unit tests (24) + integration tests (2).
   check** (inline fixtures, loopback `http.server` for HTTP bodies, no external
   network) that never certifies the live integration — only a real run does.
   The body owns no data; everything comes from the runner via `ctx.config`.
-- **Seed skills.** `seeds/<category>/<name>/` ships a real starter integration in
-  the exact generated-skill folder format (`skill.py`, `contract.json`,
-  `skill.test.py`, plus `manifest.json` with the description). `merge_seed_store`
-  loads them into every tree at startup; recorded config (credentials collected
-  at first fire) is written to the runtime store `data/skills/`, so the committed
-  seed never holds secrets, and a generated body with the same name replaces the
-  seed. `nextcloud.create_event` is the authoritative worked example (CalDAV PUT;
-  derives the title/date/time from the query, asks for missing fields and
-  resumes, resolves the target calendar with a SemIf choice over the owned
-  calendars — a strong winner is used, otherwise the configured default);
-  `nextcloud.next_event` is the read counterpart (Nextcloud CalDAV, recurring
-  events expanded server-side); `nextcloud.create_task`
+- **Skill packs.** `packs/<name>/` bundles a concern with its skills: a
+  `pack.json` manifest (name, concern, `categories` → descriptions, `bridges`
+  referenced by name, `requires`, and a `config` schema) plus
+  `skills/<category>/<name>/` in the exact generated-skill folder format
+  (`skill.py`, `contract.json`, `skill.test.py`, plus `manifest.json` with the
+  description). `semif_agent/packs.py` discovers them (`PackRegistry`, scanning
+  `skill_packs` roots for `*/pack.json`; a root with no manifest is one implicit
+  pack), and `merge_packs` loads every **enabled** pack into the tree at startup.
+  Pack enable is one switch: an explicit `packs.<name>.enabled`, else a bridge
+  pack follows `bridges.<bridge>.enabled`, else `enabled_by_default`. Disabling a
+  pack drops its categories entirely (including generated bodies authored into
+  one) and stops its bridge. Recorded config (credentials collected at first
+  fire) is written to the runtime store `data/skills/`, so the committed pack
+  never holds secrets, and a generated body with the same name replaces the pack
+  skill. The shipped packs: `nextcloud`, `simplex`, `outlook`, `browser` (each
+  owning its bridge), and `essentials` (the built-in local utilities `time` +
+  `calculator`; no bridge). `nextcloud.create_event` is the authoritative worked
+  example (CalDAV PUT; derives the title/date/time from the query, asks for
+  missing fields and resumes, resolves the target calendar with a SemIf choice
+  over the owned calendars — a strong winner is used, otherwise the configured
+  default); `nextcloud.next_event` is the read counterpart (Nextcloud CalDAV,
+  recurring events expanded server-side); `nextcloud.create_task`
   adds a task to a Nextcloud task list through the Nextcloud bridge (`GET
   /tasklists` for a VTODO-capable target, `POST /tasks` to create it, the LLM
   bridge to phrase the summary/description); `simplex.next_message` (read via the
   forwarding bridge), `simplex.send_message` (send to a contact resolved over the
   bridge's contact list), and `simplex.connect_link` (show/create the forwarding
-  bot's contact link) are the messenger seeds; `time.now`, `time.date`, `time.set_timer`, and
-  `time.set_alarm` are the local time utilities (`compute` transport, empty
-  contract) — they read the host clock and schedule on `ctx.timers`. Local time
-  is the top-level `timezone` config value (an IANA name such as
-  `America/Chicago`; `timers.local_now`/`resolve_timezone` resolve it via
+  bot's contact link) are the messenger pack skills; `time.now`, `time.date`,
+  `time.set_timer`, and `time.set_alarm` are the local time utilities (`compute`
+  transport, empty contract) — they read the host clock and schedule on
+  `ctx.timers`. Local time is the top-level `timezone` config value (an IANA name
+  such as `America/Chicago`; `timers.local_now`/`resolve_timezone` resolve it via
   `zoneinfo`), falling back to the host's own timezone when it is empty or
   unknown; `TimerService` formats due/fired times in that zone too. The nextcloud
-  seeds derive "now" the same way, so a request time is parsed in the user's
-  zone rather than the host's; `calculator.calculate` is the local-arithmetic
-  seed (`compute` transport, empty contract): bounded to two operands and one
-  operator, the operator is a SemIf choice over addition/subtraction/
-  multiplication/division/exponents/squares/cubes/square roots/cube roots/
-  fractions/percentages, SemIf picks the operands when the request offers more
-  numbers than the operator consumes, and the answer is spelled out in words for
-  the ear (an inexact result is announced as "approximately ...");
-  `tests/test_seed_skills.py` keeps them honest.
+  pack skills derive "now" the same way, so a request time is parsed in the
+  user's zone rather than the host's; `calculator.calculate` is the
+  local-arithmetic skill (`compute` transport, empty contract): bounded to two
+  operands and one operator, the operator is a SemIf choice over addition/
+  subtraction/multiplication/division/exponents/squares/cubes/square roots/cube
+  roots/fractions/percentages, SemIf picks the operands when the request offers
+  more numbers than the operator consumes, and the answer is spelled out in words
+  for the ear (an inexact result is announced as "approximately ...");
+  `tests/test_packs.py` keeps every pack skill honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
   `{"ref", "dirty"}`: `ref` is the short git commit sha the contract was read
@@ -1377,8 +1440,8 @@ CLI, unit tests (24) + integration tests (2).
   exercises `SimplexBridge` over a real loopback server (peek/pop, recipient
   resolution, outbound routing, token/body validation, `/address` success/503/502,
   daemon close on stop, catalog/`describe_bridges()`).
-  `tests/test_seed_skills.py` hermetically tests every
-  `seeds/<category>/<name>/` package, including `simplex.next_message`,
+  `tests/test_packs.py` hermetically tests every
+  `packs/<name>/skills/<category>/<leaf>/` package, including `simplex.next_message`,
   `simplex.send_message`, and
   `simplex.connect_link`. `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
@@ -1399,13 +1462,46 @@ CLI, unit tests (24) + integration tests (2).
   installs it and downloads the models (openWakeWord into the venv package dir,
   the Piper voice into `.runtime/voice/tts`, faster-whisper into `.runtime/hf`).
 
+### skill packs (bundles)
+
+- **What they are.** A pack bundles a concern/product with the skills that serve
+  it, in `packs/<name>/`: a `pack.json` manifest plus
+  `skills/<category>/<leaf>/` folders (the exact generated-skill format). The
+  manifest binds the pieces that used to be scattered by convention:
+  `concern`/`title`, `categories` (id -> scope description, feeding
+  `CATEGORY_DESCRIPTIONS`), `bridges` (names referencing `bridges/registry.py`
+  `CATALOG` — bridge *code* stays in `bridges/`, isolation is non-negotiable),
+  `requires` (optional deps like `playwright`), `enabled_by_default`, and a
+  `config` schema. `semif_agent/packs.py` discovers them (`PackRegistry`, which
+  scans the `skill_packs` roots for `*/pack.json`; a root with no manifest is one
+  implicit pack, so a plain skills directory works) and `merge_packs` loads every
+  **enabled** pack at startup.
+- **Enable is one switch.** `pack_enabled` resolves: an explicit
+  `packs.<name>.enabled`, else a bridge pack follows its
+  `bridges.<bridge>.enabled`, else `enabled_by_default`. Disabling a pack drops
+  its categories entirely (including any generated body authored into one) and
+  stops its bridge — a host never offers a skill whose bridge is off. The switch
+  lives in the pack's `config/packs/<name>.json` fragment.
+- **Config is pack-owned.** A pack's `config` schema (key -> `type`/`default`/
+  `doc`/`secret`) owns its defaults and drives both `config.example.json`
+  generation and `check-config` validation. Bridge packs map the schema onto
+  `bridges.<name>`; a bridge-less pack (e.g. `essentials`) maps onto
+  `packs.<name>`. Shared, skill-less bridges (the LLM bridge) live in
+  `semif_agent/config.py` `SHARED_BRIDGE_SCHEMA`.
+- **Shipped packs.** `nextcloud`, `simplex`, `outlook`, `browser` (each owning
+  its bridge) and `essentials` (the built-in local utilities `time` +
+  `calculator`; no bridge). Adding a concern means adding a pack, not editing
+  `skills.py`.
+
 ### bridges (third-party API services)
 
 - **What they are.** A bridge service is a standalone process that stands up a
   simple, secure localhost HTTP layer in front of one third-party system so a
   codegen-authored skill body never speaks that system's native protocol.
   SimpleX is the first; adding a service means adding a class to
-  `bridges/registry.py` `CATALOG` and a `config.example.json` block. The catalog
+  `bridges/registry.py` `CATALOG`, a `pack.json` whose `config` schema carries
+  its block (see `semif_agent/packs.py`; a shared, skill-less bridge like the
+  LLM bridge goes in the core `SHARED_BRIDGE_SCHEMA` instead). The catalog
   (`BridgeInfo`: name, service, description, URL config var, other config vars
   with one-line docs, auth header + token config var, and endpoints with
   request/response/error shapes) is injected into every codegen prompt
@@ -1454,7 +1550,7 @@ CLI, unit tests (24) + integration tests (2).
   skill config. Skills reach a bridge with the ordinary `http`
   transport, so their hermetic tests are loopback HTTP like any other HTTP body.
   `simplex.next_message`, `simplex.send_message`, and `simplex.connect_link` are
-  the seeds.
+  the pack skills.
 - **LLM bridge** (`bridges/llm.py`). A generic `POST /chat`
   `{"messages": [{"role","content"}, ...], "max_tokens"?: int}` ->
   `{"text": "<model reply>"}` (plus `GET /health`, `400` bad body, `502` model
@@ -1482,7 +1578,7 @@ CLI, unit tests (24) + integration tests (2).
   and `verify_tls`/`timeout`); `build_bridge` passes the top-level
   `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
   `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
-  the same account the nextcloud seeds collect is configured once and a block value
+  the same account the nextcloud pack skills collect is configured once and a block value
   wins. Bodies reach it via the derived `nextcloud_bridge_url` (+ optional
   `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
   Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
@@ -1569,7 +1665,7 @@ CLI, unit tests (24) + integration tests (2).
   `/goto`, `/click` (selector or visible text), `/fill`, `/press`, `/select`,
   `/wait`, `/back`, `/forward`, `/reset`. Bodies reach it via the derived
   `browser_bridge_url` (+ optional `browser_bridge_token`). Three
-  `seeds/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
+  `packs/browser/skills/browser/*` skills ship (`open_page`, `read_page`, `screenshot`).
   `tests/test_browser_bridge.py` exercises the routes over a loopback HTTP server
   with an injected fake driver (no browser, no Playwright needed).
 
@@ -1605,7 +1701,7 @@ covered. Deferred follow-ups:
   pinned v7.0.3 **does** have `/_read chat @<id>`, `/_read chat items @<id>
   <ids>`, and `/_read user <uid>`; an earlier note claiming v7 had no mark-read
   command was wrong.)
-- [x] **3. `simplex.send_message` seed** (`seeds/simplex/send_message/`). The
+- [x] **3. `simplex.send_message` pack skill** (`packs/simplex/skills/simplex/send_message/`). The
   outbound counterpart to `simplex.next_message`: resolves the recipient with a
   SemIf sub-decision over the bridge's `/contacts` (falling back to the
   configured default contact), writes the message from the request or the LLM
@@ -1626,7 +1722,7 @@ covered. Deferred follow-ups:
   `bridges/outlook_client.py`). Shipped: the `OutlookBridge` exposes mail,
   calendar, Microsoft To Do, contacts, and OneDrive over one JSON surface in
   front of Graph; OAuth2 device-code + refresh (`scripts/outlook-auth.py`, tokens
-  under `.runtime/outlook/token.json`); seven `seeds/outlook/*` skills
+  under `.runtime/outlook/token.json`); seven `packs/outlook/skills/outlook/*` skills
   (`next_message`, `send_message` confirm-gated, `next_event`, `create_event`,
   `create_task`, `list_contacts`, `list_files`). Deferred: writing/reusing
   Outlook app-registration guidance in the docs, and a mail-send seed that
@@ -1638,7 +1734,7 @@ covered. Deferred follow-ups:
   with a persistent profile; optional heavy dep installed via
   `requirements/browser.txt` + `bootstrap.sh --browser`, lazy so a missing
   browser is a per-call 503 and never aborts the other bridges; the async API
-  runs on one dedicated event-loop thread. Three `seeds/browser/*` skills
+  runs on one dedicated event-loop thread. Three `packs/browser/skills/browser/*` skills
   (`open_page`, `read_page`, `screenshot`). Deferred: arbitrary JS `evaluate`,
   file upload/download, multiple tabs/contexts, and a per-URL allowlist.
 

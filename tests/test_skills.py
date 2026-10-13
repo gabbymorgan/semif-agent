@@ -143,7 +143,7 @@ def _scheduler(tmp_path, codegen=None, choices=None, default="success", verbosit
         "skills": {},
         "category_registry": str(tmp_path / "categories.json"),
         "skill_bodies": str(tmp_path / "skills"),
-        "skill_seeds": str(tmp_path / "seeds"),
+        "skill_packs": str(tmp_path / "seeds"),
     }
     if verbosity is not None:
         config["verbosity"] = verbosity
@@ -561,7 +561,7 @@ def test_merge_seed_store_falls_back_to_name_and_body_store_wins(tmp_path):
 def test_scheduler_loads_committed_seed_skills(tmp_path):
     """The real seed package ships in the tree at startup with its manifest
     description and declared integration."""
-    seed_root = Path(__file__).resolve().parent.parent / "seeds"
+    seed_root = Path(__file__).resolve().parent.parent / "packs"
     scheduler = Scheduler(
         engine=SemIfEngine(EngineConfig()),
         llm=LLMClient(base_url="http://localhost:1/v1", model="test"),
@@ -569,7 +569,7 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
         config={
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(seed_root),
+            "skill_packs": str(seed_root),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )
@@ -586,20 +586,20 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
 
 def test_load_config_anchors_runtime_paths_to_checkout(tmp_path):
     """Path-valued config keys resolve against the checkout, not the cwd, so a
-    fresh clone finds its committed seeds from anywhere; absolute paths pass
+    fresh clone finds its committed packs from anywhere; absolute paths pass
     through untouched."""
     config_file = tmp_path / "config.json"
     config_file.write_text(
         json.dumps(
             {
-                "skill_seeds": "seeds",
+                "skill_packs": "packs",
                 "skill_bodies": "data/skills",
                 "log": "/absolute/decisions.jsonl",
             }
         )
     )
     config = load_config(str(config_file))
-    assert config["skill_seeds"] == str(REPO_ROOT / "seeds")
+    assert config["skill_packs"] == str(REPO_ROOT / "packs")
     assert config["skill_bodies"] == str(REPO_ROOT / "data/skills")
     assert config["category_registry"] == str(REPO_ROOT / "data/categories.json")
     assert config["log"] == "/absolute/decisions.jsonl"
@@ -607,7 +607,7 @@ def test_load_config_anchors_runtime_paths_to_checkout(tmp_path):
 
 
 def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
-    """A fresh checkout's seeds come from the anchored `seeds/` path even when
+    """A fresh checkout's packs come from the anchored `packs/` path even when
     the process runs from an unrelated directory (the zero-skills regression:
     relative paths resolved against cwd, so the tree was only response.reject
     and navigation fell into the codegen loop)."""
@@ -615,7 +615,7 @@ def test_committed_seeds_load_from_a_foreign_cwd(tmp_path, monkeypatch):
     config_file.write_text(
         json.dumps(
             {
-                "skill_seeds": "seeds",
+                "skill_packs": "packs",
                 "skill_bodies": str(tmp_path / "skills"),
                 "category_registry": str(tmp_path / "categories.json"),
                 "log": str(tmp_path / "decisions.jsonl"),
@@ -1168,7 +1168,7 @@ def test_dispatch_action_tau_controls_catchall_routing(tmp_path):
                 "navigation": {"action_tau": action_tau},
                 "category_registry": str(tmp_path / "categories.json"),
                 "skill_bodies": str(tmp_path / "skills"),
-                "skill_seeds": str(tmp_path / "seeds"),
+                "skill_packs": str(tmp_path / "seeds"),
             },
             trace=TraceLog(str(tmp_path / "runs.jsonl")),
         )
@@ -1212,7 +1212,7 @@ def test_dispatch_intent_tau_controls_reuse_vs_create(tmp_path):
                 "navigation": {"intent_tau": intent_tau},
                 "category_registry": str(tmp_path / "categories.json"),
                 "skill_bodies": str(tmp_path / "skills"),
-                "skill_seeds": str(tmp_path / "seeds"),
+                "skill_packs": str(tmp_path / "seeds"),
             },
             trace=TraceLog(str(tmp_path / "runs.jsonl")),
         )
@@ -1350,7 +1350,7 @@ def test_dispatch_confident_leaf_winner_still_runs_intent_guard(tmp_path):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )
@@ -1396,7 +1396,7 @@ def test_dispatch_create_category_queues_draft_and_is_not_fatal(tmp_path):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
         },
         trace=trace,
     )
@@ -2499,7 +2499,7 @@ def test_chain_continues_then_completes(tmp_path):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )
@@ -2585,7 +2585,7 @@ def test_compound_request_runs_part_step_then_chains(tmp_path):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )

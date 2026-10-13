@@ -1,0 +1,25 @@
+{
+  "name": "nextcloud",
+  "title": "Nextcloud",
+  "concern": "The user's Nextcloud account: calendar events and scheduling, to-do tasks, files, contacts, and notes.",
+  "categories": {
+    "nextcloud": "Nextcloud productivity: the user's calendar events and scheduling (reading or changing events and reminders) and the user's to-do tasks and task lists."
+  },
+  "bridges": ["nextcloud"],
+  "requires": [],
+  "enabled_by_default": true,
+  "config": {
+    "enabled": {"type": "bool", "default": true, "doc": "Load this pack's skills and run its bridge."},
+    "host": {"type": "str", "default": "127.0.0.1", "doc": "Bridge bind address (localhost only)."},
+    "port": {"type": "int", "default": 5230, "doc": "Bridge listen port."},
+    "token": {"type": "str", "default": "", "secret": true, "doc": "Shared secret required in the X-Semif-Token header when set."},
+    "url": {"type": "str", "default": "", "doc": "Nextcloud base URL, e.g. https://cloud.example.com."},
+    "username": {"type": "str", "default": "", "doc": "Nextcloud username."},
+    "app_password": {"type": "str", "default": "", "secret": true, "doc": "Nextcloud app password (Settings > Security > Devices & sessions), not the account password."},
+    "default_calendar": {"type": "str", "default": "", "doc": "Calendar used when a request names none and the account has several."},
+    "default_task_calendar": {"type": "str", "default": "", "doc": "VTODO-capable task list used when a request names none."},
+    "default_addressbook": {"type": "str", "default": "", "doc": "Addressbook used when a request names none."},
+    "verify_tls": {"type": "bool", "default": true, "doc": "false skips certificate verification (self-signed hosts)."},
+    "timeout": {"type": "int", "default": 30, "doc": "Per-request timeout in seconds."}
+  }
+}

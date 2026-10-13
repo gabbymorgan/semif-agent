@@ -10,10 +10,12 @@
 # re-cloned — only the SemIf engine and the simplex-chat binary are fetched.
 # Clone the agent repo first (its SSH key must be registered on your git host).
 #
-# config.json is the per-machine USER config and this script NEVER writes it. It
-# seeds config.json from config.example.json only when config.json is absent,
-# then reads every per-machine value from config.json; only a human edits
-# config.json afterwards. Pinned external refs (SemIf commit, GGUF url+sha256,
+# config.json is the per-machine USER config (a thin index over config/*.json)
+# and this script NEVER rewrites it. It seeds the split config via `config-init`
+# (config/core.json, config/gateway.json, config/bridges.json, config/packs/*.json,
+# the config.json index, and an empty secrets.json) only when config.json is
+# absent, then reads every per-machine value from the merged config; only a human
+# edits it afterwards. Pinned external refs (SemIf commit, GGUF url+sha256,
 # HF tokenizer revision, simplex-chat version/url+sha256) live in the committed
 # pins.json and the python dep pins in requirements/staging.txt — bump those
 # (via git) and rerun to upgrade.
@@ -27,8 +29,8 @@
 # Only artifacts that operationally must live elsewhere are outside: the SSH
 # key (~/.ssh) and the real systemd user dir/linger.
 #
-# Flags override the values read from config.json FOR THIS RUN ONLY; nothing is
-# written back to config.json.
+# Flags override the values read from the merged config FOR THIS RUN ONLY;
+# nothing is written back to the config.
 #
 # Usage:
 #   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
@@ -104,12 +106,22 @@ if [[ ! -f "$PINS" ]]; then
   exit 1
 fi
 
-# config.json is per-machine USER config. Seed it once from the template, then
-# never write it again — only a human edits config.json.
+# config.json is per-machine USER config. Seed it once (as a thin index plus the
+# split config/ fragments + secrets.json), then never write it again — only a
+# human edits it. The committed config.example.json is GENERATED from the pack +
+# core schemas; see `python -m semif_agent.cli check-config --write-example`.
 if [[ ! -f "$CONFIG" ]]; then
-  echo "== seeding config.json from config.example.json (edit it to configure this machine)"
-  cp "$EXAMPLE" "$CONFIG"
+  echo "== seeding config/ + secrets.json (edit them to configure this machine)"
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m semif_agent.cli config-init --path "$CONFIG" \
+    || { echo "config-init failed; falling back to a flat config.json from the example" >&2; cp "$EXAMPLE" "$CONFIG"; }
 fi
+
+# The live config may be split (config.json includes config/*.json); merge it so
+# the reads below see one flat object. Stdlib-only, so it works before the venv.
+MERGED_CONFIG="$RUNTIME/config.merged.json"
+mkdir -p "$RUNTIME"
+python3 "$REPO_ROOT/scripts/config_merge.py" "$CONFIG" > "$MERGED_CONFIG" \
+  || { echo "could not read $CONFIG" >&2; exit 1; }
 
 # --- read pins from the committed pins.json ---------------------------------
 # The ASCII unit separator (\x1f) delimits fields so an empty value never
@@ -154,7 +166,7 @@ fi
 # --- read per-machine values from config.json (flags override for this run) --
 IFS=$'\x1f' read -r CFG_LLM_URL CFG_LLM_MODEL CFG_LLM_PROVIDER CFG_CODEGEN_URL CFG_CODEGEN_MODEL \
   SIMPLEX_PORT SIMPLEX_DISPLAY SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY < <(
-  python3 - "$CONFIG" <<'PY'
+  python3 - "$MERGED_CONFIG" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 s = cfg.get("simplex_chat", {})
@@ -263,7 +275,7 @@ fi
 # host must not get one. `--gpu <backend>` forces a build; `--gpu auto` (the
 # default) builds a GPU backend only when config.json asks for offload
 # (`engine.gpu_layers` nonzero).
-CONFIG_GPU_LAYERS="$(python3 - "$CONFIG" <<'PY'
+CONFIG_GPU_LAYERS="$(python3 - "$MERGED_CONFIG" <<'PY'
 import json, sys
 try:
     print(int(json.load(open(sys.argv[1])).get("engine", {}).get("gpu_layers", 0) or 0))
@@ -373,7 +385,7 @@ fi
 if [[ "$BROWSER" = 1 ]]; then
   echo "== installing browser-bridge deps into $VENV"
   "$PIP" install -r "$REPO_ROOT/requirements/browser.txt"
-  BROWSER_ENGINE="$("$PYTHON" - "$CONFIG" <<'PY' 2>/dev/null || true
+  BROWSER_ENGINE="$("$PYTHON" - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
@@ -433,7 +445,7 @@ PY
 # warns (the gateway reports the missing model at startup) rather than aborting.
 if [[ "$VOICE" = 1 ]]; then
   echo "== downloading voice models (openWakeWord + Piper + faster-whisper)"
-  HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" --config "$CONFIG" \
+  HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" --config "$MERGED_CONFIG" \
     || echo "WARN: voice model download failed; re-run scripts/voice-models.py" >&2
 fi
 
@@ -527,7 +539,7 @@ fi
 # --- stage 8c: forwarding bridge contact address --------------------------------------
 # The forwarding bridge owns a second daemon/profile; its own contact link is the
 # one `simplex.connect_link` shows. Print it too so the user can share it.
-BRIDGE_FORWARD_WS="$("$PYTHON" - "$REPO_ROOT/config.json" <<'PY' 2>/dev/null || true
+BRIDGE_FORWARD_WS="$("$PYTHON" - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
@@ -625,9 +637,11 @@ fi
 cat <<EOF
 
 Done. Next steps:
-  1. Edit config.json — set llm.model/llm.base_url and codegen.model/codegen.base_url.
-     bootstrap.sh seeded config.json from config.example.json (if it was absent)
-     and NEVER rewrites it; only you edit config.json.
+  1. Edit the split config (config/core.json, config/gateway.json,
+     config/packs/*.json) — set llm.model/llm.base_url and
+     codegen.model/codegen.base_url; put credentials in secrets.json.
+     bootstrap.sh seeded the config via config-init (if it was absent)
+     and NEVER rewrites it; only you edit it.
   cd "$REPO_ROOT"
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run
   HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)
@@ -679,7 +693,7 @@ Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
   - Runs inside the same 'semif-bridge' process (Nextcloud is plain HTTPS, so
     there is no separate daemon). Configure the account once in config.json under
     bridges.nextcloud (url/username/app_password) — or reuse the top-level
-    nextcloud_* values the nextcloud seeds collect. Skills call it at the address
+    nextcloud_* values the nextcloud pack skills collect. Skills call it at the address
     derived from bridges.nextcloud (default http://127.0.0.1:5230).
 
 Browser bridge (browser automation for skills):
@@ -727,7 +741,7 @@ Browser bridge (browser automation for skills):
     (useful the first time you sign in to a site); POST /reset with purge=true
     wipes the stored profile.
   - Skills call it at the address derived from bridges.browser (host/port,
-    default http://127.0.0.1:5232); the shipped seeds are browser.open_page,
+    default http://127.0.0.1:5232); the shipped pack skills are browser.open_page,
     browser.read_page, and browser.screenshot.
   - If the bridge reports 503, the browser failed to launch — run:
       PLAYWRIGHT_BROWSERS_PATH=$BROWSERS "$PYTHON" -m playwright install $BROWSER_ENGINE

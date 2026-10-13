@@ -23,6 +23,17 @@ from pathlib import Path
 
 from .dream import dream as run_dream
 from .codegen import CodegenClient
+from .config import (
+    ConfigError,
+    DEFAULT_SECRETS_FILE,
+    generate_example_config,
+    load_config_file,
+    load_secrets,
+    missing_secret_refs,
+    resolve_secrets,
+    validate_config,
+    write_split_config,
+)
 from .console import (
     OPENCODE_BASE_URL,
     ConsoleCodegenClient,
@@ -33,6 +44,7 @@ from .engine import DecisionEngine, EngineConfig, EngineUnavailable, SemIfEngine
 from .winnow import WinnowConfig, WinnowEngine
 from .llm import LLMClient, SemIfLLMClient
 from .log import DecisionLog
+from .packs import load_packs
 from .scheduler import Scheduler
 from .skills import tree_summary
 from .trace import TraceLog
@@ -43,7 +55,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WINNOW_URL = "http://127.0.0.1:8091"
 
 _PATH_KEYS = (
-    "skill_seeds",
+    "skill_packs",
     "skill_bodies",
     "category_registry",
     "deleted_skills",
@@ -51,7 +63,7 @@ _PATH_KEYS = (
     "trace",
 )
 _PATH_DEFAULTS = {
-    "skill_seeds": "seeds",
+    "skill_packs": "packs",
     "skill_bodies": "data/skills",
     "category_registry": "data/categories.json",
     "deleted_skills": "data/deleted_skills.json",
@@ -66,18 +78,14 @@ def _anchor_path(value: str) -> str:
 
 
 def _resolve_api_key(cfg: dict) -> str:
-    """Service-account key for an authenticated provider.
+    """The configured API key.
 
-    A literal `api_key` wins; otherwise `api_key_env` names an environment
-    variable (preferred, so the secret never lands in config.json).
+    Secrets live in the gitignored `secrets.json` and are resolved to a literal
+    by `load_config` (a `"!secret <key>"` value becomes its value); a literal key
+    in the block also works. There is deliberately no `api_key_env` — secrets.json
+    is the one place credentials live.
     """
-    key = cfg.get("api_key") or ""
-    if key:
-        return str(key)
-    env = cfg.get("api_key_env")
-    if env:
-        return os.environ.get(str(env), "")
-    return ""
+    return str(cfg.get("api_key") or "")
 
 
 def _opt_float(value) -> float | None:
@@ -112,8 +120,9 @@ def _provider_endpoint(cfg: dict, default_base: str) -> dict:
 
     `provider` selects the class (`opencode` → the Console client) and the base
     URL default: an explicit `base_url` always wins, else the Console URL for
-    `opencode` and `default_base` (ollama) otherwise. Auth comes from
-    `api_key`/`api_key_env`; `extra_headers` passes through for custom schemes.
+    `opencode` and `default_base` (ollama) otherwise. Auth comes from `api_key`
+    (a literal or a `!secret` value already resolved by `load_config`);
+    `extra_headers` passes through for custom schemes.
     """
     provider = str(cfg.get("provider", "ollama") or "ollama").lower()
     base_url = cfg.get("base_url") or (
@@ -128,26 +137,35 @@ def _provider_endpoint(cfg: dict, default_base: str) -> dict:
 
 
 def load_config(path: str = "config.json") -> dict:
-    """Load config.json and anchor its runtime paths to the checkout root.
+    """Load the per-machine config and anchor its runtime paths to the checkout.
 
-    config.json is the per-machine user config and is required: bootstrap.sh
-    seeds it from config.example.json once, and only a human edits it. There is
-    no in-code fallback — a missing config.json is a hard error.
+    config.json is a thin index (`{"include": ["config/core.json", ...]}`); each
+    included fragment is deep-merged in order (later wins). Secrets are written
+    as `"!secret <key>"` and resolved from the gitignored secrets file (default
+    `secrets.json` beside the index). The config is required: bootstrap seeds it
+    once and only a human edits it — there is no in-code fallback.
 
-    Path-valued keys (`skill_seeds`, `skill_bodies`, `category_registry`, `log`,
+    Path-valued keys (`skill_packs`, `skill_bodies`, `category_registry`, `log`,
     `trace`) resolve against REPO_ROOT, not the process cwd, so a fresh clone
-    loads its committed seeds and writes runtime artifacts into the checkout no
+    loads its committed packs and writes runtime artifacts into the checkout no
     matter where the CLI is invoked from. Absolute values pass through untouched.
     """
     config_path = Path(path)
-    if not config_path.is_file():
-        raise SystemExit(
-            f"config.json not found at {config_path} — run scripts/bootstrap.sh "
-            f"to seed it from config.example.json, then configure it"
-        )
-    config = json.loads(config_path.read_text())
+    try:
+        config = load_config_file(config_path)
+    except ConfigError as exc:
+        raise SystemExit(str(exc))
+    secrets_path = config.get("secrets_file") or DEFAULT_SECRETS_FILE
+    secrets_path = Path(secrets_path)
+    if not secrets_path.is_absolute():
+        secrets_path = config_path.parent / secrets_path
+    config = resolve_secrets(config, load_secrets(secrets_path))
     for key in _PATH_KEYS:
-        config[key] = _anchor_path(config.get(key) or _PATH_DEFAULTS[key])
+        value = config.get(key)
+        if isinstance(value, list):
+            config[key] = [_anchor_path(str(item)) for item in value]
+        else:
+            config[key] = _anchor_path(str(value or _PATH_DEFAULTS[key]))
     return config
 
 
@@ -956,9 +974,86 @@ def run_bridge(scheduler: Scheduler, config: dict, name: str | None = None) -> i
     )
 
 
+def _anchor_pack_roots(raw: dict) -> list[str]:
+    """The pack roots from a raw (un-anchored) config, resolved against REPO_ROOT."""
+    roots = raw.get("skill_packs") or "packs"
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    anchored = []
+    for root in roots:
+        path = Path(str(root))
+        anchored.append(str(path if path.is_absolute() else REPO_ROOT / path))
+    return anchored
+
+
+def check_config(path: str = "config.json", write_example: str | None = None) -> int:
+    """Validate the split config against the core + pack schemas.
+
+    With `write_example`, regenerate the committed `config.example.json` from
+    the schemas (the pack manifests + the core schema) instead of validating.
+    Validation reports type mismatches, unknown keys, and any `!secret`
+    reference missing from the secrets file.
+    """
+    config_path = Path(path)
+    try:
+        raw = load_config_file(config_path)
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    packs = load_packs({**raw, "skill_packs": _anchor_pack_roots(raw)})
+    if write_example is not None:
+        example = generate_example_config(packs)
+        Path(write_example).write_text(json.dumps(example, indent=2) + "\n")
+        print(f"wrote {write_example} ({len(packs)} packs)")
+        return 0
+    secrets_path = raw.get("secrets_file") or DEFAULT_SECRETS_FILE
+    secrets_path = Path(secrets_path)
+    if not secrets_path.is_absolute():
+        secrets_path = config_path.parent / secrets_path
+    secrets = load_secrets(secrets_path)
+    problems = validate_config(raw, packs)
+    problems += [
+        f"secret {key!r} referenced but missing from {secrets_path}"
+        for key in missing_secret_refs(raw, secrets)
+    ]
+    errors = [p for p in problems if not p.startswith("warning: ")]
+    for problem in problems:
+        print(f"config: {problem}", file=sys.stderr)
+    if errors:
+        return 1
+    print(f"config ok: {len(packs)} packs validated")
+    return 0
+
+
+def config_init(path: str = "config.json") -> int:
+    """Seed a fresh split config + empty secrets file. Never overwrites.
+
+    Writes ``config/core.json``, ``config/gateway.json``, ``config/bridges.json``,
+    ``config/packs/*.json`` and the ``config.json`` index from the schemas, plus
+    an empty ``secrets.json``. A human then edits the fragments and fills in the
+    secrets.
+    """
+    config_path = Path(path)
+    if config_path.exists():
+        print(f"{config_path} already exists; leaving it alone", file=sys.stderr)
+        return 1
+    packs = load_packs({"skill_packs": _anchor_pack_roots({})})
+    example = generate_example_config(packs)
+    written = write_split_config(config_path.parent, example, packs)
+    secrets_path = config_path.parent / DEFAULT_SECRETS_FILE
+    if not secrets_path.exists():
+        secrets_path.write_text("{}\n")
+    print(
+        f"seeded {len(written)} config files under {config_path.parent or '.'}/ "
+        f"and {secrets_path.name}; edit them, then run `check-config`"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else list(sys.argv[1:])
-    config = load_config(_extract_config_path(argv))
+    config_path = _extract_config_path(argv)
+    config = load_config(config_path)
     parser = argparse.ArgumentParser(prog="semif-agent")
     parser.add_argument("--config", default="config.json")
     sub = parser.add_subparsers(dest="command")
@@ -969,6 +1064,21 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("dream", help="compute the prediction-observation cost report")
     sub.add_parser("skills", help="list the skill tree")
     sub.add_parser("status", help="show current process and queue")
+
+    cc_p = sub.add_parser(
+        "check-config", help="validate config/ against the core + pack schemas"
+    )
+    cc_p.add_argument(
+        "--write-example",
+        metavar="PATH",
+        default=None,
+        help="write the generated config.example.json to PATH and exit",
+    )
+
+    ci_p = sub.add_parser(
+        "config-init", help="seed a fresh split config/ + secrets.json (never overwrites)"
+    )
+    ci_p.add_argument("--path", default="config.json", help="config index path to seed")
 
     relabel_p = sub.add_parser("relabel", help="human override of a decision label")
     relabel_p.add_argument("id")
@@ -1009,6 +1119,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if args.command == "check-config":
+        return check_config(config_path, write_example=args.write_example)
+    if args.command == "config-init":
+        return config_init(args.path)
+
     scheduler, config = build_scheduler(config)
 
     if args.command == "run":

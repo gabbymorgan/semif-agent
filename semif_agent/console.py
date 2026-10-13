@@ -17,7 +17,8 @@ models use different wire formats and would need their own adapters.
 
 ``build_scheduler`` selects these classes from ``llm.provider`` /
 ``codegen.provider`` (``"opencode"`` vs the default ``"ollama"``) and passes
-``api_key`` (or ``api_key_env``). The error contracts are preserved: the `llm`
+``api_key`` (a literal or a ``!secret`` value already resolved by
+``load_config``). The error contracts are preserved: the `llm`
 variant still raises ``LLMError`` and the codegen variant ``CodegenError`` /
 ``DegenerationError``, so existing callers keep catching their own types.
 """

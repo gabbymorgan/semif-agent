@@ -12,6 +12,8 @@ data/skills/
 data/drafts/
 .pytest_cache/
 config.json
+config/
+secrets.json
 *.log
 # Machine-specific material: deployment notes (hostnames, addresses, SSH,
 # model choices), GPU offload probe, benchmark harness. Deliberately not part

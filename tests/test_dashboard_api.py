@@ -34,7 +34,7 @@ def build_scheduler(tmp_path, engine=None):
         log=log,
         config={
             "skills": {},
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
             "skill_bodies": str(tmp_path / "skills"),
             "category_registry": str(tmp_path / "categories.json"),
             "deleted_skills": str(tmp_path / "deleted_skills.json"),

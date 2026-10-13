@@ -175,7 +175,7 @@ def _scheduler(tmp_path) -> Scheduler:
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),
     )

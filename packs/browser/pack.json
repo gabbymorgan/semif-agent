@@ -1,0 +1,26 @@
+{
+  "name": "browser",
+  "title": "Browser",
+  "concern": "Real browser automation (Playwright): open a web page, read its text or links, take a screenshot, and click, type, or fill forms to carry out a task on a website.",
+  "categories": {
+    "browser": "Browser automation: opening a web page, reading its text or links, taking a screenshot, and clicking, typing, or filling forms to carry out a task on a website."
+  },
+  "bridges": ["browser"],
+  "requires": ["playwright"],
+  "enabled_by_default": false,
+  "config": {
+    "enabled": {"type": "bool", "default": false, "doc": "Load this pack's skills and run its bridge. Disabled by default: it needs the optional Playwright deps + browser binaries (scripts/bootstrap.sh --browser)."},
+    "host": {"type": "str", "default": "127.0.0.1", "doc": "Bridge bind address (localhost only)."},
+    "port": {"type": "int", "default": 5232, "doc": "Bridge listen port."},
+    "token": {"type": "str", "default": "", "secret": true, "doc": "Shared secret required in the X-Semif-Token header when set."},
+    "engine": {"type": "str", "default": "chromium", "doc": "chromium | firefox | webkit."},
+    "headless": {"type": "bool", "default": true, "doc": "false shows the browser window (to sign in once)."},
+    "channel": {"type": "str", "default": "", "doc": "Use an already-installed browser channel (chrome/msedge) and skip Playwright's download."},
+    "executable_path": {"type": "str", "default": "", "doc": "Use a specific browser binary; wins over channel."},
+    "profile_dir": {"type": "str", "default": "", "doc": "Persistent profile directory (logins survive across calls)."},
+    "browsers_path": {"type": "str", "default": "", "doc": "PLAYWRIGHT_BROWSERS_PATH override."},
+    "screenshot_dir": {"type": "str", "default": "", "doc": "Where screenshots are saved."},
+    "default_timeout": {"type": "float", "default": 30.0, "doc": "Default navigation/action timeout (seconds)."},
+    "max_text_chars": {"type": "int", "default": 20000, "doc": "Bound on returned page text."}
+  }
+}

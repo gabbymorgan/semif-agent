@@ -235,13 +235,11 @@ def test_list_models_parses_catalog():
 def test_provider_endpoint_selects_console_and_resolves_key(monkeypatch):
     from semif_agent import cli
 
-    monkeypatch.setenv("MY_CONSOLE_KEY", "envkey")
     console = cli._provider_endpoint(
-        {"provider": "opencode", "api_key_env": "MY_CONSOLE_KEY"},
-        "http://localhost:11434/v1",
+        {"provider": "opencode"}, "http://localhost:11434/v1"
     )
     assert console["base_url"] == OPENCODE_BASE_URL
-    assert console["api_key"] == "envkey"
+    assert console["api_key"] == ""
 
     ollama = cli._provider_endpoint({"provider": "ollama"}, "http://localhost:11434/v1")
     assert ollama["base_url"] == "http://localhost:11434/v1"
@@ -249,6 +247,13 @@ def test_provider_endpoint_selects_console_and_resolves_key(monkeypatch):
 
     literal = cli._provider_endpoint({"provider": "opencode", "api_key": "lit"}, "x")
     assert literal["api_key"] == "lit"
+
+    # api_key_env is gone: it is ignored, never resolved from the environment.
+    monkeypatch.setenv("MY_CONSOLE_KEY", "envkey")
+    legacy = cli._provider_endpoint(
+        {"provider": "opencode", "api_key_env": "MY_CONSOLE_KEY"}, "x"
+    )
+    assert legacy["api_key"] == ""
 
     explicit = cli._provider_endpoint(
         {"provider": "opencode", "base_url": "https://example.test/v1"}, "x"

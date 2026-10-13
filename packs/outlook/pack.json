@@ -1,0 +1,26 @@
+{
+  "name": "outlook",
+  "title": "Outlook",
+  "concern": "The user's Microsoft account (Outlook / Microsoft 365) through Microsoft Graph: mail, calendar events, Microsoft To Do tasks, contacts, and OneDrive files.",
+  "categories": {
+    "outlook": "Outlook / Microsoft 365: the user's mail, calendar events, Microsoft To Do tasks, contacts, and OneDrive files."
+  },
+  "bridges": ["outlook"],
+  "requires": [],
+  "enabled_by_default": false,
+  "config": {
+    "enabled": {"type": "bool", "default": false, "doc": "Load this pack's skills and run its bridge. Disabled by default: it needs an Entra ID client id and an authorization run first."},
+    "host": {"type": "str", "default": "127.0.0.1", "doc": "Bridge bind address (localhost only)."},
+    "port": {"type": "int", "default": 5231, "doc": "Bridge listen port."},
+    "token": {"type": "str", "default": "", "secret": true, "doc": "Shared secret required in the X-Semif-Token header when set."},
+    "client_id": {"type": "str", "default": "", "doc": "Entra ID public-client app id (not a secret)."},
+    "tenant": {"type": "str", "default": "common", "doc": "Entra tenant: common | organizations | consumers | a tenant id."},
+    "token_path": {"type": "str", "default": ".runtime/outlook/token.json", "doc": "Where scripts/outlook-auth.py stores the tokens (0600)."},
+    "default_calendar": {"type": "str", "default": "", "doc": "Calendar used when a request names none."},
+    "default_task_list": {"type": "str", "default": "", "doc": "Microsoft To Do list used when a request names none."},
+    "default_mail_folder": {"type": "str", "default": "inbox", "doc": "Mail folder read by default."},
+    "default_timezone": {"type": "str", "default": "UTC", "doc": "IANA zone for created events/tasks whose start has no offset."},
+    "verify_tls": {"type": "bool", "default": true, "doc": "false skips certificate verification."},
+    "timeout": {"type": "int", "default": 30, "doc": "Per-request timeout in seconds."}
+  }
+}

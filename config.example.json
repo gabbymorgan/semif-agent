@@ -1,35 +1,27 @@
 {
-  "_comment": "Per-machine config. config.json is gitignored. bootstrap.sh seeds config.json from this file only when config.json does not exist, and NOTHING writes config.json afterwards — only a human edits it. Pinned engine/tokenizer/GGUF/simplex-chat refs live in the committed pins.json, not here. Every machine keeps its own config.json. Top-level `timezone` is the IANA zone (e.g. America/Chicago) the agent reports local time in; empty means the host's local timezone.",
   "tau": 0.6,
   "max_reentries": 3,
   "query_recall_window": 30,
-  "_query_recall_window_comment": "Seconds a completed run stays recallable to a follow-up request in the same chat/source. A follow-up within the window is given the previous run's ledger as 'previous request' context (and bodies can reuse its result via last_result), so a reference like \"send it to Sam\" resolves against what the agent just did. 0 disables recall entirely. Measured from the previous run's completion; only the last completed real skill run per source is remembered (canned responses and housekeeping meta skills are never recalled).",
   "new_skill_creation": "allow",
-  "_new_skill_creation_comment": "Global new-skill creation mode: \"allow\" (create without asking), \"deny\" (never author new skills/categories), or \"ask\" (author only after the human approves the proposal). A category can override this in data/skills/<category>/config.json with its own \"new_skill_creation\" value; the built-in housekeeping and response categories are always denied in code.",
   "verbosity": "result",
-  "_verbosity_comment": "How much of a completed request to surface. \"result\" (default): only the final answer — an end user does not care which skills ran or which decisions were made. \"query\": also show each intermediate step of a chained request (its query + run-ledger entry). \"decision\": also show every SemIf decision (phase + selected option + probabilities) for a step — a debugging view.",
   "chain": {
-    "_comment": "Chained multi-step completion. When a run's outcome assessment says more work is needed, the request is re-dispatched with a compact run ledger and routed to the logical next skill, until the request is satisfied, fails into repair, or the chain is capped by max_reentries. result_chars is the ONE shared speakable budget applied to every skill's output (its result string and its ledger entry): a result is read in a chat message or heard as speech, so it is truncated to this many characters at a word boundary. A long product of a skill belongs in a file I/O side effect, not the result string (see CODEGEN.md/TESTGEN.md). The voice front end (gateway.voice.max_speak_chars) and the humanizer (gateway.humanize.max_chars) are downstream caps and should not exceed it.",
     "result_chars": 300
   },
   "assess": {
-    "_comment": "Thresholds for the three-way assess:outcome decision (is there additional work to be done to satisfy the request?): done (request satisfied), continue (the step worked but more work is needed; route the next step), failed (the step errored; offer repair). Verdict precedence is failed > done > continue, so a confident success/failure is honored and continue — the over-trigger — only wins when the model is genuinely unsure. Separate from the top-level tau so completion tuning does not move assessment/fidelity.",
     "done_tau": 0.5,
     "fail_tau": 0.5
   },
   "timezone": "",
   "navigation": {
-    "_comment": "Navigation is two-stage at BOTH levels and the guards are the create doors (no threshold gate). Category: the softmax offers each existing category WITH its description (bare names carried no signal) plus create_category; confirm_category_fit then confirms the winner's scope (phase navigate:category_scope, P(covers) >= category_tau) and a rejected winner authors a new category. The `response` catchall and create_category share a boundary arbitrated by the actionability guard confirm_non_action (phase navigate:actionability, P(non_action) >= action_tau): the closed response tree is reached ONLY when the input is not a request, so a request no skill covers (e.g. \"what is 255 * 12?\") authors instead of getting a canned reply. Leaf: the softmax offers only existing skills; confirm_skill_fit then decides what the winner does for the request — same (it performs the next action the request needs), part (the request needs more than one action and this skill performs one required part), or different (a new leaf is authored) (phase navigate:intent, P(same)+P(part) >= intent_tau). All three taus are separate from the top-level tau so tuning reuse-vs-create or actionability does not move run assessment/fidelity. The category check is deliberately permissive: with real descriptions in-scope requests score 0.9-1.0, so a borderline over-cover routes into a plausible category and the leaf guard catches it. A **category** softmax winner at or above `softmax_bypass_tau` (default 0.5) skips the scope confirm (traced `category_scope_bypassed`) — `create_category` is one of its options, so a confident winner really did beat authoring a category. The **leaf** intent guard is never bypassed: the leaf softmax offers only existing skills, so a confident winner is \"best of the wrong lot\", not a match, and the guard is the only leaf-level create door.",
     "intent_tau": 0.6,
     "category_tau": 0.75,
     "action_tau": 0.5,
     "softmax_bypass_tau": 0.5
   },
-  "queue": {"max_size": 100},
+  "queue": {
+    "max_size": 100
+  },
   "engine": {
-    "_comment": "Per-machine engine settings only. The pinned engine/tokenizer/GGUF refs (semif_repo, semif_ref, gguf_url, gguf_sha256, source, revision) live in the committed pins.json — bumped on update, never per-machine config. The GGUF path is derived from pins.json's engine.gguf_url under .runtime/models/; set `gguf` here only to override it with a custom path.",
-    "_gpu_comment": "gpu_layers: 0 keeps the CPU-only default, -1 offloads every layer, a positive count offloads that many. Requires a llama-cpp-python built with a GPU backend (bootstrap detects Vulkan/ROCm/CUDA). gpu_device picks the llama.cpp device index and gpu_split sets its split mode (0 = none).",
-    "_provider_comment": "provider selects the decision engine, exactly like llm.provider/codegen.provider: \"semif\" (default) is the local llama.cpp GGUF described below; \"winnow\" is a remote /v1/systemone typed-decision API configured by the `winnow` block (a different model, e.g. Winnow-12B on a ROCm host). The engine is always real: a provider that cannot be reached raises EngineUnavailable, which is fatal — there is no fallback model. The decision log and `dream` cost work unchanged either way.",
     "provider": "semif",
     "backend": "llamacpp",
     "context_tokens": 4096,
@@ -38,25 +30,22 @@
     "gpu_device": null,
     "gpu_split": 0,
     "winnow": {
-      "_comment": "Settings for provider == \"winnow\": a remote Winnow typed-decision server (`winnow-server`, ROCm/HIP on a dedicated GPU host) exposing POST /v1/systemone (choice questions) and /v1/chat/completions (text, used by llm.provider == \"semif\"). base_url is the server root; model is required (no default). context_tokens must mirror the server's --ctx-size: generated skill bodies are sized from the active engine's context so a fidelity decision can always ingest one whole. timeout bounds each request; retries is the number of transient-failure retries before the engine is declared unavailable (0 = a single attempt; an unreachable engine is fatal by contract). api_key/api_key_env add a bearer token (usually unset on a LAN); extra_headers/user_agent pass through for custom setups. The Winnow model holds the whole GPU, so it cannot be resident alongside a large codegen model — stop one before starting the other.",
       "base_url": "http://127.0.0.1:8091",
       "model": "",
       "context_tokens": 32768,
-      "api_key": "",
-      "api_key_env": "",
+      "api_key": "!secret engine_winnow_api_key",
       "timeout": 120,
       "retries": 0,
       "user_agent": "semif-agent",
       "extra_headers": {}
-    }
+    },
+    "gguf": ""
   },
   "llm": {
-    "_comment": "Small OpenAI-compatible model that authors a new category/skill title + description (never the runnable body — that is `codegen` below). Deliberately its own endpoint/model, so it can be local and fast even when codegen is remote. Runs on THIS machine's local ollama; bootstrap reads base_url/model from here (a --llm-url/--llm-model flag overrides for that run only) and pulls `model` if it is missing. `model` is required (no default): set it to a model the endpoint serves. Uses the same provider machinery as codegen (real SSE stream, token budget, idle watchdog); short JSON replies. Sampler params (temperature/top_p/presence_penalty/frequency_penalty) are opt-in: an unset value is omitted from the request so the server's model default applies — set them here only when you know the right values for the model. The draft is authored asynchronously by a single-slot worker and the request re-runs when it lands; an unreachable endpoint is graceful (traced, user notified), not fatal. disable_thinking sends reasoning_effort:none so a reasoning model answers the short JSON directly instead of spending the reply budget on hidden chain-of-thought (set false only for an endpoint that rejects the parameter). provider selects the transport: \"ollama\" (default; a local OpenAI-compatible server, context auto-detected via /api/show), \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code or glm-5.3, and provide api_key or api_key_env; the ollama probe is skipped), or \"semif\" (the loaded SemIf decision GGUF generates in-process via SemIfEngine.generate — no endpoint/model/api_key is used; see the `semif` block below).",
     "provider": "ollama",
     "base_url": "http://localhost:11434/v1",
     "model": "",
-    "api_key": "",
-    "api_key_env": "",
+    "api_key": "!secret llm_api_key",
     "user_agent": "",
     "timeout": 600,
     "stream": false,
@@ -69,18 +58,15 @@
     "frequency_penalty": 0.0,
     "disable_thinking": true,
     "semif": {
-      "_comment": "Settings for provider == \"semif\": the already-loaded SemIf engine model generates the text in-process (the same GGUF the decision engine scored with), so no base_url/model/api_key is used and `model` above is not required. temperature 0 = greedy decoding; max_tokens bounds the reply length (callers may override per call). Generation shares the engine's lock with decision scoring, so a reply briefly serializes against routing/assessment.",
       "temperature": 0.0,
       "max_tokens": 256
     }
   },
   "codegen": {
-    "_comment": "OpenAI-compatible model that writes runnable skill bodies. Runs on a REMOTE ollama host (bootstrap reads base_url/model from here; a --codegen-url/--codegen-model flag overrides for that run only); the local small model is `llm` above. `model` is required (no default): set it to a code-capable model the endpoint serves. Bodies perform real actions against the user's configured services via stdlib transports, read every operational value from ctx.config, and declare their integration (INTEGRATION: service/transport/config_vars). Larger/slower than the decision or title/description model. The transport always streams so the client-side token budget (output cap / peak total fill) can abort a runaway in real time; stream only toggles console echo of tokens. timeout is total seconds; idle_warn/idle_timeout surface a silent (wedged) stream. The context window is auto-detected via ollama /api/show; context_window is the manual fallback (0 = auto/default 100000). smart_limit/warn_limit and max_fill_ratio/warn_fill_ratio bound total fill; max_output caps streamed output (>=1 absolute tokens, 0<x<1 fraction of window); chars_per_token converts chars to the token estimate. temperature/top_p/presence_penalty/frequency_penalty are opt-in: an unset value is omitted from the request so the server's model/Modelfile default applies; set them here only when you know the right values for the model. A rejected body retries with a fresh short prompt (max_attempts attempts), reusing the same sampler params. PRIVACY: codegen is the primarily-cloud model, so it is shown ONLY a de-identified, reusable spec authored by the local `llm` (goal + generic service/transport) — never the user's request text, question answers, or any run output. After the body lands it is reviewed for real-action fidelity, then the data contract (contract.json) is derived in a separate call, then skill.test.py (hermetic mechanics test: loopback http.server for HTTP bodies, fixtures inline, no external network) in a shared-context call, and the test is auto-run as a subprocess (test_timeout seconds); on failure a 3-option SemIf decision (code/contract/test) regenerates the failing piece, bounded by test_max_attempts. contract_search.enabled auto-populates the skill config.json via SemIf against the global + category config. provider selects the transport: \"ollama\" (default; local OpenAI-compatible server, context auto-detected via /api/show) or \"opencode\" (the hosted OpenCode Console inference API at https://opencode.ai/inference/openai/v1 — set model to a Chat Completions family id such as kimi-k2.7-code, glm-5.3, or deepseek-v4.1-flash, and provide api_key or api_key_env; the ollama probe is skipped).",
     "provider": "ollama",
     "base_url": "http://localhost:11434/v1",
     "model": "",
-    "api_key": "",
-    "api_key_env": "",
+    "api_key": "!secret codegen_api_key",
     "user_agent": "",
     "timeout": 3600,
     "stream": true,
@@ -99,32 +85,26 @@
     "frequency_penalty": 1,
     "max_attempts": 3,
     "approval": {
-      "_comment": "The optional creation-approval gate (new_skill_creation == \"ask\"): the single-slot draft worker blocks after it authors a proposal and before anything is registered, waiting up to wait_timeout seconds for a human approve/deny. Denial or timeout aborts creation. Set 0 to wait forever.",
       "wait_timeout": 900
     },
     "fidelity": {
-      "_comment": "After the body lands, an authoring:fidelity SemIf decision (accept/reconsider, P(reconsider) >= tau or any static finding) checks whether it really performs the action vs simulates it (canned result, fabricated data, draft-by-default). The state carries the WHOLE body (never a prefix) plus a deterministic operation inventory and the de-identified goal, and asks the positive question (is there a concrete operation that realizes the goal?). tau is this gate's own threshold, separate from the top-level tau. Static INTEGRATION checks (declaration vs code) run alongside. The gate never diagnoses: a rejected body is regenerated with the raw evidence bundle (inventory + findings included), bounded by max_attempts; a still-fake body is accepted but traced, never a hard authoring failure.",
       "enabled": true,
       "max_attempts": 1,
       "tau": 0.6
     },
     "repair": {
-      "_comment": "A failed real run triggers a logged SemIf repair choice (retry / repair_skill / ask_user / no_repair) surfaced in the REPL and dashboard. Executing a repair is user-confirmed (a codegen write is slow); body repairs are bounded by max_attempts per skill and carry the observed failure into the regeneration.",
       "enabled": true,
       "max_attempts": 1
     },
     "test_timeout": 30,
     "test_max_attempts": 3,
-    "_artifact_budget_comment": "Generated artifacts are ingested WHOLE by a decision (the fidelity gate reads the entire skill body), so each is size-bounded. max_body_tokens/max_test_tokens are hard ceilings; 0 derives each from the ACTIVE decision engine's context (engine.context_tokens for the local GGUF, engine.winnow.context_tokens for Winnow) minus decision_reserve_tokens — the headroom for everything else in the fidelity state (goal, description, integration, findings, operation inventory, question, options, engine prefill margin). A positive value overrides the derivation: lower it if you don't want to wait on a long fidelity evaluation, raise it if your engine has a larger window. chars_per_token above converts the token budget to the char limit the parser enforces; a body over budget is rejected (ArtifactTooLong) and the codegen retry ladder asks for a shorter one.",
     "max_body_tokens": 0,
     "max_test_tokens": 0,
     "decision_reserve_tokens": 1024,
     "contract_search": {
-      "_comment": "After the data contract lands, run a SemIf choice per variable to auto-populate the skill config.json from the global config and the category config (data/skills/<category>/config.json). Logged as phase config:search.",
       "enabled": true
     },
     "degeneration": {
-      "_comment": "SemIf degeneration watchdog: while the body streams, a 2-option SemIf decision (continue/stop) is made every `interval` chars against the last `window` chars of content+reasoning (once `min_chars` have accumulated); P(stop) >= threshold aborts the write with a graceful stub. Recorded trace-only (kind `codegen`), never in the decision log. Disabled when no engine is available.",
       "enabled": true,
       "threshold": 0.9,
       "interval": 8000,
@@ -133,96 +113,23 @@
     }
   },
   "skill_bodies": "data/skills",
-  "skill_seeds": "seeds",
   "log": "data/decisions.jsonl",
   "trace": "data/runs.jsonl",
   "category_registry": "data/categories.json",
   "simplex_chat": {
-    "_comment": "Per-machine simplex-chat daemon settings. The pinned binary (version/bin_url/sha256) lives in the committed pins.json, not here. The command gateway talks to the daemon on `port` (profile .runtime/simplex/, unit semif-simplex.service). The SimpleX forwarding bridge owns its OWN daemon/profile on `forward_port` (profile .runtime/simplex-forward/, unit semif-simplex-forward.service) so messaging UX never shares the command bot's identity. bootstrap.sh renders both units from these values. gateway.simplex.ws_url must match `port`; bridges.simplex.ws_url must match `forward_port`.",
     "port": 5226,
     "display_name": "semif",
     "forward_port": 5228,
     "forward_display_name": "semif-forward"
   },
-  "bridges": {
-    "_comment": "Standalone third-party API bridges: a simple, secure local HTTP layer between codegen-authored skill bodies and real system services. Each bridge runs as its own process (`python -m semif_agent.cli bridge [--name NAME]`), one process per service daemon, and never runs inside the command gateway — gateway isolation is non-negotiable (see AGENTS.md). The bridge catalog (names, endpoints, config vars) is injected into the code-generation prompts via `semif_agent.bridges.describe_bridges()`.",
-    "simplex": {
-      "_comment": "SimpleX forwarding bridge: buffers every inbound DM (no allowlist — the point is to see who reached the bot through its invite link), and serves invite-link / read / send over HTTP. It owns its own simplex-chat daemon/profile (`ws_url`, `forward_port` above), separate from the command gateway's. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 5227,
-      "token": "",
-      "max_inbox": 100,
-      "ws_url": "ws://127.0.0.1:5228",
-      "user_id": 1,
-      "auto_accept": true,
-      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
-    },
-    "llm": {
-      "_comment": "LLM bridge: a generic `POST /chat` in front of the agent's configured `llm` model, so skill bodies can ask for short generated text (e.g. an event title + description) over HTTP instead of speaking the OpenAI-compatible protocol. It reuses the top-level `llm` client (endpoint/model/sampler configured once there); this block only carries the local listener. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. It runs inside the same `semif-bridge.service` process as the other enabled bridges.",
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 5229,
-      "token": ""
-    },
-    "nextcloud": {
-      "_comment": "Nextcloud bridge: files (WebDAV), calendar events and tasks (CalDAV), contacts (CardDAV), and Notes (the Notes app) over one uniform local JSON API, so skill bodies never speak the native DAV/OCS protocols. It has no service daemon (Nextcloud is plain HTTPS) and runs inside the same `semif-bridge` process as the other enabled bridges. The connection is configured HERE (url/username/app_password); when a value is blank the bridge falls back to the top-level nextcloud_url/nextcloud_username/nextcloud_app_password/nextcloud_default_calendar the nextcloud seeds already use, so the account is configured once. `app_password` is a Nextcloud app password (Settings > Security > Devices & sessions), not the account password. `default_calendar`/`default_task_calendar`/`default_addressbook` are used when a request names none and the account has several; task operations only ever target a VTODO-capable task list (GET /tasklists), never an event-only calendar. `verify_tls` false skips certificate verification (self-signed hosts). Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set.",
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 5230,
-      "token": "",
-      "url": "",
-      "username": "",
-      "app_password": "",
-      "default_calendar": "",
-      "default_task_calendar": "",
-      "default_addressbook": "",
-      "verify_tls": true,
-      "timeout": 30
-    },
-    "outlook": {
-      "_comment": "Outlook bridge: the user's Microsoft account (Outlook / Microsoft 365) through Microsoft Graph — mail, calendar events, Microsoft To Do tasks, contacts, and OneDrive files — over one uniform local JSON API, so skill bodies never speak Graph or OAuth. No service daemon and no extra dependency (Graph is plain HTTPS); it runs inside the same `semif-bridge` process as the other enabled bridges. Authorization is the OAuth2 device code flow: register an Entra ID public-client app, put its `client_id` here, run `scripts/outlook-auth.py` once, and the tokens are stored (0600) under `.runtime/outlook/token.json` (override with `token_path`). `tenant` is usually `common` (personal + work accounts). `default_calendar`/`default_task_list`/`default_mail_folder` are used when a request names none; `default_timezone` (IANA name) labels created events/tasks whose start has no offset. `verify_tls` false skips certificate verification. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. Disabled by default because it needs a client id + an authorization run first.",
-      "enabled": false,
-      "host": "127.0.0.1",
-      "port": 5231,
-      "token": "",
-      "client_id": "",
-      "tenant": "common",
-      "default_calendar": "",
-      "default_task_list": "",
-      "default_mail_folder": "inbox",
-      "default_timezone": "UTC",
-      "verify_tls": true,
-      "timeout": 30
-    },
-    "browser": {
-      "_comment": "Browser bridge: real browser automation via Playwright — open a URL, read a page's text/links, take a screenshot, and click/fill/press/select to complete a flow — behind one uniform local JSON API, so skill bodies never bundle a browser stack. Disabled by default because it needs the optional Playwright deps + browser binaries: install with `scripts/bootstrap.sh --browser` (browsers land under .runtime/browser). The bridge keeps a PERSISTENT profile under .runtime/browser/profile, so logins/cookies survive across calls and restarts (POST /reset with purge=true wipes it); `engine` is chromium|firefox|webkit and `headless` false shows the window. Skills call it at http://host:port (derived from this block; no top-level duplicate). Binds localhost only; an optional `token` is required in the X-Semif-Token header when set. A missing Playwright/browser is a 503 install hint, never a startup failure (the other bridges keep running). Set `channel` (e.g. chrome/msedge) or `executable_path` (a browser binary) to use an already-installed browser and skip Playwright's managed download entirely; `executable_path` wins if both are set.",
-      "enabled": false,
-      "host": "127.0.0.1",
-      "port": 5232,
-      "token": "",
-      "engine": "chromium",
-      "headless": true,
-      "channel": "",
-      "executable_path": "",
-      "profile_dir": "",
-      "browsers_path": "",
-      "screenshot_dir": "",
-      "default_timeout": 30,
-      "max_text_chars": 20000
-    }
-  },
   "gateway": {
-    "_comment": "Messenger COMMAND intake — and nothing else. `python -m semif_agent.cli gateway` runs one or more platforms (`--platform simplex,lxmf` or `all`) in a SINGLE process sharing one scheduler/skill store — never run two gateway processes over one store. Each platform feeds authorized DM text through the normal gate/score/queue/dispatch pipeline; results, authoring questions, and repair offers are sent back to the originating chat. It must never read a contact's history, show/create invite links, or compose on the user's behalf — that is the independent bridge services' job (`bridges`). home_channel receives messages whose origin chat is unknown (e.g. a background repair offer). reply_prefix is prepended to every reply. text_batch_delay concatenates rapid-fire messages from one contact.",
     "humanize": {
-      "_comment": "Optional LLM cleanup of a skill's result line for chat replies. Off by default. When enabled, a completed result is unwrapped from the scheduler's `<skill>: <ok|failed> — <detail>` bookkeeping and rewritten by the scheduler's `llm` client into one grounded, friendly sentence; it never decides success/failure and always falls back to the raw result on any error. `timeout`/`max_tokens`/`max_chars` bound the auxiliary call (a slow cleanup must not hold the gateway). A platform turns it on/off with its own `humanize` key (bool or `{enabled: ...}`), overriding this global default; `timeout`/`max_tokens`/`max_chars` are global. Only result lines are cleaned — questions, repair/approval notices, and status chatter are untouched.",
       "enabled": true,
       "timeout": 20.0,
       "max_tokens": 200,
       "max_chars": 600
     },
     "simplex": {
-      "_comment": "SimpleX command adapter. Connects to the command simplex-chat daemon (`simplex_chat.port`) over its JSON WebSocket API. Requires the optional `websockets` package (lazy-imported; the gateway refuses to start without it). allowed_users entries match either a numeric contactId or a display name; default is deny-all unless allow_all_users is set. Groups/attachments are not supported.",
       "enabled": true,
       "ws_url": "ws://127.0.0.1:5226",
       "allowed_users": [],
@@ -231,10 +138,13 @@
       "home_channel": "",
       "reply_prefix": "",
       "text_batch_delay": 0.8,
-      "reconnect": {"initial": 1.0, "max": 60.0, "jitter": 0.2}
+      "reconnect": {
+        "initial": 1.0,
+        "max": 60.0,
+        "jitter": 0.2
+      }
     },
     "lxmf": {
-      "_comment": "LXMF (Reticulum) command adapter. Runs IN-PROCESS — there is no external daemon; `pip install lxmf` provides the transport (optional, lazy-imported; the gateway refuses to start with an install hint). The bot's reachable address is its LXMF delivery destination hash (32 hex chars), printed on connect. config_dir/storage_path hold Reticulum's config and the persisted identity under .runtime/lxmf/ so the address is stable across restarts (empty = the .runtime/lxmf defaults). allowed_users entries match the peer's LXMF address (32 hex chars) or a best-effort display name; default is deny-all unless allow_all_users is set. desired_method is 'direct' (reliable link) or 'opportunistic' (single packet). propagation_node is an optional LXMF propagation-node address (hex) for store-and-forward.",
       "enabled": false,
       "allowed_users": [],
       "allow_all_users": false,
@@ -250,7 +160,6 @@
       "text_batch_delay": 0.8
     },
     "voice": {
-      "_comment": "Voice command adapter: a local microphone front end with wake word + speech-to-text + text-to-speech. Requires the optional voice stack (requirements/voice.txt; sounddevice + openwakeword + faster-whisper + piper-tts + onnxruntime; the system needs libportaudio2). Lazy-imported; the gateway refuses to start with an install hint. Runs best in the user's audio session (foreground `gateway --platform voice`), not a headless systemd user service. Audio is 16 kHz mono int16; capture/playback run at the device's native rate and are resampled to/from 16 kHz (capture_sample_rate/output_sample_rate override it; 0 = the device default). wake.model is an openWakeWord model name or path (official models download into the venv and resolve by name; a pinned community model such as the default 'hey_computer' is fetched into model_dir, .runtime/voice/wake); stt.model is a faster-whisper size/path (cached under .runtime/hf); tts.voice is a Piper voice id or path (bootstrap downloads it under .runtime/voice/tts). After the wake word, listen_timeout_s is how long to wait for the command to start before giving up, so a pause before speaking does not truncate it. The wake word is required before every command and is held while the scheduler is still running the current request, so a new command cannot start until it reaches a result. result_only speaks just the skill's result line (dropping queue/urgency bookkeeping and the `<skill>: ok —` wrapper) instead of the full scheduler output; set false for the complete text. max_speak_chars truncates long replies before speaking. chat_id identifies the single local session; home_channel defaults to it so timers/repair offers are spoken too. A stalled capture stream (the PortAudio callback stops delivering frames) is detected via audio.read_timeout_s and recovered by closing and reopening the input after audio.stall_timeout_s, so the front end no longer hangs silently. Utterances run on a worker thread (not the audio thread), so a slow or failing task neither stops the mic being read nor kills the front end.",
       "enabled": false,
       "chat_id": "voice",
       "display_name": "voice",
@@ -260,18 +169,25 @@
       "max_speak_chars": 600,
       "listen_timeout_s": 3.0,
       "cue": {
-        "_comment": "Audible feedback. A short sine beep plays when the wake word fires so you know you're being heard; submit_notes is a short multi-note 'bling' played once the utterance is transcribed (each entry [frequency_hz, duration_ms], separated by note_gap_ms of silence). Set submit_notes to [] and submit_frequency > 0 for the older single submit beep, or leave both empty/0 for no submit sound. volume is 0..1.",
         "enabled": true,
         "frequency": 880,
         "duration_ms": 120,
         "volume": 0.9,
         "submit_frequency": 0,
         "submit_duration_ms": 100,
-        "submit_notes": [[1046.5, 70], [1568.0, 90]],
+        "submit_notes": [
+          [
+            1046.5,
+            70
+          ],
+          [
+            1568.0,
+            90
+          ]
+        ],
         "note_gap_ms": 20
       },
       "wake": {
-        "_comment": "model is an openWakeWord name/path. The default 'hey_computer' is a pinned community model whose scores run lower than the official models (measured ~0.26-0.82 on the phrase, <0.02 on negatives), so threshold 0.2 is tuned for it; the official models (e.g. hey_mycroft) score ~0.99 and are fine at 0.5.",
         "model": "hey_computer",
         "threshold": 0.2,
         "inference_framework": "onnx",
@@ -291,7 +207,6 @@
         "volume": 1.0
       },
       "audio": {
-        "_comment": "Capture-stream watchdog: read_timeout_s is how long a frame read waits before it counts as a stall; when the stream stalls continuously for stall_timeout_s (a wedged PortAudio/ALSA callback stops delivering frames) the input is closed and reopened so the voice front end recovers instead of hanging forever. 0 for either restores the old blocking read with no recovery.",
         "input_device": "",
         "output_device": "",
         "sample_rate": 16000,
@@ -303,7 +218,6 @@
         "stall_timeout_s": 5.0
       },
       "vad": {
-        "_comment": "Endpointing. silence_ms is the trailing-silence endpoint once a command is underway. The wake detector can fire inside the wake phrase (and the cue beep follows), so the first speech captured is the phrase's tail, not the command: until min_command_ms of speech is in hand the endpoint uses initial_silence_ms instead, so a natural pause before the command does not end the capture. min_speech_ms rejects a blip; max_utterance_s caps a runaway.",
         "silence_ms": 500,
         "min_speech_ms": 120,
         "max_utterance_s": 30,
@@ -311,8 +225,87 @@
         "initial_silence_ms": 1500,
         "aggressiveness": 2,
         "energy_threshold": 200.0
+      },
+      "follow_up_window_s": 0.0
+    }
+  },
+  "dashboard": {
+    "port": 8765,
+    "host": "127.0.0.1"
+  },
+  "skill_packs": "packs",
+  "secrets_file": "secrets.json",
+  "_comment": "GENERATED from the core schema (semif_agent/config.py) and each pack's pack.json `config` schema \u2014 do not hand-edit; edit a pack's schema or the core schema. This is the reference example; the live per-machine config is split under config/ (see config.json's include list) and secrets live in the gitignored secrets.json, referenced as '!secret <key>'.",
+  "bridges": {
+    "llm": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 5229,
+      "token": "!secret llm_token"
+    },
+    "browser": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 5232,
+      "token": "!secret browser_token",
+      "engine": "chromium",
+      "headless": true,
+      "channel": "",
+      "executable_path": "",
+      "profile_dir": "",
+      "browsers_path": "",
+      "screenshot_dir": "",
+      "default_timeout": 30.0,
+      "max_text_chars": 20000
+    },
+    "nextcloud": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 5230,
+      "token": "!secret nextcloud_token",
+      "url": "",
+      "username": "",
+      "app_password": "!secret nextcloud_app_password",
+      "default_calendar": "",
+      "default_task_calendar": "",
+      "default_addressbook": "",
+      "verify_tls": true,
+      "timeout": 30
+    },
+    "outlook": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 5231,
+      "token": "!secret outlook_token",
+      "client_id": "",
+      "tenant": "common",
+      "token_path": ".runtime/outlook/token.json",
+      "default_calendar": "",
+      "default_task_list": "",
+      "default_mail_folder": "inbox",
+      "default_timezone": "UTC",
+      "verify_tls": true,
+      "timeout": 30
+    },
+    "simplex": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 5227,
+      "token": "!secret simplex_token",
+      "max_inbox": 100,
+      "ws_url": "ws://127.0.0.1:5228",
+      "user_id": 1,
+      "auto_accept": true,
+      "reconnect": {
+        "initial": 1.0,
+        "max": 60.0,
+        "jitter": 0.2
       }
     }
   },
-  "dashboard": {"port": 8765, "host": "127.0.0.1"}
+  "packs": {
+    "essentials": {
+      "enabled": true
+    }
+  }
 }

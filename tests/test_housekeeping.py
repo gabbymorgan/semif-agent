@@ -55,7 +55,7 @@ def _scheduler(tmp_path, choices=None, default="success"):
             "skills": {},
             "category_registry": str(tmp_path / "categories.json"),
             "skill_bodies": str(tmp_path / "skills"),
-            "skill_seeds": str(tmp_path / "seeds"),
+            "skill_packs": str(tmp_path / "seeds"),
             "deleted_skills": str(tmp_path / "deleted_skills.json"),
         },
         trace=TraceLog(str(tmp_path / "runs.jsonl")),

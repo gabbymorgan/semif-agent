@@ -21,7 +21,7 @@ A skill is three things:
    talks to and how) and the `CONTRACT` constant (the values the runner must
    provide).
 
-The committed seed `seeds/nextcloud/create_event/` is the **authoritative worked
+The committed seed `packs/nextcloud/skills/nextcloud/create_event/` is the **authoritative worked
 example** of all three. Read its `manifest.json`, its `skill.py` (which declares
 `INTEGRATION` and `CONTRACT`), and its `skill.test.py` alongside this file; a new
 body should look and behave like it.

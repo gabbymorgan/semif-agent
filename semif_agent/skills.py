@@ -68,9 +68,9 @@ class Skill:
     integration: dict = field(default_factory=dict)
     integration_source: str = "unknown"
     category_description: str = ""
-    # Where the leaf came from: "builtin" (hardcoded), "seed" (committed starter
-    # package), or "generated" (codegen-authored). Built-ins are protected from
-    # delete/restart/regen; seeds and generated leaves are deletable (durably,
+    # Where the leaf came from: "builtin" (hardcoded), "seed" (a committed pack
+    # skill), or "generated" (codegen-authored). Built-ins are protected from
+    # delete/restart/regen; pack and generated leaves are deletable (durably,
     # via a tombstone).
     origin: str = "generated"
 
@@ -310,10 +310,10 @@ class SkillStore:
 class DeletedSkills:
     """A persisted set of deleted skill refs (`category.name`).
 
-    Seeds reload from the committed `seeds/` tree on every startup, so deleting
-    one from the running tree would be undone on the next boot. Recording the
-    ref here suppresses it (and any generated body of the same name) at load
-    time, making deletion durable. Restoring a skill means removing its ref.
+    Committed pack skills reload from `packs/` on every startup, so deleting one
+    from the running tree would be undone on the next boot. Recording the ref
+    here suppresses it (and any generated body of the same name) at load time,
+    making deletion durable. Restoring a skill means removing its ref.
     """
 
     def __init__(self, path: str = "data/deleted_skills.json"):
@@ -496,6 +496,8 @@ def merge_seed_store(
     tree: dict[str, list[Skill]],
     seed_store: SkillStore,
     config_store: SkillStore | None = None,
+    category_descriptions: dict[str, str] | None = None,
+    origin: str = "seed",
 ) -> int:
     """Load committed starter skills from a read-only seed store into the tree.
 
@@ -504,8 +506,11 @@ def merge_seed_store(
     its description), so it is inspectable and testable exactly like a codegen
     body. `config_store` is the runtime store (`data/skills`): recorded answers
     — credentials collected at first fire — live there, never in the committed
-    seed folder. Returns the number of skills loaded.
+    seed folder. `category_descriptions` supplies each category's scope (a
+    pack's manifest, merged over the built-in defaults); `origin` labels where
+    the leaf came from. Returns the number of skills loaded.
     """
+    descriptions = category_descriptions if category_descriptions is not None else CATEGORY_DESCRIPTIONS
     loaded = 0
     for category, name in seed_store.list_skills():
         directory = seed_store.dir(category, name)
@@ -533,8 +538,8 @@ def merge_seed_store(
             contract=contract,
             integration=integration,
             integration_source=integration_source,
-            category_description=CATEGORY_DESCRIPTIONS.get(category, ""),
-            origin="seed",
+            category_description=descriptions.get(category, ""),
+            origin=origin,
         )
         skills = tree.setdefault(category, [])
         for index, existing in enumerate(skills):
@@ -718,39 +723,17 @@ _CANNED_RESPONSES = [
 
 _RESPONSE_MESSAGES = {f"response.{name}": message for name, _, message in _CANNED_RESPONSES}
 
-# Built-in category descriptions. A category level that offers only bare names
-# carries no signal (real runs sent "book a flight to japan" to the `simplex`
-# bucket 0.49 vs create_category 0.12); giving the model the category's scope
-# flips that to create_category 0.87 vs simplex 0.02. Authored categories carry
-# their own description from the registry; this is the seed for the built-ins and
-# the fallback for a legacy entry with no description.
+# Built-in category descriptions. Authored categories carry their own
+# description from the registry, and pack categories carry theirs from the
+# pack manifest (`packs/<name>/pack.json` -> `categories`); this dict is only
+# the seed for the two hardcoded built-in categories below. A category level
+# that offers only bare names carries no signal (real runs sent "book a flight
+# to japan" to the `simplex` bucket 0.49 vs create_category 0.12); giving the
+# model the category's scope flips that to create_category 0.87 vs simplex 0.02.
 CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "response": (
         "Anything that is not a request to perform an action or produce a result: "
         "greetings, thanks, acknowledgements, chit-chat, and off-topic statements."
-    ),
-    "nextcloud": (
-        "Nextcloud productivity: the user's calendar events and scheduling "
-        "(reading or changing events and reminders) and the user's to-do tasks "
-        "and task lists."
-    ),
-    "simplex": (
-        "SimpleX messaging: reading incoming messages, sending messages to "
-        "contacts, and showing the user's contact link."
-    ),
-    "time": (
-        "Time and date utilities: telling the current time or date, setting "
-        "countdown timers, and setting alarms."
-    ),
-    "calculator": (
-        "Arithmetic: evaluating a numeric expression the user asks for — "
-        "addition, subtraction, multiplication, division, powers and exponents, "
-        "squares, cubes, square roots, cube roots, fractions, and percentages."
-    ),
-    "browser": (
-        "Browser automation: opening a web page, reading its text or links, "
-        "taking a screenshot, and clicking, typing, or filling forms to carry "
-        "out a task on a website."
     ),
     "housekeeping": (
         "Agent self-maintenance: deleting, reconfiguring, regenerating, and "
@@ -763,10 +746,10 @@ def build_skills(config: dict) -> list[Skill]:
     """The hardcoded built-ins: internal behaviors only.
 
     Real integrations do not live here — they are authored by the codegen
-    pipeline into `data/skills/` or shipped as seed skill packages under
-    `seeds/`. A fabricated built-in here shadows the authoring path for a real
-    one (navigation routes to it), so keep this list to behaviors that need no
-    external service.
+    pipeline into `data/skills/` or shipped as skill packs under `packs/`
+    (see `semif_agent.packs`). A fabricated built-in here shadows the authoring
+    path for a real one (navigation routes to it), so keep this list to behaviors
+    that need no external service.
 
     The `response` category is a closed tree of canned replies (see
     CANNED_CATEGORIES): it is the catchall for inputs that are not tasks, and it

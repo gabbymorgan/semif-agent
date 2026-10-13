@@ -38,6 +38,7 @@ from .engine import DecisionEngine, EngineUnavailable
 from .llm import LLMClient
 from .log import DecisionLog
 from .provider import ProviderError
+from .packs import disabled_categories, load_packs, merge_packs
 from .queue import RequestQueue
 from .skill import SkillRunner
 from .timers import TimerService
@@ -411,7 +412,9 @@ class Scheduler:
         registry_path = config.get("category_registry", "data/categories.json")
         self.registry = CategoryRegistry(registry_path)
         self.body_store = SkillStore(config.get("skill_bodies", "data/skills"))
-        self.seed_store = SkillStore(config.get("skill_seeds", "seeds"))
+        # Packs bundle committed starter skills with their concern, category
+        # scope, bridge, and config schema. A disabled pack contributes nothing.
+        self.packs = load_packs(config)
         # Deletions are durable: a tombstone suppresses a seed (or a generated
         # body of the same name) on every future load. Derived from the registry
         # path when not configured, so a test store is self-contained.
@@ -420,9 +423,14 @@ class Scheduler:
         )
         self.deleted = DeletedSkills(deleted_path)
         merge_registry(self.tree, self.registry.read())
-        merge_seed_store(self.tree, self.seed_store, self.body_store)
+        merge_packs(self.tree, self.packs, config, self.body_store)
         merge_skill_store(self.tree, self.body_store, self.registry.read())
         apply_tombstones(self.tree, self.deleted)
+        # A disabled pack's categories are dropped entirely — including any
+        # generated body authored into one — so the tree never offers a skill
+        # whose pack (and bridge) is off.
+        for category in disabled_categories(config, self.packs):
+            self.tree.pop(category, None)
         self.timers = TimerService(trace=self.trace, timezone=config.get("timezone"))
         self.ctx = ActionContext(
             engine=self.engine, config=config, timers=self.timers, admin=self
