@@ -78,7 +78,7 @@ config.py       layered per-machine config: config.json is a thin index
                 pack's `config` schema, GENERATES config.example.json
                 (check-config --write-example) and validates a live config
 packs.py        SkillPack + PackRegistry: discovers packs/ (a `pack.json`
-                manifest + skills/<category>/<leaf>/), binds a concern to its
+                manifest + skills/<category>/<leaf>/; each pack is cloned from its own repo — see packs.json), binds a concern to its
                 categories, bridge(s), requirements, and config schema;
                 merge_packs loads every enabled pack into the tree
 scheduler.py    no up-front gate: every input is dispatched
@@ -139,8 +139,8 @@ skills.py    tree + registry (hardcoded built-ins: the closed `response` canned
                 (skill.py, skill.test.py, contract.json, config.json) and
                 materialize_skill / merge_skill_store
                 hot-load runnable skills from data/skills/;
-                merge_packs (semif_agent/packs.py) loads committed pack skills
-                from packs/<name>/skills/ with their recorded config read from
+                merge_packs (semif_agent/packs.py) loads each pack's skills
+                from packs/<name>/skills/ (each cloned from its own repo) with their recorded config read from
                 data/skills/ (each pack bundles its concern, category scope,
                 bridge, and config schema);
                 ActionResult.needs_input pauses a run for human input;
@@ -518,7 +518,7 @@ CLI, unit tests (24) + integration tests (2).
   deny-by-default Oct 2026): one setting governs whether the agent may author new
   skills/categories, as a three-way mode. **Global default** is the top-level
   `new_skill_creation` — **`"deny"` by default** (the agent leans on the
-  committed packs, the primary way to extend functionality), with `"allow"` an
+  shipped packs, the primary way to extend functionality), with `"allow"` an
   explicit opt-in for a host with the resources, or `"ask"`; a category overrides
   it with its own `new_skill_creation` in `data/skills/<category>/config.json`
   (absent = inherit the global). `allow` authors immediately; `deny` blocks authoring
@@ -989,7 +989,9 @@ CLI, unit tests (24) + integration tests (2).
   check** (inline fixtures, loopback `http.server` for HTTP bodies, no external
   network) that never certifies the live integration — only a real run does.
   The body owns no data; everything comes from the runner via `ctx.config`.
-- **Skill packs.** `packs/<name>/` bundles a concern with its skills: a
+- **Skill packs.** Each pack lives in its own repository (`pack.<name>`, listed
+  in the committed `packs.json`); `scripts/bootstrap.sh` clones them into the
+  gitignored `packs/<name>/`. A pack bundles a concern with its skills: a
   `pack.json` manifest (name, concern, `categories` → descriptions, `bridges`
   referenced by name, `requires`, and a `config` schema) plus
   `skills/<category>/<name>/` in the exact generated-skill folder format
@@ -1001,7 +1003,7 @@ CLI, unit tests (24) + integration tests (2).
   pack follows `bridges.<bridge>.enabled`, else `enabled_by_default`. Disabling a
   pack drops its categories entirely (including generated bodies authored into
   one) and stops its bridge. Recorded config (credentials collected at first
-  fire) is written to the runtime store `data/skills/`, so the committed pack
+  fire) is written to the runtime store `data/skills/`, so a pack repo
   never holds secrets, and a generated body with the same name replaces the pack
   skill. The shipped packs: `nextcloud`, `simplex`, `outlook`, `browser` (each
   owning its bridge), and `essentials` (the built-in local utilities `time` +
@@ -1481,10 +1483,12 @@ CLI, unit tests (24) + integration tests (2).
 - **The contract.** `PACKGEN.md` is the authoritative spec for a new pack —
   `pack.json`, its `config` schema, its bridge reference, and how to author a
   new bridge to back one. It is the sibling of `CODEGEN.md`/`TESTGEN.md`; read it
-  before adding anything under `packs/`.
+  before adding a pack (each pack is its own repository).
 - **What they are.** A pack bundles a concern/product with the skills that serve
   it, in `packs/<name>/`: a `pack.json` manifest plus
-  `skills/<category>/<leaf>/` folders (the exact generated-skill format). The
+  `skills/<category>/<leaf>/` folders (the exact generated-skill format). Each
+  pack is its own repository (`pack.<name>`, listed in `packs.json`), cloned by
+  `scripts/bootstrap.sh` into the gitignored `packs/<name>/`. The
   manifest binds the pieces that used to be scattered by convention:
   `concern`/`title`, `categories` (id -> scope description, feeding
   `CATEGORY_DESCRIPTIONS`), `bridges` (names referencing `bridges/registry.py`
@@ -1508,8 +1512,8 @@ CLI, unit tests (24) + integration tests (2).
   `semif_agent/config.py` `SHARED_BRIDGE_SCHEMA`.
 - **Shipped packs.** `nextcloud`, `simplex`, `outlook`, `browser` (each owning
   its bridge) and `essentials` (the built-in local utilities `time` +
-  `calculator`; no bridge). Adding a concern means adding a pack, not editing
-  `skills.py`.
+  `calculator`; no bridge) — each in its own repository. Adding a concern means
+  adding a pack repo, not editing `skills.py`.
 
 ### bridges (third-party API services)
 

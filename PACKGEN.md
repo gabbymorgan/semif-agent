@@ -6,7 +6,7 @@ skill's runnable **body**, `TESTGEN.md` governs its **test**, and this file
 governs the **pack** that bundles a concern, its skills, its bridge reference,
 and its settings into one thing.
 
-Read this before adding anything under `packs/`. A pack is what makes a new
+Read this before adding a pack. A pack is what makes a new
 product/concern a first-class part of the agent instead of scattered edits to
 `skills.py` and `config.py`.
 
@@ -14,8 +14,10 @@ product/concern a first-class part of the agent instead of scattered edits to
 
 Semif-agent ships a set of starter integrations. Each is a **pack**: a folder
 `packs/<name>/` holding a `pack.json` manifest plus a `skills/` store of leaves
-in the exact generated-skill format. The manifest binds the pieces that would
-otherwise be scattered by convention:
+in the exact generated-skill format. Each pack lives in its **own repository**
+(`pack.<name>`, listed in the committed `packs.json`); `scripts/bootstrap.sh`
+clones them into the gitignored `packs/<name>/`. The manifest binds the pieces
+that would otherwise be scattered by convention:
 
 - the **concern** (what product/job this is) and its **title**;
 - its **categories** (the tree buckets it owns, each with a scope description);
@@ -39,9 +41,9 @@ Three boundaries must stay crisp:
   auth state), a native or heavy protocol, or one sanitized surface; a system
   with a plain HTTP API needs no bridge — its skill calls the API directly. A
   pack *references* a bridge by name; it never contains bridge code.
-- A pack is **declarative structure** and is committed. Per-machine values are
-  the split config; credentials live in `secrets.json`. A committed pack never
-  holds a secret.
+- A pack is **declarative structure**, committed in its own repository.
+  Per-machine values are the split config; credentials live in `secrets.json`.
+  A pack repo never holds a secret.
 
 ## Folder layout
 
@@ -66,9 +68,9 @@ packs/<name>/
   skill gets from the `llm` provider.
 - A root with no `pack.json` is treated as **one implicit, manifest-less pack**
   whose store is the root itself (a plain skills directory still works), but a
-  committed pack should always have a manifest.
+  pack repo should always have a manifest.
 
-The committed `packs/` are the authoritative worked examples: `essentials` is
+The shipped packs are the authoritative worked examples: `essentials` is
 the minimal bridge-less pack; `nextcloud`, `simplex`, `outlook`, and `browser`
 are bridge-backed packs.
 
@@ -307,9 +309,10 @@ A new pack is accepted only if:
    are clean.
 6. Nothing deployment-specific (hostname, address, username, absolute home
    path, local model name) appears in any committed file —
-   `tests/test_no_env_leaks.py` enforces this. Secrets live in `secrets.json`.
+   `tests/test_no_env_leaks.py` enforces this for the agent repo; keep a pack
+   repo clean too. Secrets live in `secrets.json`.
 
-`tests/test_packs.py` enforces items 1–3 mechanically for every committed pack
+`tests/test_packs.py` enforces items 1–3 mechanically for every shipped pack
 (valid manifest, concern + categories, integration matches code, contract flat
 and mirrored, manifest description, hermetic test passes) and keeps the shipped
 pack ids present.
@@ -355,7 +358,7 @@ packs/hello/
 ```
 
 The leaf's `skill.py` (a `compute`-transport body — no external action, empty
-`CONTRACT`) and `skill.test.py` follow `CODEGEN.md`/`TESTGEN.md`; the committed
+`CONTRACT`) and `skill.test.py` follow `CODEGEN.md`/`TESTGEN.md`; the shipped
 `packs/essentials/skills/time/now/` is the reference for exactly this shape.
 
 For a bridge-backed pack, start from `packs/simplex/pack.json` (bridge
@@ -371,9 +374,9 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/`.
    heavy protocol, or one sanitized surface, author a bridge first (see
    "Authoring a new bridge") and register it in `CATALOG`. A system with a plain
    HTTP API needs no bridge — the skill calls it directly.
-3. Create `packs/<name>/pack.json` with `name`, `title`, `concern`,
-   `categories`, `bridges` (if any), `requires`, `enabled_by_default`, and the
-   `config` schema.
+3. Create the pack (its own repository, `pack.<name>`): `packs/<name>/pack.json`
+   with `name`, `title`, `concern`, `categories`, `bridges` (if any), `requires`,
+   `enabled_by_default`, and the `config` schema.
 4. Add each leaf under `skills/<category>/<leaf>/` following `CODEGEN.md` and
    `TESTGEN.md` (`skill.py`, `manifest.json`, `contract.json`, `skill.test.py`).
 5. Regenerate and validate config:
@@ -386,3 +389,6 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/`.
    pack).
 8. Verify a real run against the user's actual service — the only proof the
    integration works.
+9. Add the pack's name to the committed `packs.json`, then commit and push the
+   pack's own repository (`pack.<name>`); `scripts/bootstrap.sh` clones it into
+   `packs/`.

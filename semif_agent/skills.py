@@ -68,7 +68,7 @@ class Skill:
     integration: dict = field(default_factory=dict)
     integration_source: str = "unknown"
     category_description: str = ""
-    # Where the leaf came from: "builtin" (hardcoded), "seed" (a committed pack
+    # Where the leaf came from: "builtin" (hardcoded), "seed" (a shipped pack
     # skill), or "generated" (codegen-authored). Built-ins are protected from
     # delete/restart/regen; pack and generated leaves are deletable (durably,
     # via a tombstone).
@@ -310,7 +310,8 @@ class SkillStore:
 class DeletedSkills:
     """A persisted set of deleted skill refs (`category.name`).
 
-    Committed pack skills reload from `packs/` on every startup, so deleting one
+    Pack skills (cloned from their own repos into `packs/`) reload on every
+    startup, so deleting one
     from the running tree would be undone on the next boot. Recording the ref
     here suppresses it (and any generated body of the same name) at load time,
     making deletion durable. Restoring a skill means removing its ref.

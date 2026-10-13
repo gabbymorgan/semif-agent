@@ -75,7 +75,7 @@ from .trace import TraceLog
 
 #: The tri-state governing whether a new skill (or category) may be authored.
 #: `allow` authors immediately, `deny` blocks creation outright (the default —
-#: the agent leans on the committed packs), and `ask` authors only after the
+#: the agent leans on the shipped packs), and `ask` authors only after the
 #: human approves the proposal. Set globally with the top-level
 #: `new_skill_creation` config value and overridden per category in
 #: `data/skills/<category>/config.json` (same key).
@@ -369,7 +369,7 @@ class Scheduler:
         self._outbox: deque[SchedulerReply] = deque(maxlen=256)
         #: Global new-skill creation mode: "deny" (default), "allow", or "ask".
         #: A category may override it in its category config. Deny by default
-        #: keeps the agent on the committed packs; live authoring is an opt-in.
+        #: keeps the agent on the shipped packs; live authoring is an opt-in.
         self.new_skill_mode = (
             normalize_new_skill_mode(config.get("new_skill_creation")) or "deny"
         )

@@ -7,8 +7,11 @@
 # it); codegen may point at a remote ollama host. This script installs NO ollama.
 #
 # Must be run from a semif-agent checkout. The checkout is used as-is and never
-# re-cloned — only the SemIf engine and the simplex-chat binary are fetched.
-# Clone the agent repo first (its SSH key must be registered on your git host).
+# re-cloned — only the SemIf engine, the simplex-chat binary, and the skill
+# packs are fetched. Clone the agent repo first (its SSH key must be registered
+# on your git host); each skill pack is then cloned from a sibling repository
+# named pack.<name> on the same host (see packs.json) into the gitignored
+# packs/ directory.
 #
 # config.json is the per-machine USER config (a thin index over config/*.json)
 # and this script NEVER rewrites it. It seeds the split config via `config-init`
@@ -35,7 +38,7 @@
 # Usage:
 #   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
 #                        [--codegen-model MODEL] [--copy-data SRC] [--voice]
-#                        [--browser] [--gpu MODE] [-h]
+#                        [--browser] [--gpu MODE] [--pack-base URL] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
@@ -48,9 +51,10 @@ COPY_DATA=""
 VOICE=0
 BROWSER=0
 GPU_MODE="auto"
+PACK_BASE=""
 
 usage() {
-  sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
   echo
   echo "  --llm-url URL          override llm.base_url from config.json for this run (else config.json, else http://127.0.0.1:11434)"
   echo "  --codegen-url URL      override codegen.base_url from config.json for this run"
@@ -60,6 +64,7 @@ usage() {
   echo "  --voice                install the optional voice-gateway stack + download its models"
   echo "  --browser              install the optional browser-bridge stack (Playwright + Chromium)"
   echo "  --gpu MODE             decision-engine llama.cpp backend: auto (default; a GPU build only when engine.gpu_layers is set), vulkan, rocm, cuda, cpu"
+  echo "  --pack-base URL        base URL of the skill-pack repos (default: derived from this checkout's origin remote)"
   echo "  -h                     this help"
   exit "${1:-0}"
 }
@@ -74,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --voice) VOICE=1; shift ;;
     --browser) BROWSER=1; shift ;;
     --gpu) GPU_MODE="$2"; shift 2 ;;
+    --pack-base) PACK_BASE="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 1 ;;
   esac
@@ -104,6 +110,57 @@ fi
 if [[ ! -f "$PINS" ]]; then
   echo "pins.json not found at $PINS — run from a semif-agent checkout" >&2
   exit 1
+fi
+
+# --- skill packs ----------------------------------------------------------------
+# Each pack ships in its own repository named pack.<name>, cloned into the
+# gitignored packs/ directory; the agent loads every pack under skill_packs
+# (default "packs"). The list lives in the committed packs.json; each repo is a
+# sibling of this checkout's origin remote (pack.<name>) unless --pack-base
+# overrides the base. This runs BEFORE the config is seeded so config-init sees
+# the packs and generates their config/packs/*.json fragments. Idempotent:
+# clone when absent, fast-forward when present.
+PACK_MANIFEST="$REPO_ROOT/packs.json"
+if [[ -f "$PACK_MANIFEST" ]]; then
+  if [[ -z "$PACK_BASE" ]]; then
+    ORIGIN_URL="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+    PACK_BASE="${ORIGIN_URL%/*}"
+  fi
+  PACK_BASE="${PACK_BASE%/}"
+  if [[ -z "$PACK_BASE" ]]; then
+    echo "WARN: no 'origin' remote to derive the skill-pack repos from; clone them into packs/ or pass --pack-base URL" >&2
+  else
+    echo "== skill packs (from $PACK_BASE/pack.<name>)"
+    mkdir -p "$REPO_ROOT/packs"
+    while IFS= read -r pack_name; do
+      [[ -z "$pack_name" ]] && continue
+      pack_dst="$REPO_ROOT/packs/$pack_name"
+      pack_url="$PACK_BASE/pack.$pack_name.git"
+      if [[ -d "$pack_dst/.git" ]]; then
+        if git -C "$pack_dst" pull --ff-only --quiet 2>/dev/null; then
+          echo "   $pack_name: up to date"
+        else
+          echo "   WARN: could not update pack $pack_name (leaving the local checkout)" >&2
+        fi
+      elif [[ -e "$pack_dst" ]]; then
+        echo "   WARN: packs/$pack_name exists but is not a git clone; leaving it" >&2
+      elif git clone --quiet "$pack_url" "$pack_dst" 2>/dev/null; then
+        echo "   $pack_name: cloned"
+      else
+        echo "   WARN: could not clone $pack_name from $pack_url" >&2
+      fi
+    done < <(python3 - "$PACK_MANIFEST" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+for name in data.get("packs", []):
+    if str(name).strip():
+        print(str(name).strip())
+PY
+)
+  fi
 fi
 
 # config.json is per-machine USER config. Seed it once (as a thin index plus the
@@ -642,6 +699,9 @@ Done. Next steps:
      codegen.model/codegen.base_url; put credentials in secrets.json.
      bootstrap.sh seeded the config via config-init (if it was absent)
      and NEVER rewrites it; only you edit it.
+  2. Skill packs are cloned from their own repos into packs/ (see packs.json);
+     they are gitignored here. Update them with:
+       for d in packs/*/; do git -C "\$d" pull --ff-only; done
   cd "$REPO_ROOT"
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run
   HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)

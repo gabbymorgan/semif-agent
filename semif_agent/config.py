@@ -43,7 +43,7 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                         'type': 'str',
                         'doc': 'Global tri-state new-skill mode: deny (default) | allow | ask (a '
                                'category config overrides it). Deny by default: the agent leans on '
-                               'the committed packs, and a host opts in to live skill authoring by '
+                               'the shipped packs, and a host opts in to live skill authoring by '
                                'setting allow.'},
  'verbosity': {'default': 'result',
                'type': 'str',

@@ -404,8 +404,8 @@ semif_agent/
                     Outlook, browser)
   config.py         layered config: index includes + !secret + schema/example
   packs.py          SkillPack + PackRegistry (bundles skills by concern/bridge)
-packs/              committed skill packs: nextcloud, simplex, outlook, browser,
-                    essentials (a pack.json manifest + skills/<category>/<leaf>/)
+packs/              skill packs, each cloned from its own repo (pack.<name>)
+                    into this gitignored dir — see packs.json + PACKGEN.md
 scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
@@ -418,6 +418,7 @@ config/             split config fragments (core, gateway, bridges, packs/*)
 secrets.json        gitignored credentials, referenced as "!secret <key>"
 config.example.json GENERATED per-machine config reference (from the schemas)
 pins.json           committed pins: engine/GGUF/tokenizer/simplex-chat refs
+packs.json          committed list of skill-pack repos cloned into packs/
 local/              gitignored: this deployment's notes (hosts, addresses, models)
 ```
 
@@ -954,12 +955,14 @@ bodies, no external network, no `mock_data.json`. Passing it proves the code
 runs, not that the live integration works. That is what the real run and the
 repair loop are for.
 
-**Packs** (`packs/<name>/`) ship real starter integrations in the exact generated
-folder format, plus a `manifest.json` and a `pack.json` manifest binding the
-concern to its categories, bridge, and config schema. `merge_packs` loads every
-enabled pack into the tree at startup; recorded config is written to the runtime
-store, so the committed pack never holds secrets. `PACKGEN.md` is the
-authoritative contract for authoring a new pack (and a new bridge to back one).
+**Packs** ship real starter integrations in the exact generated folder format,
+plus a `manifest.json` and a `pack.json` manifest binding the concern to its
+categories, bridge, and config schema. Each pack lives in its **own repository**
+(`pack.<name>`, listed in `packs.json`); `scripts/bootstrap.sh` clones them into
+the gitignored `packs/<name>/`, and `merge_packs` loads every enabled pack into
+the tree at startup. Recorded config is written to the runtime store, so a pack
+repo never holds secrets. `PACKGEN.md` is the authoritative contract for
+authoring a new pack (and a new bridge to back one).
 
 - `nextcloud.create_event` — create an event on Nextcloud CalDAV (the
   authoritative worked example); resolves the target calendar with a SemIf

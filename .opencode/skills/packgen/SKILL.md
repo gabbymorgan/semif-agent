@@ -1,6 +1,6 @@
 ---
 name: Pack Generation
-description: Author a new semif-agent skill pack (packs/<name>/) — the pack.json manifest, its skill leaves, its bridge reference, and its config schema. Use when adding a new concern/product bundle under packs/, or when adding a new bridge service to back one.
+description: Author a new semif-agent skill pack (its own packs/<name>/ repository) — the pack.json manifest, its skill leaves, its bridge reference, and its config schema. Use when adding a new concern/product bundle as its own pack repo, or when adding a new bridge service to back one.
 ---
 
 # Pack Generation
@@ -12,10 +12,10 @@ truth and this skill is only the workflow.
 
 ## When to use
 
-- The user wants a new concern/product bundle under `packs/<name>/`.
+- The user wants a new concern/product bundle (its own `packs/<name>/` repo).
 - The user wants a new third-party service backed by a bridge in
   `semif_agent/bridges/`.
-- The user is adding skills that should ship as committed seeds rather than be
+- The user is adding skills that should ship as a pack rather than be
   authored at runtime.
 
 ## Workflow
@@ -27,9 +27,10 @@ truth and this skill is only the workflow.
    already fronts it in `semif_agent/bridges/registry.py` `CATALOG`. If not,
    author the bridge first (see the "Authoring a new bridge" section of
    `PACKGEN.md`), register it in `CATALOG`, and give it a pack config block.
-4. **Create `packs/<name>/pack.json`** with `name`, `title`, `concern`,
-   `categories`, `bridges`, `requires`, `enabled_by_default`, and the `config`
-   schema. Model it on `packs/essentials/pack.json` (bridge-less) or
+4. **Create the pack** (its own repository, `pack.<name>`):
+   `packs/<name>/pack.json` with `name`, `title`, `concern`, `categories`,
+   `bridges`, `requires`, `enabled_by_default`, and the `config` schema. Model
+   it on `packs/essentials/pack.json` (bridge-less) or
    `packs/simplex/pack.json` (bridge-backed).
 5. **Add each leaf** under `skills/<category>/<leaf>/` — `skill.py`,
    `manifest.json`, `contract.json`, `skill.test.py` — following `CODEGEN.md`
@@ -44,11 +45,14 @@ truth and this skill is only the workflow.
    pack).
 9. **Verify a real run** against the user's actual service — a passing hermetic
    test proves mechanics only, never the live integration.
+10. **Register and publish:** add the pack's name to the committed `packs.json`
+    in the agent repo, then commit and push the pack's own repository
+    (`pack.<name>`). `scripts/bootstrap.sh` clones it into `packs/`.
 
 ## Guardrails
 
-- A pack is declarative and committed; never put a credential in it (secrets
-  live in the gitignored `secrets.json`).
+- A pack is declarative, committed in its own repository; never put a credential
+  in it (secrets live in the gitignored `secrets.json`).
 - Bridge *code* stays in `semif_agent/bridges/`; a pack only references a bridge
   by name. Never widen the gateway.
 - `concern` and `categories` are required; every category needs a description.

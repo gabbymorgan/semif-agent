@@ -26,7 +26,7 @@ a host with the pinned engine:
     .runtime/venv/bin/python scripts/tune_navigation.py
     .runtime/venv/bin/python scripts/tune_navigation.py --level leaf --tau 0.6
 
-The tree is whatever the host currently has loaded (committed packs + the runtime
+The tree is whatever the host currently has loaded (shipped packs + the runtime
 `data/skills/`), so an expectation naming a skill that is not present is
 reported as N/A rather than counted wrong. Labels are hand-written ground truth;
 self-labeled decision rows are not evidence. Nothing is written to the runtime

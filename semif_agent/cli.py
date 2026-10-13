@@ -147,7 +147,7 @@ def load_config(path: str = "config.json") -> dict:
 
     Path-valued keys (`skill_packs`, `skill_bodies`, `category_registry`, `log`,
     `trace`) resolve against REPO_ROOT, not the process cwd, so a fresh clone
-    loads its committed packs and writes runtime artifacts into the checkout no
+    loads its packs and writes runtime artifacts into the checkout no
     matter where the CLI is invoked from. Absolute values pass through untouched.
     """
     config_path = Path(path)

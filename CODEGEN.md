@@ -30,7 +30,8 @@ A skill is three things:
    talks to and how) and the `CONTRACT` constant (the values the runner must
    provide).
 
-The committed seed `packs/nextcloud/skills/nextcloud/create_event/` is the **authoritative worked
+The `nextcloud` pack's create_event skill
+(`packs/nextcloud/skills/nextcloud/create_event/`, from its own repo) is the **authoritative worked
 example** of all three. Read its `manifest.json`, its `skill.py` (which declares
 `INTEGRATION` and `CONTRACT`), and its `skill.test.py` alongside this file; a new
 body should look and behave like it.
@@ -405,7 +406,7 @@ INTEGRATION = {
   skills that perform no external action at all (pure analysis/formatting); an
   action skill must not use it.
 - `config_vars` — the `ctx.config` keys the body reads for this integration. In
-  the committed seeds this is exactly the body's `CONTRACT` key set; an empty
+  the shipped seeds this is exactly the body's `CONTRACT` key set; an empty
   list is allowed for `compute`. Declaring a variable the body never reads is a
   mismatch the fidelity check flags.
 
