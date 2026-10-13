@@ -715,7 +715,7 @@ def _gateway_address_callback(adapter):
     """Return an `on_connected` coroutine that prints the bot's contact link once.
 
     A human cannot reach the gateway without the bot's SimpleX contact address,
-    and the only thing that surfaced it before was `scripts/simplex-address.py`
+    and the only thing that surfaced it before was `packs/simplex/scripts/simplex-address.py`
     run once at provision time. Print it on connect, from the operator front end
     (the CLI), through the daemon the gateway already owns — show-or-create, no
     second connection, no new transport surface. The lookup is best-effort: a

@@ -406,7 +406,7 @@ semif_agent/
   packs.py          SkillPack + PackRegistry (bundles skills by concern/bridge)
 packs/              skill packs, each cloned from its own repo (pack.<name>)
                     into this gitignored dir — see packs.json + PACKGEN.md
-scripts/            bootstrap.sh, simplex-address.py, systemd/*.in
+scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
 requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
 CODEGEN.md            the contract fed to the skill-body codegen model
@@ -670,7 +670,7 @@ without it). `allowed_users` entries match a numeric contactId or a display
 name. The daemon must run in **bot mode** (`simplex-chat -p PORT
 --create-bot-display-name NAME`), not `--headless`/`--relay` — in v7 those mean
 "chat relay" and yield a relay address, not a user contact address. Add the
-bot's contact link to reach it: `scripts/simplex-address.py` shows/creates it
+bot's contact link to reach it: `packs/simplex/scripts/simplex-address.py` shows/creates it
 (bootstrap prints it), and the gateway prints it once on connect.
 
 **LXMF (Reticulum).** Runs **in-process — there is no external daemon**;
@@ -842,7 +842,7 @@ calendar events, Microsoft To Do tasks, contacts, and OneDrive files. Like
 Nextcloud it has **no service daemon** (Graph is plain HTTPS) and is stdlib-only,
 so it starts instantly in the same `semif-bridge` process. Authorization is the
 OAuth2 **device code flow**: register an Entra ID public-client app, put its
-`client_id` in `bridges.outlook`, and run `scripts/outlook-auth.py` once — the
+`client_id` in `bridges.outlook`, and run `packs/outlook/scripts/outlook-auth.py` once — the
 tokens are stored (0600) under the checkout's `.runtime/outlook/token.json` and
 refreshed automatically. The bridge starts without a token; an unauthenticated
 route returns `503` telling the operator to run that helper. Skills call it at the
@@ -884,7 +884,7 @@ installed with `scripts/bootstrap.sh --browser` (Playwright + Chromium land unde
 `.runtime/browser`; the bridge sets `PLAYWRIGHT_BROWSERS_PATH` there at launch).
 If `playwright install` fails — notably on a host with an IPv6 address but no
 global IPv6 route, where Playwright's downloader prefers IPv6 and hangs —
-bootstrap falls back to `scripts/playwright-browsers.py`, which downloads the
+bootstrap falls back to `packs/browser/scripts/playwright-browsers.py`, which downloads the
 same pinned artifacts over IPv4. To skip the managed download altogether, set
 `bridges.browser.channel` (a Playwright channel such as `chrome`/`msedge`) or
 `bridges.browser.executable_path` (a browser binary) to use an already-installed

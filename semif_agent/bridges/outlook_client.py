@@ -10,7 +10,7 @@ Authorization is the OAuth2 **device code flow** (a public client: no secret):
 `run_device_code_flow` prints a code the user enters at a Microsoft URL, then
 stores the resulting access + refresh tokens. The bridge starts without a token;
 the first authenticated call raises `OutlookAuthRequired`, which the bridge maps
-to a 503 telling the operator to run `scripts/outlook-auth.py`. Every other
+to a 503 telling the operator to run `packs/outlook/scripts/outlook-auth.py`. Every other
 failure is an `OutlookError` carrying the HTTP status when there was one, so the
 bridge maps it to a 502 (a real Graph failure) rather than a fabricated success.
 
@@ -49,7 +49,7 @@ DEFAULT_SCOPES = (
 TOKEN_REFRESH_SKEW = 120.0
 MAX_PAGES = 20
 MAX_RETRIES = 3
-AUTH_HINT = "run scripts/outlook-auth.py to authorize Outlook"
+AUTH_HINT = "run packs/outlook/scripts/outlook-auth.py to authorize Outlook"
 
 
 class OutlookError(Exception):

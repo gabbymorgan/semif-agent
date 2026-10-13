@@ -590,7 +590,7 @@ def test_bridge_auth_required_is_503():
         configured = True
 
         def list_messages(self, *args, **kwargs):
-            raise OutlookAuthRequired("run scripts/outlook-auth.py")
+            raise OutlookAuthRequired("run packs/outlook/scripts/outlook-auth.py")
 
     bridge = OutlookBridge({"client_id": "c"}, client=Unauthorized())
     status, payload = bridge.handle_get("/mail/messages", {})

@@ -55,6 +55,8 @@ packs/<name>/
     manifest.json                 # {"description": "..."} navigation text
     contract.json                 # mirror of the body's CONTRACT — TESTGEN.md
     skill.test.py                 # hermetic mechanics test — TESTGEN.md
+  scripts/                        # optional concern helpers (e.g. an auth or
+                                  # setup script), run from the checkout
 ```
 
 - The `<category>` directory name is the tree bucket; the `<leaf>` directory

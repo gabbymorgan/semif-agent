@@ -461,10 +461,10 @@ PY
       # no working global IPv6 route, even though the CDN serves over IPv4. The
       # helper fetches the same pinned artifacts over IPv4 and lays them out
       # where Playwright expects them, so the install becomes a no-op.
-      echo "== retrying over IPv4 (scripts/playwright-browsers.py)" >&2
-      PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" "$REPO_ROOT/scripts/playwright-browsers.py" \
+      echo "== retrying over IPv4 (packs/browser/scripts/playwright-browsers.py)" >&2
+      PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PYTHON" "$REPO_ROOT/packs/browser/scripts/playwright-browsers.py" \
         --browsers-path "$BROWSERS" --engine "$BROWSER_ENGINE" \
-        || echo "WARN: browser priming failed; re-run: $PYTHON scripts/playwright-browsers.py --browsers-path $BROWSERS" >&2
+        || echo "WARN: browser priming failed; re-run: $PYTHON packs/browser/scripts/playwright-browsers.py --browsers-path $BROWSERS" >&2
     else
       echo "WARN: re-run: PLAYWRIGHT_BROWSERS_PATH=$BROWSERS $PYTHON -m playwright install $BROWSER_ENGINE" >&2
     fi
@@ -581,14 +581,14 @@ if command -v systemctl >/dev/null 2>&1; then
   if systemctl --user is-active --quiet semif-simplex.service 2>/dev/null; then
     echo "== ensuring the SimpleX bot contact address exists"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if SIMPLEX_ADDRESS="$("$PYTHON" "$REPO_ROOT/scripts/simplex-address.py" 2>/dev/null)"; then
+      if SIMPLEX_ADDRESS="$("$PYTHON" "$REPO_ROOT/packs/simplex/scripts/simplex-address.py" 2>/dev/null)"; then
         printf '%s\n' "$SIMPLEX_ADDRESS" | sed 's/^/  /'
         break
       fi
       sleep 2
     done
     if [[ -z "$SIMPLEX_ADDRESS" ]]; then
-      echo "WARN: bot address not ready; run: $PYTHON scripts/simplex-address.py" >&2
+      echo "WARN: bot address not ready; run: $PYTHON packs/simplex/scripts/simplex-address.py" >&2
     fi
   fi
 fi
@@ -610,7 +610,7 @@ if [[ -n "$BRIDGE_FORWARD_WS" ]] && command -v systemctl >/dev/null 2>&1; then
   if systemctl --user is-active --quiet semif-simplex-forward.service 2>/dev/null; then
     echo "== ensuring the forwarding bridge contact address exists"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if FORWARD_ADDRESS="$("$PYTHON" "$REPO_ROOT/scripts/simplex-address.py" --ws-url "$BRIDGE_FORWARD_WS" 2>/dev/null)"; then
+      if FORWARD_ADDRESS="$("$PYTHON" "$REPO_ROOT/packs/simplex/scripts/simplex-address.py" --ws-url "$BRIDGE_FORWARD_WS" 2>/dev/null)"; then
         printf '%s\n' "$FORWARD_ADDRESS" | sed 's/^/  /'
         break
       fi
@@ -713,7 +713,7 @@ SimpleX command gateway (commands only):
       systemctl --user status semif-simplex semif-gateway
       journalctl --user -u semif-gateway -f
   - Its user contact address is printed above; re-print (creating if needed) with:
-      "$PYTHON" scripts/simplex-address.py
+      "$PYTHON" packs/simplex/scripts/simplex-address.py
     Add that address as a contact in your SimpleX app.
   - Then put your contactId/display name in config.json
     gateway.simplex.allowed_users (discover the id from a 'gateway_denied' trace
@@ -739,7 +739,7 @@ SimpleX forwarding bridge (messaging UX for skills):
   - Runs as 'semif-simplex-forward' (a second bot daemon/profile, port $SIMPLEX_FORWARD_PORT)
     and 'semif-bridge' (the standalone bridge API). Its contact address is printed
     above; re-print with:
-      "$PYTHON" scripts/simplex-address.py --ws-url ws://127.0.0.1:$SIMPLEX_FORWARD_PORT
+      "$PYTHON" packs/simplex/scripts/simplex-address.py --ws-url ws://127.0.0.1:$SIMPLEX_FORWARD_PORT
   - Skills reach it over HTTP at the address derived from bridges.simplex
     (host/port, default http://127.0.0.1:5227); simplex.connect_link shows its
     address and simplex.next_message reads messages sent to it.

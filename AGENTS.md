@@ -317,7 +317,7 @@ bridges/        standalone third-party API bridges (SimpleX, the LLM bridge,
                 OneDrive files, plus the OAuth2 device-code + refresh flow. No
                 daemon (stdlib-only `urllib`); tokens stored under
                 `.runtime/outlook/token.json` and seeded once with
-                `scripts/outlook-auth.py`; connection from `bridges.outlook`.
+                `packs/outlook/scripts/outlook-auth.py`; connection from `bridges.outlook`.
                 browser.py + browser_client.py: BrowserBridge — real browser
                 automation via Playwright (open/read/click/fill/screenshot),
                 owning a persistent browser profile; optional heavy dep
@@ -916,7 +916,7 @@ CLI, unit tests (24) + integration tests (2).
   `config.json` fields the operator edits; with an empty allowlist the gateway
   denies everyone (the safe default until the human adds their contact id).
   `--copy-data SRC` rsyncs a prior host's `data/` for continuity.
-  Bootstrap then runs `scripts/simplex-address.py` to create/print the command
+  Bootstrap then runs `packs/simplex/scripts/simplex-address.py` to create/print the command
   bot's contact address (and the forwarding bot's, via `--ws-url`).
 - First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
   (~10 min on 6 cores); reruns are fast no-ops.
@@ -1276,7 +1276,7 @@ CLI, unit tests (24) + integration tests (2).
   unit wraps it in `script -q -e -c '…' /dev/null` to allocate a PTY: a TTY-less
   process (plain `ExecStart=` under systemd) accepts the socket but never emits
   `receivedContactRequest`/`newChatItems`, so contact requests hang forever.
-  `python scripts/simplex-address.py` then shows (creating on first run, via
+  `python packs/simplex/scripts/simplex-address.py` then shows (creating on first run, via
   `/_address` / `/_show_address <userId>`) the bot's user contact link, which a
   human adds in their SimpleX app to start a DM. `bootstrap.sh` prints it at the
   end of provisioning.
@@ -1631,7 +1631,7 @@ CLI, unit tests (24) + integration tests (2).
   HTTPS) and is stdlib-only (`urllib` + `json` + `ssl` + `base64`), so
   `check_requirements` is always `(True, None)` and it starts instantly inside
   `semif-bridge.service`. Authorization is the OAuth2 **device code flow** (a
-  public client, no secret): `scripts/outlook-auth.py` runs it once and stores
+  public client, no secret): `packs/outlook/scripts/outlook-auth.py` runs it once and stores
   the access + refresh tokens 0600 under the checkout's
   `.runtime/outlook/token.json` (override with `bridges.outlook.token_path`); the
   client refreshes on expiry/401. The bridge starts without a token — an
@@ -1674,7 +1674,7 @@ CLI, unit tests (24) + integration tests (2).
   host with an IPv6 address but no global IPv6 route — Playwright's downloader
   forces `autoSelectFamily` + a dual-stack resolver that prefers IPv6 and hangs
   instead of falling back to IPv4), bootstrap falls back to
-  `scripts/playwright-browsers.py`, which fetches the same pinned artifacts over
+  `packs/browser/scripts/playwright-browsers.py`, which fetches the same pinned artifacts over
   IPv4 and lays them out where Playwright expects. `bridges.browser.channel` /
   `executable_path` instead launch an already-installed browser (a Playwright
   channel like `chrome`/`msedge`, or a specific binary) and skip the managed
@@ -1747,7 +1747,7 @@ covered. Deferred follow-ups:
 - [x] **6. Outlook / Microsoft Graph bridge** (`bridges/outlook.py` +
   `bridges/outlook_client.py`). Shipped: the `OutlookBridge` exposes mail,
   calendar, Microsoft To Do, contacts, and OneDrive over one JSON surface in
-  front of Graph; OAuth2 device-code + refresh (`scripts/outlook-auth.py`, tokens
+  front of Graph; OAuth2 device-code + refresh (`packs/outlook/scripts/outlook-auth.py`, tokens
   under `.runtime/outlook/token.json`); seven `packs/outlook/skills/outlook/*` skills
   (`next_message`, `send_message` confirm-gated, `next_event`, `create_event`,
   `create_task`, `list_contacts`, `list_files`). Deferred: writing/reusing

@@ -10,7 +10,7 @@ and `outlook_bridge_token` from `ctx.config` and calls a documented route.
 There is no service daemon and no third-party dependency: Graph is plain HTTPS,
 so the bridge is stdlib-only (`urllib`) and starts instantly, like Nextcloud.
 Authorization is the OAuth2 device code flow, run once with
-`scripts/outlook-auth.py`; the resulting tokens are stored (0600) under the
+`packs/outlook/scripts/outlook-auth.py`; the resulting tokens are stored (0600) under the
 checkout's `.runtime/outlook/token.json`. The bridge starts without them and an
 unauthenticated route returns 503 telling the operator to run that helper.
 
@@ -116,7 +116,7 @@ class OutlookBridge(BridgeService):
             "any request -> 401 {\"error\": \"unauthorized\"} when the token is "
             "configured and the auth header is missing or wrong",
             "503 {\"error\": \"...\"} when the bridge is not authenticated "
-            "(run scripts/outlook-auth.py) or has no client id configured; 502 "
+            "(run packs/outlook/scripts/outlook-auth.py) or has no client id configured; 502 "
             "{\"error\": \"...\"} on a real Microsoft Graph failure (transport, "
             "HTTP error, or bad reply)",
         ),
@@ -198,7 +198,7 @@ class OutlookBridge(BridgeService):
         return 503, {
             "error": (
                 "the Outlook bridge has no connection configured (set "
-                "bridges.outlook.client_id, then run scripts/outlook-auth.py)"
+                "bridges.outlook.client_id, then run packs/outlook/scripts/outlook-auth.py)"
             )
         }
 
