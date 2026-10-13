@@ -6,6 +6,10 @@ body must be written.
 The mocking/testing side of a skill is NOT specified here — it has its own
 contract, `TESTGEN.md`. This file is about the runnable body only.
 
+A skill that ships as a committed starter lives inside a **pack**; how a pack
+bundles skills, references a bridge, and declares its settings is the separate
+contract `PACKGEN.md`.
+
 ## What a skill is
 
 Semif-agent is an end-user application: an everyday person asks it to do a task,

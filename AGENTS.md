@@ -1478,6 +1478,10 @@ CLI, unit tests (24) + integration tests (2).
 
 ### skill packs (bundles)
 
+- **The contract.** `PACKGEN.md` is the authoritative spec for a new pack —
+  `pack.json`, its `config` schema, its bridge reference, and how to author a
+  new bridge to back one. It is the sibling of `CODEGEN.md`/`TESTGEN.md`; read it
+  before adding anything under `packs/`.
 - **What they are.** A pack bundles a concern/product with the skills that serve
   it, in `packs/<name>/`: a `pack.json` manifest plus
   `skills/<category>/<leaf>/` folders (the exact generated-skill format). The

@@ -410,6 +410,7 @@ requirements/       staging.txt — the pinned engine deps
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
 CODEGEN.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
+PACKGEN.md          the contract for authoring a skill pack (packs/<name>/)
 AGENTS.md           the operational guide (read this before touching code)
 config.json         per-machine config INDEX ({"include": [...]}); seeded once
 config/             split config fragments (core, gateway, bridges, packs/*)
@@ -954,7 +955,8 @@ repair loop are for.
 folder format, plus a `manifest.json` and a `pack.json` manifest binding the
 concern to its categories, bridge, and config schema. `merge_packs` loads every
 enabled pack into the tree at startup; recorded config is written to the runtime
-store, so the committed pack never holds secrets.
+store, so the committed pack never holds secrets. `PACKGEN.md` is the
+authoritative contract for authoring a new pack (and a new bridge to back one).
 
 - `nextcloud.create_event` — create an event on Nextcloud CalDAV (the
   authoritative worked example); resolves the target calendar with a SemIf

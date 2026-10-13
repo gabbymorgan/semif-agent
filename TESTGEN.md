@@ -6,6 +6,9 @@ test artifact. The runnable body contract lives in `CODEGEN.md`; this file is
 deliberately separate so the body writer never embeds test data and the test is
 generated from the finished body rather than the other way around.
 
+The pack that ships a skill as a committed starter — its manifest, categories,
+bridge reference, and config schema — is the separate contract `PACKGEN.md`.
+
 A finished skill leaf is a folder
 `data/skills/<category>/<name>/` containing (among others) two artifacts:
 
