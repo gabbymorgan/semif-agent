@@ -13,8 +13,8 @@ truth and this skill is only the workflow.
 ## When to use
 
 - The user wants a new concern/product bundle (its own `packs/<name>/` repo).
-- The user wants a new third-party service backed by a bridge in
-  `semif_agent/bridges/`.
+- The user wants a new third-party service backed by a bridge that ships with
+  its pack (`packs/<name>/bridge/`).
 - The user is adding skills that should ship as a pack rather than be
   authored at runtime.
 
@@ -24,9 +24,10 @@ truth and this skill is only the workflow.
 2. **Decide the concern and categories.** Write one- to two-sentence,
    navigation-grade category descriptions — SemIf routes on them.
 3. **Bridge check.** If the pack talks to a third-party system, confirm a bridge
-   already fronts it in `semif_agent/bridges/registry.py` `CATALOG`. If not,
-   author the bridge first (see the "Authoring a new bridge" section of
-   `PACKGEN.md`), register it in `CATALOG`, and give it a pack config block.
+   already fronts it (a shipped pack's `bridge/`, or the shared LLM bridge). If
+   not, author the bridge first (see the "Authoring a new bridge" section of
+   `PACKGEN.md`), ship it under `packs/<name>/bridge/`, and give it a pack config
+   block.
 4. **Create the pack** (its own repository, `pack.<name>`):
    `packs/<name>/pack.json` with `name`, `title`, `concern`, `categories`,
    `bridges`, `requires`, `enabled_by_default`, and the `config` schema. Model
@@ -34,13 +35,14 @@ truth and this skill is only the workflow.
    `packs/simplex/pack.json` (bridge-backed).
 5. **Add each leaf** under `skills/<category>/<leaf>/` — `skill.py`,
    `manifest.json`, `contract.json`, `skill.test.py` — following `CODEGEN.md`
-   and `TESTGEN.md`. Do not restate those rules; follow them.
+   and `TESTGEN.md`. Do not restate those rules; follow them. Ship each bridge
+   under `bridge/<name>.py` with its `bridge/test_<name>_bridge.py`.
 6. **Regenerate and validate config:**
    `python -m semif_agent.cli check-config --write-example config.example.json`
    then `python -m semif_agent.cli check-config`.
 7. **Run the tests:**
    `python3 -m pytest tests/test_packs.py tests/test_codegen.py -q`
-   (plus `tests/test_<name>_bridge.py` if you added a bridge).
+   (it runs every pack's skill and bridge tests, including the new ones).
 8. **Cross-link** the pack/bridge in `AGENTS.md` (and `README.md` for a shipped
    pack).
 9. **Verify a real run** against the user's actual service — a passing hermetic
@@ -53,8 +55,8 @@ truth and this skill is only the workflow.
 
 - A pack is declarative, committed in its own repository; never put a credential
   in it (secrets live in the gitignored `secrets.json`).
-- Bridge *code* stays in `semif_agent/bridges/`; a pack only references a bridge
-  by name. Never widen the gateway.
+- A bridge **ships with its pack** (`packs/<name>/bridge/`); the core keeps only
+  the shared contract + discovery. Never widen the gateway.
 - `concern` and `categories` are required; every category needs a description.
 - Regenerate `config.example.json` from the schema after any schema change; the
   example and the live config are never hand-edited.

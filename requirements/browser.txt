@@ -1,7 +1,7 @@
 # Browser bridge deps (optional).
 #
 # Only needed on a host that runs the browser bridge (browser automation skills).
-# Lazy-imported by semif_agent/bridges/browser_client.py, so the core stays
+# Lazy-imported by packs/browser/bridge/browser_client.py, so the core stays
 # stdlib-only and every other bridge keeps running without it. Install with
 # scripts/bootstrap.sh --browser, or:
 #   .runtime/venv/bin/pip install -r requirements/browser.txt
