@@ -305,7 +305,8 @@ fi
 # the fields after it.
 IFS=$'\x1f' read -r PLAN_ENGINE PLAN_AUTHORING PLAN_PACKS PLAN_GATEWAYS \
   PLAN_GATEWAY_PLATFORMS PLAN_BRIDGE_PACKS PLAN_INSTALL_ENGINE PLAN_BRIDGE_SVC \
-  PLAN_GATEWAY_SVC PLAN_SIMPLEX_BIN PLAN_SIMPLEX_FWD PLAN_BROWSER PLAN_VOICE < <(
+  PLAN_GATEWAY_SVC PLAN_SIMPLEX_BIN PLAN_SIMPLEX_FWD PLAN_BROWSER PLAN_VOICE \
+  PLAN_PACK_REQS < <(
   python3 - "$PLAN" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
@@ -325,6 +326,7 @@ print("\x1f".join([
     flag("install_simplex_forward"),
     flag("install_browser"),
     flag("install_voice"),
+    ",".join(p.get("pack_requirements", [])),
 ]))
 PY
 )
@@ -333,6 +335,13 @@ PY
 # (e.g. a scripted pre-seed); enabling it in config is still the operator's call.
 [[ "$VOICE" = 1 ]] && PLAN_VOICE=1
 [[ "$BROWSER" = 1 ]] && PLAN_BROWSER=1
+# A forced optional stack also pulls in that pack's own python deps.
+if [[ "$BROWSER" = 1 ]]; then
+  case ",$PLAN_PACK_REQS," in
+    *,browser,*) ;;
+    *) PLAN_PACK_REQS="${PLAN_PACK_REQS:+$PLAN_PACK_REQS,}browser" ;;
+  esac
+fi
 
 # Messaging transports (websockets / lxmf) are needed by the SimpleX gateway or
 # bridge and the LXMF gateway.
@@ -342,6 +351,7 @@ NEED_TRANSPORTS=0
 
 echo "== plan: engine=$PLAN_ENGINE | authoring=$PLAN_AUTHORING | packs=$PLAN_PACKS"
 echo "         gateways=${PLAN_GATEWAYS:-none} | install: engine=$PLAN_INSTALL_ENGINE transports=$NEED_TRANSPORTS bridge=$PLAN_BRIDGE_SVC gateway=$PLAN_GATEWAY_SVC browser=$PLAN_BROWSER voice=$PLAN_VOICE"
+echo "         pack deps=${PLAN_PACK_REQS:-none}"
 
 # The live config may be split (config.json includes config/*.json); merge it so
 # the reads below see one flat object. Stdlib-only, so it works before the venv.
@@ -630,14 +640,33 @@ if [[ "$PLAN_VOICE" = 1 ]]; then
   "$PIP" install --no-deps openwakeword==0.6.0
 fi
 
-# --- stage 3c: optional browser-bridge stack -----------------------------------
-# Playwright + its Chromium binaries. Optional: lazy-imported, so a host without
-# it still runs every other bridge. Browsers go under the checkout's
-# .runtime/browser (the containment rule); the bridge sets PLAYWRIGHT_BROWSERS_PATH
-# to the same path at launch.
+# --- stage 3c: pack-declared python deps ---------------------------------------
+# A pack owns the python deps its skills/bridge need, shipped as
+# packs/<name>/requirements.txt (standard pip format). The install plan lists the
+# packs this host selected/enabled that ship one; a pack that does not enable
+# installs nothing. Deps are lazy-imported by the pack's bridge/skills, so a host
+# without them still runs every other pack. See PACKGEN.md, "Pack python deps".
+if [[ -n "$PLAN_PACK_REQS" ]]; then
+  IFS=',' read -ra PACK_REQ_LIST <<< "$PLAN_PACK_REQS"
+  for pack_name in "${PACK_REQ_LIST[@]}"; do
+    [[ -z "$pack_name" ]] && continue
+    PACK_REQ="$REPO_ROOT/packs/$pack_name/requirements.txt"
+    if [[ -f "$PACK_REQ" ]]; then
+      echo "== installing deps for pack '$pack_name' ($PACK_REQ)"
+      "$PIP" install -r "$PACK_REQ"
+    else
+      echo "   WARN: pack '$pack_name' has no requirements.txt (not cloned?); skipping" >&2
+    fi
+  done
+fi
+
+# --- stage 3d: optional browser-bridge binaries --------------------------------
+# The browser pack's python deps (Playwright) come from
+# packs/browser/requirements.txt in stage 3c; this stage downloads the browser
+# binary. Optional: lazy-imported, so a host without it still runs every other
+# bridge. Browsers go under the checkout's .runtime/browser (the containment
+# rule); the bridge sets PLAYWRIGHT_BROWSERS_PATH to the same path at launch.
 if [[ "$PLAN_BROWSER" = 1 ]]; then
-  echo "== installing browser-bridge deps into $VENV"
-  "$PIP" install -r "$REPO_ROOT/requirements/browser.txt"
   BROWSER_ENGINE="$("$PYTHON" - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
 import json, sys
 try:

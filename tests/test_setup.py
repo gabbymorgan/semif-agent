@@ -88,6 +88,7 @@ def test_minimum_plan_installs_nothing_heavy():
     assert plan["install_browser"] is False
     assert plan["install_voice"] is False
     assert plan["packs"] == ["essentials"]
+    assert plan["pack_requirements"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -139,6 +140,8 @@ def test_maximum_config_enables_everything():
     assert plan["install_voice"] is True
     assert plan["install_bridge_service"] is True
     assert plan["install_gateway_service"] is True
+    # The browser pack ships its own python deps; the plan names it for bootstrap.
+    assert plan["pack_requirements"] == ["browser"]
 
     secrets = build_secrets(answers)
     assert secrets["engine_winnow_api_key"] == "wk"

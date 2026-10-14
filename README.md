@@ -410,8 +410,10 @@ packs/              skill packs, each cloned from its own repo (pack.<name>)
                     pack list lives in the semif-packs index repo (see PACKGEN.md)
 scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
 requirements/       core.txt (test runner), engine.txt (local decision engine),
-                    transports.txt (websockets/lxmf), voice.txt, browser.txt
-                    (staging.txt = the union of the non-hardware files)
+                    transports.txt (websockets/lxmf), voice.txt
+                    (staging.txt = the union of the non-hardware files);
+                    a pack's own deps live with the pack at
+                    packs/<name>/requirements.txt
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
 CODEGEN.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
@@ -506,8 +508,9 @@ The script:
    SemIf engine;
 4. creates `.runtime/venv` and installs only the needed dep files:
    `requirements/core.txt` always, `engine.txt` for a local engine,
-   `transports.txt` when a SimpleX/LXMF transport is selected (`voice.txt` /
-   `browser.txt` for those stacks);
+   `transports.txt` when a SimpleX/LXMF transport is selected (`voice.txt` for
+   the voice stack, and each selected pack's own `packs/<name>/requirements.txt`
+   — e.g. the browser pack's Playwright deps);
 5. for a local engine, downloads/sha256-verifies the GGUF into `.runtime/models/`
    and pre-fetches the HF tokenizer into `.runtime/hf/`;
 6. downloads/sha256-verifies the pinned `simplex-chat` binary **only** when a

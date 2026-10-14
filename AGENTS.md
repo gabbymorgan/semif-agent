@@ -877,7 +877,8 @@ CLI, unit tests (24) + integration tests (2).
   `--reconfigure` re-runs the interview and rewrites `config/` + `secrets.json`.
   `--voice` / `--browser` additionally install those optional stacks
   (`requirements/voice.txt` + system `libportaudio2` + `alsa-utils`;
-  `requirements/browser.txt` + a browser) even when the plan did not pick them.
+  `packs/browser/requirements.txt` + a browser) even when the plan did not pick
+  them.
   The script must be run from a checkout — it reads pins from that checkout's
   `pins.json` and never re-clones the agent repo (only the pack index, the
   selected packs, the SemIf engine, and the simplex-chat binary). Idempotent and
@@ -905,9 +906,13 @@ CLI, unit tests (24) + integration tests (2).
   `simplex_chat` ports/display names stay in `config.json`. The python dep pins
   live in `requirements/` split by concern (committed): `core.txt` (the test
   runner, always), `engine.txt` (the local decision engine), `transports.txt`
-  (websockets/lxmf), plus the optional `voice.txt`/`browser.txt`; `staging.txt`
-  is the union of the non-hardware files. Bootstrap installs only the subset the
-  plan requires. The agent reads `engine.source`/`revision` from
+  (websockets/lxmf), plus the optional `voice.txt`; `staging.txt`
+  is the union of the non-hardware files. A pack owns the deps its skills/bridge
+  need, shipped at `packs/<name>/requirements.txt` (e.g. the browser pack's
+  Playwright pin); the install plan lists the selected/enabled packs that ship
+  one (`plan["pack_requirements"]`) and bootstrap pip-installs each, so a host
+  that never enables a pack installs nothing for it. Bootstrap installs only the
+  subset the plan requires. The agent reads `engine.source`/`revision` from
   `pins.json` and derives the GGUF path from `engine.gguf_url` under
   `.runtime/models/` (an explicit `engine.gguf` in `config.json` overrides it).
   **Maintenance**: bump the pins in `pins.json` / `requirements/`,
@@ -1540,6 +1545,14 @@ CLI, unit tests (24) + integration tests (2).
   scans the `skill_packs` roots for `*/pack.json`; a root with no manifest is one
   implicit pack, so a plain skills directory works) and `merge_packs` loads every
   **enabled** pack at startup.
+- **Deps are pack-owned.** A pack ships the python deps its skills/bridge need at
+  `packs/<name>/requirements.txt` (pip format, pinned) — never in the agent
+  repo's `requirements/`. `SkillPack.requirements_file` resolves it; the install
+  plan lists the selected/enabled packs that ship one (`setup.build_plan` /
+  `plan_from_config` -> `pack_requirements`), and `scripts/bootstrap.sh`
+  pip-installs each into `.runtime/venv` (so a host that never enables a pack
+  installs nothing for it). Heavy deps are lazy-imported and a missing one is a
+  per-call `503`, never a crash. See `PACKGEN.md`, "Pack python deps".
 - **Enable is one switch.** `pack_enabled` resolves: an explicit
   `packs.<name>.enabled`, else a bridge pack follows its
   `bridges.<bridge>.enabled`, else `enabled_by_default`. Disabling a pack drops
@@ -1707,7 +1720,8 @@ CLI, unit tests (24) + integration tests (2).
   behind one uniform JSON surface, so a body never bundles a browser stack. It is
   the first bridge with a heavy optional dependency, so it is **disabled by
   default** and installed with `scripts/bootstrap.sh --browser`
-  (`requirements/browser.txt` pins Playwright; the Chromium binary is downloaded
+  (`packs/browser/requirements.txt` pins Playwright — the pack owns its deps; the
+  Chromium binary is downloaded
   into the checkout's `.runtime/browser`, and the bridge sets
   `PLAYWRIGHT_BROWSERS_PATH` there at launch). Unlike Nextcloud/Outlook it owns a
   browser and keeps a **persistent profile** (`.runtime/browser/profile`), so a
@@ -1807,8 +1821,8 @@ covered. Deferred follow-ups:
   `browser_client.py`). Shipped: `BrowserBridge` exposes open/read
   (text/links/screenshot) and act (goto/click/fill/press/select/wait/back/
   forward/reset) over one JSON surface in front of a real Playwright browser
-  with a persistent profile; optional heavy dep installed via
-  `requirements/browser.txt` + `bootstrap.sh --browser`, lazy so a missing
+  with a persistent profile; optional heavy dep installed via the pack's own
+  `packs/browser/requirements.txt` + `bootstrap.sh --browser`, lazy so a missing
   browser is a per-call 503 and never aborts the other bridges; the async API
   runs on one dedicated event-loop thread. Three `packs/browser/skills/browser/*` skills
   (`open_page`, `read_page`, `screenshot`). Deferred: arbitrary JS `evaluate`,

@@ -50,6 +50,17 @@ class SkillPack:
             {category for category, _ in self.store.list_skills()}
         )
 
+    @property
+    def requirements_file(self) -> Path | None:
+        """The pack's optional pip requirements file, if it ships one.
+
+        A pack owns its python deps: ``packs/<name>/requirements.txt`` (standard
+        pip format) is installed by ``scripts/bootstrap.sh`` when the pack is
+        selected (see ``setup.build_plan``). Returns ``None`` when absent.
+        """
+        path = self.path / "requirements.txt"
+        return path if path.is_file() else None
+
 
 def _parse_pack(manifest_path: Path) -> SkillPack:
     data = json.loads(manifest_path.read_text())

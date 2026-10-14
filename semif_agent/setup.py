@@ -616,6 +616,11 @@ def build_plan(answers: Answers, packs: Sequence[SkillPack]) -> dict:
         "authoring": answers.new_skill_creation,
         "packs": list(answers.packs),
         "bridge_packs": bridge_packs,
+        # Packs that ship their own python deps (packs/<name>/requirements.txt);
+        # bootstrap pip-installs each. See PACKGEN.md, "Pack python deps".
+        "pack_requirements": [
+            p.name for p in packs if p.name in answers.packs and p.requirements_file
+        ],
         "gateways": list(answers.gateways),
         # Platforms the systemd gateway unit runs (voice is foreground-only).
         "gateway_platforms": daemon_gateways,
@@ -648,6 +653,9 @@ def plan_from_config(config: dict, packs: Sequence[SkillPack]) -> dict:
         "authoring": str(config.get("new_skill_creation", "deny") or "deny"),
         "packs": enabled,
         "bridge_packs": bridge_packs,
+        "pack_requirements": [
+            p.name for p in packs if p.name in enabled and p.requirements_file
+        ],
         "gateways": gateways,
         "gateway_platforms": daemon_gateways,
         "install_engine": engine_provider == "semif",

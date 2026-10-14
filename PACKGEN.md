@@ -54,6 +54,7 @@ Three boundaries must stay crisp:
 ```
 packs/<name>/
   pack.json                       # the manifest (this file's subject)
+  requirements.txt                # optional: the pack's own python deps (pip format)
   skills/<category>/<leaf>/
     skill.py                      # the body — CODEGEN.md
     manifest.json                 # {"description": "..."} navigation text
@@ -77,6 +78,8 @@ packs/<name>/
 - `bridge/` ships the pack's bridge (one module per name in `bridges`, plus
   optional sibling modules it imports relatively). It is absent for a
   bridge-less pack. See "Authoring a new bridge".
+- `requirements.txt` is the pack's own optional python deps (standard pip
+  format); it is absent for a stdlib-only pack. See "Pack python deps".
 - `manifest.json` holds a single non-empty `description` — the navigation text
   SemIf routes on. It is the seed analog of the registry entry a generated
   skill gets from the `llm` provider.
@@ -99,7 +102,7 @@ A single JSON object. Fields (from `packs._parse_pack`):
 | `concern`            | string          | **yes**  | One- to two-sentence statement of the product/job the pack serves. (`description` is accepted as a legacy alias.) |
 | `categories`         | object          | **yes**  | `{category_id: scope_description}` — the tree buckets this pack owns. |
 | `bridges`            | array of string | no       | Bridge names this pack ships and talks to. Each name is a `bridge/<name>.py` module in the pack; `simplex`/`llm`/`nextcloud`/`outlook`/`browser` are the shipped names. Empty for a bridge-less pack. |
-| `requires`           | array of string | no       | Optional heavy deps (e.g. `playwright`). Informational; the code's `check_requirements` is what enforces them. |
+| `requires`           | array of string | no       | Optional heavy deps named at a glance (e.g. `playwright`). Informational — the pinned install list is the pack's own `requirements.txt` (see "Pack python deps"), and the code's `check_requirements` is what enforces them at runtime. |
 | `enabled_by_default` | bool            | no       | Default `true`. Whether the pack loads when nothing else decides. |
 | `config`             | object          | no       | The pack's config schema (see below). |
 
@@ -182,6 +185,39 @@ python -m semif_agent.cli check-config
 `config-init` seeds the split `config/` layout from the schemas (bootstrap runs
 it once, only when `config.json` is absent); afterwards only a human edits it.
 The generated example and the live config are never hand-edited.
+
+## Pack python deps
+
+A pack owns the python packages its skills and bridge need. Put them in
+`packs/<name>/requirements.txt` (standard pip requirements format, pinned) —
+**not** in the agent repo's `requirements/`. A pack that is stdlib-only ships no
+file.
+
+How the injection works:
+
+- `SkillPack.requirements_file` (`semif_agent/packs.py`) resolves
+  `packs/<name>/requirements.txt` when it exists.
+- The install plan lists those packs: `setup.build_plan` /
+  `setup.plan_from_config` set `pack_requirements` to the selected/enabled packs
+  that ship one (`scripts/bootstrap.sh` reads the plan).
+- Bootstrap installs each listed pack's file into `.runtime/venv` **after**
+  cloning the selected packs and creating the venv, and only for packs the host
+  actually selected (a host that never enables the pack installs nothing). The
+  `--browser` flag force-adds the browser pack's deps.
+
+Rules:
+
+- **Lazy-import** every heavy dep in the pack's bridge/skills so a host without
+  the pack still runs — the core stays stdlib-only. A missing dep is a per-call
+  `503` with an install hint (see "Authoring a new bridge"), never a crash.
+- **Pin** the versions (this is a shipped integration, not an app you upgrade in
+  place). If a dep needs a non-pip step (a downloaded binary, a system package),
+  ship a helper under `scripts/` and document it in the pack's
+  `requirements.txt` header — the browser pack's Chromium download is the model.
+- `requires` in the manifest is the human-readable summary of the heavy deps;
+  `requirements.txt` is the authoritative install list. Keep them consistent.
+- Never put a credential or a per-machine value in `requirements.txt`; it is
+  committed structure like the rest of the pack.
 
 ## The enable switch
 
@@ -340,10 +376,14 @@ A new pack is accepted only if:
    path, local model name) appears in any committed file —
    `tests/test_no_env_leaks.py` enforces this for the agent repo; keep a pack
    repo clean too. Secrets live in `secrets.json`.
+8. If the pack ships a `requirements.txt`, it is pinned, lives with the pack (not
+   the agent repo's `requirements/`), and its deps are lazy-imported so a host
+   without the pack is unaffected.
 
-`tests/test_packs.py` enforces items 1–6 mechanically for every shipped pack
-(valid manifest, concern + categories, integration matches code, contract flat
-and mirrored, manifest description, hermetic skill test, hermetic bridge test)
+`tests/test_packs.py` enforces items 1–6 and 8 mechanically for every shipped
+pack (valid manifest, concern + categories, integration matches code, contract
+flat and mirrored, manifest description, hermetic skill test, hermetic bridge
+test, pinned pack requirements)
 and keeps the shipped pack ids present.
 
 ## Worked example — a minimal bridge-less pack
@@ -407,7 +447,8 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/` (its
    HTTP API needs no bridge — the skill calls it directly.
 3. Create the pack (its own repository, `pack.<name>`): `packs/<name>/pack.json`
    with `name`, `title`, `concern`, `categories`, `bridges` (if any), `requires`,
-   `enabled_by_default`, and the `config` schema.
+   `enabled_by_default`, and the `config` schema. If the pack needs python deps,
+   ship them pinned at `packs/<name>/requirements.txt` (see "Pack python deps").
 4. Add each leaf under `skills/<category>/<leaf>/` following `CODEGEN.md` and
    `TESTGEN.md` (`skill.py`, `manifest.json`, `contract.json`, `skill.test.py`),
    and each bridge under `bridge/<name>.py` with its `bridge/test_<name>_bridge.py`.

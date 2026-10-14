@@ -1,13 +1,13 @@
-# Full provision: every dependency this repo can need, for a host that runs the
-# local decision engine, all messaging transports, the voice gateway, and the
-# browser bridge. This is the union of the per-concern files below; a
-# `scripts/bootstrap.sh` run installs only the subset its answers require, so
-# prefer those files (engine.txt, transports.txt, voice.txt, browser.txt) when
-# provisioning by hand.
+# Full provision: every repo-level dependency this checkout can need, for a host
+# that runs the local decision engine and all messaging transports. This is the
+# union of the per-concern files below; a `scripts/bootstrap.sh` run installs
+# only the subset its answers require, so prefer those files (engine.txt,
+# transports.txt) when provisioning by hand.
 #
-# Voice and browser stacks are hardware/optional and are NOT included here —
-# install them with `scripts/bootstrap.sh --voice` / `--browser` (or
-# `pip install -r requirements/voice.txt` / `browser.txt`).
+# Voice (voice.txt) and browser (packs/browser/requirements.txt) stacks are
+# hardware/optional. Voice is a repo file installed with
+# `scripts/bootstrap.sh --voice`; the browser deps live WITH their pack and are
+# installed by bootstrap when that pack is selected.
 -r core.txt
 -r engine.txt
 -r transports.txt

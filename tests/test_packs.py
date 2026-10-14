@@ -32,6 +32,7 @@ from semif_agent.packs import (
 PACKS = Path(__file__).resolve().parent.parent / "packs"
 SKILL_DIRS = sorted(path.parent for path in PACKS.glob("*/skills/*/*/skill.py"))
 BRIDGE_TESTS = sorted(PACKS.glob("*/bridge/test_*.py"))
+PACK_REQUIREMENTS = sorted(PACKS.glob("*/requirements.txt"))
 
 
 def seed_id(seed: Path) -> str:
@@ -86,6 +87,34 @@ def test_merge_packs_loads_enabled_and_skips_disabled():
     assert all(s.origin == "seed" for s in tree["nextcloud"])
     # The pack's category description rides on the skill (feeds navigation).
     assert tree["nextcloud"][0].category_description
+
+
+@pytest.mark.parametrize(
+    "req_file",
+    PACK_REQUIREMENTS,
+    ids=[f"{p.parent.name}/{p.name}" for p in PACK_REQUIREMENTS],
+)
+def test_pack_requirements_are_pinned_and_consistent(req_file):
+    """A pack owns its python deps: `packs/<name>/requirements.txt`.
+
+    Every line is pinned (a shipped integration installs exact versions) and the
+    manifest's human-readable `requires` summary stays consistent with the file.
+    """
+    packs = {p.name: p for p in load_packs({"skill_packs": str(PACKS)})}
+    pack = packs[req_file.parent.name]
+    assert pack.requirements_file == req_file
+    lines = [
+        line.strip()
+        for line in req_file.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert lines, f"{req_file} declares no requirements"
+    for line in lines:
+        assert "==" in line, f"{req_file}: pin the version ({line!r})"
+    for dep in pack.requires:
+        assert any(dep.lower() in line.lower() for line in lines), (
+            f"{req_file}: manifest requires {dep!r} but requirements.txt omits it"
+        )
 
 
 def test_manifestless_pack_root_is_one_implicit_pack(tmp_path):

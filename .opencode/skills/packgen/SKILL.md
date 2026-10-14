@@ -32,7 +32,9 @@ truth and this skill is only the workflow.
    `packs/<name>/pack.json` with `name`, `title`, `concern`, `categories`,
    `bridges`, `requires`, `enabled_by_default`, and the `config` schema. Model
    it on `packs/essentials/pack.json` (bridge-less) or
-   `packs/simplex/pack.json` (bridge-backed).
+   `packs/simplex/pack.json` (bridge-backed). If the pack needs python deps,
+   ship them at `packs/<name>/requirements.txt` (pinned, pip format) — never in
+   the agent repo's `requirements/` (see `PACKGEN.md`, "Pack python deps").
 5. **Add each leaf** under `skills/<category>/<leaf>/` — `skill.py`,
    `manifest.json`, `contract.json`, `skill.test.py` — following `CODEGEN.md`
    and `TESTGEN.md`. Do not restate those rules; follow them. Ship each bridge
