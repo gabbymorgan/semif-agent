@@ -833,6 +833,8 @@ class Scheduler:
         inside it and hands off to the codegen body worker. On failure the
         request is not re-dispatched and the user is told.
         """
+        if self.llm is None:
+            return self._authoring_unavailable(request, None)
         self._queue_draft(request, None, "category")
         return DispatchResult(
             kind="create_category",
@@ -855,6 +857,8 @@ class Scheduler:
         """
         if self._category_locked(category):
             return self._blocked_create(request, category)
+        if self.llm is None:
+            return self._authoring_unavailable(request, category)
         pending = request.meta.get("awaiting_skill_body")
         if pending is not None:
             category_pending, name = pending
@@ -874,6 +878,27 @@ class Scheduler:
                 "the request will re-run when it is ready"
             ),
         )
+
+    def _authoring_unavailable(
+        self, request: Request, category: str | None
+    ) -> DispatchResult:
+        """The create door is open but no `llm` model is configured.
+
+        A deterministic configuration fact (traced), surfaced as a plain failure
+        so the user is not left waiting on a body that will never land. The
+        setup wizard prevents this by requiring an `llm` endpoint when authoring
+        is enabled, but a hand-edited config can still reach it.
+        """
+        with self._lock:
+            self.trace.append(
+                "authoring_unavailable", request.id, category=category
+            )
+        message = (
+            "I can't write a new skill on this host — skill authoring is not "
+            "configured (no llm endpoint)."
+        )
+        self._notify_outbox(request.id, message)
+        return DispatchResult(kind="error", summary=message)
 
     # ---- new-skill creation modes (deterministic per-category create door) ----
 

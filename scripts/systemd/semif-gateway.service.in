@@ -11,7 +11,7 @@ Environment=PYTHONUNBUFFERED=1
 # Dump every thread's stack on a fatal signal so a wedged front end (e.g. the
 # voice mic loop) leaves a trace in the journal instead of hanging silently.
 Environment=PYTHONFAULTHANDLER=1
-ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway --platform all
+ExecStart=@REPO@/.runtime/venv/bin/python -m semif_agent.cli gateway --platform @PLATFORMS@
 Restart=always
 RestartSec=5
 StandardOutput=journal

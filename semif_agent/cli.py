@@ -46,6 +46,7 @@ from .llm import LLMClient, SemIfLLMClient
 from .log import DecisionLog
 from .packs import load_packs
 from .scheduler import Scheduler
+from .setup import run_setup as run_bootstrap_setup
 from .skills import tree_summary
 from .trace import TraceLog
 
@@ -249,15 +250,23 @@ def build_engine(config: dict, pins: dict | None = None) -> DecisionEngine:
     return SemIfEngine(build_engine_config(config, pins))
 
 
-def build_codegen_client(config: dict) -> CodegenClient:
+def build_codegen_client(config: dict) -> CodegenClient | None:
     """Build the codegen client from the `codegen` config block.
 
     `provider` selects the class (`opencode` -> the Console client, which adds
     bearer auth and a User-Agent) and the endpoint/auth come from
     `_provider_endpoint`. Shared by `build_scheduler` and the integration tests
     so both exercise the configured provider rather than assuming ollama.
+
+    Returns ``None`` when no `codegen.model` is configured: skill authoring is
+    an opt-in capability, so a host that only runs the shipped packs (the
+    minimum path) needs no codegen endpoint and the app must not fail without
+    one. The scheduler guards every authoring path against a missing client.
     """
     codegen_cfg = config.get("codegen", {}) or {}
+    model = str(codegen_cfg.get("model") or "").strip()
+    if not model:
+        return None
     deg_cfg = codegen_cfg.get("degeneration", {}) or {}
     provider = str(codegen_cfg.get("provider", "ollama") or "ollama").lower()
     client_cls = ConsoleCodegenClient if provider == "opencode" else CodegenClient
@@ -267,7 +276,7 @@ def build_codegen_client(config: dict) -> CodegenClient:
     )
     return client_cls(
         base_url=endpoint["base_url"],
-        model=_required_model(codegen_cfg, "codegen"),
+        model=model,
         timeout=float(codegen_cfg.get("timeout", 1200.0)),
         stream=bool(codegen_cfg.get("stream", False)),
         idle_warn=float(codegen_cfg.get("idle_warn", 60.0)),
@@ -293,7 +302,7 @@ def build_codegen_client(config: dict) -> CodegenClient:
     )
 
 
-def build_llm_client(config: dict, engine):
+def build_llm_client(config: dict, engine) -> LLMClient | None:
     """Build the `llm` title/description client from the `llm` config block.
 
     `provider` selects the backend: `"semif"` drives the already-loaded SemIf
@@ -301,6 +310,9 @@ def build_llm_client(config: dict, engine):
     needed), `"opencode"` the hosted Console client, and anything else the
     default ollama-compatible `LLMClient`. Shared by `build_scheduler` and tests
     so both exercise the configured provider rather than assuming ollama.
+
+    Returns ``None`` when a non-`semif` provider has no `model`: the `llm` client
+    is only needed for skill authoring and gateway result cleanup, both optional.
     """
     llm_cfg = config.get("llm", {}) or {}
     provider = str(llm_cfg.get("provider", "ollama") or "ollama").lower()
@@ -311,11 +323,14 @@ def build_llm_client(config: dict, engine):
             temperature=float(semif_cfg.get("temperature", 0.0)),
             max_tokens=int(semif_cfg.get("max_tokens", 256)),
         )
+    model = str(llm_cfg.get("model") or "").strip()
+    if not model:
+        return None
     llm_cls = ConsoleLLMClient if provider == "opencode" else LLMClient
     endpoint = _provider_endpoint(llm_cfg, "http://localhost:11434/v1")
     return llm_cls(
         base_url=endpoint["base_url"],
-        model=_required_model(llm_cfg, "llm"),
+        model=model,
         timeout=float(llm_cfg.get("timeout", 600.0)),
         stream=bool(llm_cfg.get("stream", False)),
         idle_warn=float(llm_cfg.get("idle_warn", 30.0)),
@@ -347,6 +362,21 @@ def build_scheduler(config: dict) -> tuple[Scheduler, dict]:
     codegen_cfg = config.get("codegen", {})
     deg_cfg = codegen_cfg.get("degeneration", {}) or {}
     codegen = build_codegen_client(config)
+    if str(config.get("new_skill_creation", "deny") or "deny").lower() != "deny":
+        if codegen is None:
+            print(
+                "WARN: new_skill_creation is enabled but codegen.model is not "
+                "set — skill authoring will not run. Set codegen.model (and "
+                "base_url) to enable it.",
+                file=sys.stderr,
+            )
+        if llm is None:
+            print(
+                "WARN: new_skill_creation is enabled but llm.model is not set — "
+                "skill authoring will not run. Set llm.model (and base_url), or "
+                "llm.provider 'semif' to use the decision model.",
+                file=sys.stderr,
+            )
 
     def make_degeneration_check(run_id: str):
         """2-option SemIf decision (continue/stop) that aborts a degenerating
@@ -1056,10 +1086,42 @@ def config_init(path: str = "config.json") -> int:
     return 0
 
 
+def _setup_command(args) -> int:
+    """Run the first-run interview (or emit the install plan) — see `setup.py`."""
+    config_path = Path(args.path)
+    if not config_path.is_absolute():
+        config_path = REPO_ROOT / config_path
+    packs = load_packs({"skill_packs": _anchor_pack_roots({})})
+    return run_bootstrap_setup(
+        root=config_path.parent,
+        path=config_path,
+        packs=packs,
+        interview=args.interview,
+        yes=args.yes,
+        answers_file=args.answers,
+        plan_only=args.plan_only,
+        plan_out=args.plan_out,
+        force=args.force,
+    )
+
+
+def _load_config_tolerant(path: str) -> dict:
+    """Load the config, or ``{}`` when it is missing/invalid.
+
+    Used for parser defaults (dashboard bind) before the subcommand is known.
+    Runtime commands still require a real config: `main` re-loads it fatally
+    after the config-independent subcommands return.
+    """
+    try:
+        return load_config(path)
+    except SystemExit:
+        return {}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else list(sys.argv[1:])
     config_path = _extract_config_path(argv)
-    config = load_config(config_path)
+    defaults = _load_config_tolerant(config_path)
     parser = argparse.ArgumentParser(prog="semif-agent")
     parser.add_argument("--config", default="config.json")
     sub = parser.add_subparsers(dest="command")
@@ -1086,15 +1148,64 @@ def main(argv: list[str] | None = None) -> int:
     )
     ci_p.add_argument("--path", default="config.json", help="config index path to seed")
 
+    setup_p = sub.add_parser(
+        "setup",
+        help="first-run interview: generate config/ from your answers",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "answers JSON fields (all optional; --answers FILE):\n"
+            "  engine_provider (semif|winnow), winnow_base_url, winnow_model,\n"
+            "    winnow_api_key\n"
+            "  new_skill_creation (deny|ask|allow)\n"
+            "  llm_provider (semif|ollama|opencode|openai), llm_base_url,\n"
+            "    llm_model, llm_api_key\n"
+            "  codegen_provider, codegen_base_url, codegen_model, codegen_api_key\n"
+            "  packs (list of: essentials, simplex, browser, nextcloud, outlook)\n"
+            "  gateways (list of: simplex, lxmf, voice), timezone\n"
+            "  nextcloud_url, nextcloud_username, nextcloud_app_password,\n"
+            "    outlook_client_id"
+        ),
+    )
+    setup_p.add_argument("--path", default="config.json", help="config index path to seed")
+    setup_p.add_argument(
+        "--interview", action="store_true", help="ask the setup questions interactively"
+    )
+    setup_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="non-interactive: take the minimum working defaults",
+    )
+    setup_p.add_argument(
+        "--answers", default=None, metavar="FILE", help="JSON answers file (non-interactive)"
+    )
+    setup_p.add_argument(
+        "--plan-out",
+        default=None,
+        metavar="PATH",
+        help="write the install plan JSON to PATH (for scripts/bootstrap.sh)",
+    )
+    setup_p.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="read the existing config and emit the plan; write nothing",
+    )
+    setup_p.add_argument(
+        "--force", action="store_true", help="overwrite an existing config"
+    )
+
     relabel_p = sub.add_parser("relabel", help="human override of a decision label")
     relabel_p.add_argument("id")
     relabel_p.add_argument("outcome")
 
     dash_p = sub.add_parser("dashboard", help="run the local browser dashboard")
-    dash_p.add_argument("--port", type=int, default=int(config.get("dashboard", {}).get("port", 8765)))
+    dash_p.add_argument(
+        "--port",
+        type=int,
+        default=int(defaults.get("dashboard", {}).get("port", 8765)),
+    )
     dash_p.add_argument(
         "--host",
-        default=str(config.get("dashboard", {}).get("host", "127.0.0.1")),
+        default=str(defaults.get("dashboard", {}).get("host", "127.0.0.1")),
         help="bind address (0.0.0.0 to expose on the LAN)",
     )
     dash_p.add_argument(
@@ -1130,7 +1241,11 @@ def main(argv: list[str] | None = None) -> int:
         return check_config(config_path, write_example=args.write_example)
     if args.command == "config-init":
         return config_init(args.path)
+    if args.command == "setup":
+        return _setup_command(args)
 
+    # Runtime commands need a real config; this is fatal when it is missing.
+    config = defaults or load_config(config_path)
     scheduler, config = build_scheduler(config)
 
     if args.command == "run":

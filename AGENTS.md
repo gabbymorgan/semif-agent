@@ -68,8 +68,9 @@ capability is a new bridge, not a gateway feature.
 cli.py          argparse: run (REPL / --script), dream, skills, status, relabel,
                 dashboard, gateway (command intake), bridge (standalone
                 third-party API bridges), check-config (validate config/
-                against the core + pack schemas), config-init (seed the split
-                config/ + secrets.json)
+                against the core + pack schemas), setup (first-run interview ->
+                split config/ + secrets.json + install plan), config-init (seed
+                the schema-default split config/ + secrets.json)
 config.py       layered per-machine config: config.json is a thin index
                 (`{"include": [...]}`) over config/core.json + config/gateway.json
                 + config/bridges.json + config/packs/<name>.json, deep-merged in
@@ -382,8 +383,9 @@ values are yours to choose.
   endpoints and models). `config.json` is an index (`{"include": [...]}`);
   `config/core.json` + `config/gateway.json` + `config/bridges.json` +
   `config/packs/<name>.json` hold the values, and `secrets.json` holds
-  credentials referenced as `"!secret <key>"`. `scripts/bootstrap.sh` seeds the
-  split config once (via `config-init`, only when `config.json` is absent) and
+  credentials referenced as `"!secret <key>"`. `scripts/bootstrap.sh` generates the
+  split config once from the setup interview (via `setup`, only when
+  `config.json` is absent, or `--reconfigure`) and
   **nothing writes it afterwards — only a human edits it**. The committed
   `config.example.json` is GENERATED from the core schema
   (`semif_agent/config.py`) and each pack's `config` schema — regenerate it with
@@ -769,17 +771,20 @@ CLI, unit tests (24) + integration tests (2).
   containment rule; prefer bootstrap.)
 - SemIf hard-pins `torch==2.10.0`, `numpy==2.2.6`, etc. The llamacpp path does
   **not** need torch (torch is imported lazily inside `direct.score`). Install
-  with `--no-deps` and bring only what's needed — the committed manifest
-  `requirements/staging.txt` is the single source of truth:
+  with `--no-deps` and bring only what's needed — the committed
+  `requirements/engine.txt` holds the local-engine pins (the union file
+  `staging.txt` includes it):
   `pip install -e <semif-clone> --no-deps`, then
-  `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install -r requirements/staging.txt`
+  `CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 pip install -r requirements/engine.txt`
   (numpy 2.3.5, transformers 5.17.0, tokenizers 0.23.2, huggingface-hub 1.31.0,
-  llama-cpp-python 0.3.35, pytest). GPU offload is **opt-in**: set
+  llama-cpp-python 0.3.35). GPU offload is **opt-in**: set
   `engine.gpu_layers` and run `bootstrap.sh --gpu vulkan|rocm|cuda` (with
   `--gpu auto`, detection picks a backend when `engine.gpu_layers` is set),
   which installs the Vulkan build prereqs
   (`libvulkan-dev glslc spirv-headers glslang-tools`) when needed. A CPU-only
-  host keeps the default CPU wheel — a GPU build is slower on CPU.
+  host keeps the default CPU wheel — a GPU build is slower on CPU. A host whose
+  `engine.provider` is `"winnow"` installs none of this (no clone, no GGUF, no
+  tokenizer, no engine deps).
 - **Expected pip warnings:** pip reports "dependency conflicts" against
   semif-phase1's declared requirements (torch/accelerate/protobuf/sentencepiece
   not installed, numpy 2.2.6 vs 2.3.5). These are informational — the staging
@@ -817,15 +822,25 @@ CLI, unit tests (24) + integration tests (2).
   (`check-config --write-example config.example.json`); secret keys are emitted
   as `"!secret <name>"`, never a real value. `check-config` validates a live
   config (type mismatches and missing secrets are errors; unknown keys warn).
-- **Seeding.** `config-init` writes the split layout + an empty `secrets.json`
-  from the schemas (bootstrap calls it once, only when `config.json` is absent);
-  afterwards only a human edits it. `scripts/config_merge.py` is the stdlib-only
-  merger bootstrap uses before the venv exists.
+- **Seeding.** `setup` (`semif_agent/setup.py`, the `cli setup` subcommand)
+  runs the first-run interview and writes the split layout + `secrets.json` from
+  the answers; `config-init` writes the schema defaults with no interview.
+  Bootstrap calls `setup` once, only when `config.json` is absent (or
+  `--reconfigure`); afterwards only a human edits it. `scripts/config_merge.py`
+  is the stdlib-only merger bootstrap uses before the venv exists.
+- **The install plan.** `setup` also emits a JSON *plan* (`.runtime/bootstrap-plan.json`)
+  that bootstrap reads to install only what the answers require: the local
+  engine clone/GGUF/tokenizer, `requirements/engine.txt` vs `transports.txt`,
+  the simplex-chat binary, the Playwright stack, the voice stack, and which
+  systemd units to render. `plan_from_config` derives the same plan from an
+  existing config on a rerun. The plan's `gateway_platforms` excludes `voice`
+  (foreground-only), which is what the `semif-gateway.service` unit runs.
 
 ### ollama
 - `bootstrap.sh` installs **no ollama**: it expects the target host to already
   run one for `llm` (and pulls `llm.model` into it), while `codegen` may be
-  remote. Point `--llm-url`/`--codegen-url` at the right daemons.
+  remote. The `llm`/`codegen` endpoints are set in the setup interview (or by
+  editing `config.json`); a host that leaves authoring `deny` needs neither.
 - If generation hangs with no log output, restart the ollama service — the GPU
   runner can wedge.
 - **A local reasoning model needs thinking off for `llm`.** A reasoning model
@@ -847,24 +862,26 @@ CLI, unit tests (24) + integration tests (2).
 
 - Provision a fresh Ubuntu machine into a running host: clone `semif-agent` to
   a checkout (register its SSH key on your git host first), then run
-  `scripts/bootstrap.sh`. With no `config.json` yet it seeds the split config
-  (`config-init` writes `config/core.json`, `config/gateway.json`,
-  `config/bridges.json`, `config/packs/*.json`, the `config.json` index, and an
-  empty `secrets.json`); edit those to set `llm.model`/`codegen.model` and the
-  endpoints, and put credentials in `secrets.json`. Flags (`--llm-url`,
-  `--codegen-url`, `--llm-model`,
-  `--codegen-model`) override the values read from the merged config **for that run
-  only** and are never written back. `--voice` additionally installs the
-  optional voice-gateway stack (`requirements/voice.txt` + system
-  `libportaudio2` + `alsa-utils`) and downloads its models into `.runtime/voice/` via
-  `scripts/voice-models.py`. The script must be run from a checkout —
-  it reads pins from that checkout's `pins.json` and never re-clones the agent
-  repo (only the SemIf engine and the simplex-chat binary). Idempotent and
-  rerunnable; every stage no-ops on existing state, so it also boots an
-  unknown-state machine. It installs **no ollama**: `llm` is the local ollama
-  (bootstrap pulls `llm.model` if configured), `codegen` may point at a peer
-  host. It WARNs (never auto-pulls) if the remote codegen host is missing its
-  model, and WARNs if `llm.model`/`codegen.model` are unset.
+  `scripts/bootstrap.sh`. On a fresh machine it runs the **setup interview**
+  (`semif_agent/setup.py`, the `cli setup` subcommand) and writes the split
+  config from the answers — decision engine (local SemIf 4B or remote Winnow),
+  new-skill authoring mode (+ `llm`/`codegen` endpoints when enabled), capability
+  packs, gateways, and timezone — then installs only what those answers require
+  (the install *plan* drives every conditional stage). `--yes` takes the minimum
+  working defaults unattended; `--answers FILE` replays a saved answer set;
+  `--reconfigure` re-runs the interview and rewrites `config/` + `secrets.json`.
+  `--voice` / `--browser` additionally install those optional stacks
+  (`requirements/voice.txt` + system `libportaudio2` + `alsa-utils`;
+  `requirements/browser.txt` + a browser) even when the plan did not pick them.
+  The script must be run from a checkout — it reads pins from that checkout's
+  `pins.json` and never re-clones the agent repo (only the SemIf engine and the
+  simplex-chat binary). Idempotent and rerunnable; every stage no-ops on existing
+  state, so it also boots an unknown-state machine (a rerun SKIPS the interview
+  and uses the existing config). It installs **no ollama**: `llm` is the local
+  ollama (bootstrap pulls `llm.model` when configured), `codegen` may point at a
+  peer host. It WARNs (never auto-pulls) if the codegen host is missing its
+  model, and WARNs only when authoring is enabled but `llm.model`/`codegen.model`
+  are unset.
 - **All installation artifacts live inside the checkout under a gitignored
   `.runtime/`** (`venv/`, `engine/`, `models/`, `hf/`, `bin/simplex-chat`,
   `simplex/`, `systemd/`, and `voice/` for the optional voice models), so an
@@ -880,45 +897,50 @@ CLI, unit tests (24) + integration tests (2).
   `bin_url`/`sha256`; bootstrap selects by `uname -m`, `arm64` normalized to
   `aarch64`). Per-machine
   `simplex_chat` ports/display names stay in `config.json`. The python dep pins
-  live in `requirements/staging.txt` (committed, one versioned artifact — every
-  host provisions from it). The agent reads `engine.source`/`revision` from
+  live in `requirements/` split by concern (committed): `core.txt` (the test
+  runner, always), `engine.txt` (the local decision engine), `transports.txt`
+  (websockets/lxmf), plus the optional `voice.txt`/`browser.txt`; `staging.txt`
+  is the union of the non-hardware files. Bootstrap installs only the subset the
+  plan requires. The agent reads `engine.source`/`revision` from
   `pins.json` and derives the GGUF path from `engine.gguf_url` under
   `.runtime/models/` (an explicit `engine.gguf` in `config.json` overrides it).
-  **Maintenance**: bump the pins in `pins.json` / `requirements/staging.txt`,
+  **Maintenance**: bump the pins in `pins.json` / `requirements/`,
   rerun the script, re-run the integration tests. The script never guesses.
 - pip prints **expected** "dependency conflict" warnings at install time
   (semif-phase1 declares torch/accelerate/protobuf/sentencepiece/numpy 2.2.6
   that we intentionally do not install — the llama.cpp CPU path doesn't need
   them; numpy 2.3.5 is deliberate, 2.2.6 has no cp314 wheel). Do not "fix" them
   by installing torch.
-- Seeds the split config (`config-init`: `config/core.json`,
+- Generates the split config from the interview (`setup`: `config/core.json`,
   `config/gateway.json`, `config/bridges.json`, `config/packs/*.json`, the
-  `config.json` index, and an empty `secrets.json`) only when `config.json` is
-  absent, and **never writes it again** — only a human edits it. The committed
-  `config.example.json` is GENERATED from the core + pack schemas and ships the
-  provisioned defaults, so a seeded config already has
-  `codegen.timeout: 3600`, the SimpleX gateway enabled
-  (`gateway.simplex.enabled = true`, `ws_url` from `simplex_chat.port`) and the
-  standalone forwarding bridge enabled (`bridges.simplex.enabled = true`,
-  `ws_url` from `simplex_chat.forward_port`) and
-  the LLM bridge enabled (`bridges.llm.enabled = true`; it reuses the `llm`
-  model);
-  the operator sets `llm.model`/`llm.base_url` and `codegen.model`/
-  `codegen.base_url`, and puts credentials in `secrets.json`. Bootstrap renders/enables four user services:
+  `config.json` index, and `secrets.json`) when `config.json` is absent (or
+  `--reconfigure`), and **never writes it again otherwise** — only a human edits
+  it. The committed `config.example.json` is GENERATED from the core + pack
+  schemas and ships the provisioned defaults. The generated config reflects the
+  answers: the minimum path enables only `essentials`, `llm.provider = "semif"`,
+  an empty `codegen.model` (no authoring), and every gateway/bridge off; the
+  maximum path enables the chosen packs, gateways, a remote engine, and the
+  `llm`/`codegen` endpoints with credentials in `secrets.json`. Bootstrap
+  renders/enables **only the user services the plan needs**:
   `semif-simplex.service` (the command `simplex-chat` bot daemon,
-  `--create-bot-display-name` on `simplex_chat.port`), `semif-gateway.service`
-  (`.runtime/venv/bin/python -m semif_agent.cli gateway`),
+  `--create-bot-display-name` on `simplex_chat.port`, when the simplex gateway is
+  on), `semif-gateway.service`
+  (`.runtime/venv/bin/python -m semif_agent.cli gateway --platform <daemon
+  platforms>`; voice is excluded — it is foreground-only),
   `semif-simplex-forward.service` (the bridge's **own** daemon/profile on
-  `simplex_chat.forward_port`) and `semif-bridge.service`
-  (`.runtime/venv/bin/python -m semif_agent.cli bridge`). The gateway allowlist
+  `simplex_chat.forward_port`, when the simplex pack is on) and
+  `semif-bridge.service`
+  (`.runtime/venv/bin/python -m semif_agent.cli bridge`, when any bridge pack is
+  on); a reconfigure retires units it no longer needs. The gateway allowlist
   (`gateway.simplex.allowed_users`) and fallback (`home_channel`) are
   `config.json` fields the operator edits; with an empty allowlist the gateway
   denies everyone (the safe default until the human adds their contact id).
   `--copy-data SRC` rsyncs a prior host's `data/` for continuity.
   Bootstrap then runs `packs/simplex/scripts/simplex-address.py` to create/print the command
   bot's contact address (and the forwarding bot's, via `--ws-url`).
-- First run downloads the 2.8G GGUF and builds `llama-cpp-python` from source
-  (~10 min on 6 cores); reruns are fast no-ops.
+- First run of the minimum path still downloads the 2.8G GGUF and builds
+  `llama-cpp-python` from source (~10 min on 6 cores); a remote-engine host skips
+  both, and reruns are fast no-ops.
 - Per-host run/verify commands and addresses: `local/ENVIRONMENT.md`.
 
 ### codegen (skill bodies)
@@ -926,7 +948,14 @@ CLI, unit tests (24) + integration tests (2).
   under `codegen` in config.json (your configured code-capable model —
   larger/slower than `llm`). Title + description for new skills come from the
   separate small `llm` provider (its own endpoint/model, shared transport in
-  `provider.py`); only the runnable code body uses codegen.
+  `provider.py`); only the runnable code body uses codegen. **Both are optional**:
+  an empty `codegen.model` means "no authoring path" — `build_codegen_client`
+  returns `None`, the scheduler guards every create door, and a host that leaves
+  `new_skill_creation` at `deny` (the minimum path) starts with neither endpoint
+  configured. `build_llm_client` likewise returns `None` for a non-`semif`
+  provider with no model. With authoring enabled the setup interview requires the
+  endpoints; a hand-edited config that enables authoring without them fails
+  cleanly (a traced `authoring_unavailable`, not a crash).
 - **Local engine as the `llm` provider: `"semif"`** (`provider.SemIfEngineClient`
   + `llm.SemIfLLMClient`). Set `llm.provider = "semif"` to generate the
   title/description (and any other `llm` text: gateway result cleanup, the LLM
@@ -1475,7 +1504,7 @@ CLI, unit tests (24) + integration tests (2).
   the live voice pipeline against a real microphone are live-integration
   concerns.
 - **Deps.** `websockets` and `lxmf`/`rns` are pinned in
-  `requirements/staging.txt` (staging only); both are lazy-imported and the core
+  `requirements/transports.txt` (staging only); both are lazy-imported and the core
   stays stdlib-only. The voice stack is pinned separately in
   `requirements/voice.txt` (hardware-dependent: `sounddevice`, `openwakeword`,
   `faster-whisper`, `piper-tts`, `onnxruntime`, `webrtcvad-wheels`, plus the

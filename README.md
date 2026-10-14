@@ -409,7 +409,9 @@ packs/              skill packs, each cloned from its own repo (pack.<name>)
                     into this gitignored dir — each ships its own bridge/ — see
                     packs.json + PACKGEN.md
 scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
-requirements/       staging.txt — the pinned engine deps
+requirements/       core.txt (test runner), engine.txt (local decision engine),
+                    transports.txt (websockets/lxmf), voice.txt, browser.txt
+                    (staging.txt = the union of the non-hardware files)
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
 CODEGEN.md            the contract fed to the skill-body codegen model
 TESTGEN.md          the contract fed to the test/contract codegen model
@@ -429,30 +431,37 @@ local/              gitignored: this deployment's notes (hosts, addresses, model
 ## Installation
 
 The agent runs anywhere pure-Python runs, but a *working* agent needs the SemIf
-decision engine, a pinned GGUF, and an OpenAI-compatible endpoint for codegen.
-`scripts/bootstrap.sh` provisions all of it inside a gitignored `.runtime/` tree
-in the checkout.
+decision engine (local or remote). `scripts/bootstrap.sh` provisions what this
+machine needs inside a gitignored `.runtime/` tree in the checkout — and only
+what it needs, based on the answers to a short first-run interview.
 
-### Prerequisites: ollama models
+### Prerequisites: the decision engine, and optional models
 
-Two OpenAI-compatible endpoints (usually ollama), which may be on different
-machines:
+The **decision engine** routes every request. It runs one of two ways, chosen in
+the interview:
 
-- **`codegen`** — a large, code-capable model that writes skill bodies. This is
-  slow and ideally on a beefier host.
+- **local** — the pinned SemIf 4B GGUF via llama.cpp (no network). This is the
+  default and the whole minimum path.
+- **remote** — a Winnow `/v1/systemone` decision server (`engine.provider ==
+  "winnow"`). The local engine clone, GGUF, and tokenizer are then skipped.
+
+The local engine is CPU by default; to offload it to a GPU, set
+`engine.gpu_layers` in `config.json` and run
+`scripts/bootstrap.sh --gpu vulkan|rocm|cuda` (a GPU build is opt-in because it
+is slower on CPU).
+
+**Skill authoring is opt-in** (`new_skill_creation`: `deny` by default). When it
+is off, no `llm`/`codegen` endpoint is needed at all — the agent only runs the
+shipped packs. When it is on, two OpenAI-compatible endpoints are required
+(usually ollama, possibly on different machines):
+
 - **`llm`** — a small, fast model that authors the title + description of a
-  newly created category/skill. Deliberately its own endpoint/model, so it can
-  stay local even when `codegen` is remote; it uses the same provider transport
-  (`provider.py`) and an unreachable endpoint is graceful (the request is not
-  re-dispatched), never fatal. Its `provider` can be `"ollama"` (default),
+  newly created category/skill. Its `provider` can be `"ollama"` (default),
   `"opencode"` (the hosted Console API), or `"semif"` — the already-loaded
   decision engine model generates in-process, with no endpoint and no
-  `llm.model` at all (see the `llm.semif` block in `config.json`).
-
-The **decision engine is separate** and runs via llama.cpp, not ollama. It is CPU
-by default; to offload it to a GPU, set `engine.gpu_layers` in `config.json` and
-run `scripts/bootstrap.sh --gpu vulkan|rocm|cuda` (a GPU build is opt-in because
-it is slower on CPU).
+  `llm.model` at all.
+- **`codegen`** — a large, code-capable model that writes skill bodies. This is
+  slow and ideally on a beefier host.
 
 ### Option A: one-command provisioning (`bootstrap.sh`)
 
@@ -462,44 +471,57 @@ On a fresh Ubuntu machine, from a checkout of this repo:
 scripts/bootstrap.sh
 ```
 
-With no `config.json` yet, the script seeds the split config (`config-init`
-writes `config/core.json`, `config/gateway.json`, `config/bridges.json`,
-`config/packs/*.json`, the `config.json` index, and an empty `secrets.json`);
-edit those to set `llm.model`/`codegen.model` (and the endpoints), and put
-credentials in `secrets.json`. Flags override those
-values for the run only — `--llm-url`, `--codegen-url`, `--llm-model`,
-`--codegen-model` — and are never written back to the config.
+On a fresh machine the script **asks a few questions** and writes this machine's
+config from the answers:
 
-The script is idempotent (every stage no-ops on existing state) and:
+1. **Decision engine** — local SemIf 4B, or a remote Winnow server (URL/model/key).
+2. **Skill authoring** — `deny` (default), `ask`, or `allow`; if enabled, the
+   `llm` + `codegen` endpoints and credentials.
+3. **Capabilities** — the shipped skill packs to enable: SimpleX, browser,
+   Nextcloud, Outlook (the `essentials` pack is always on).
+4. **Gateways** — how you talk to the agent: SimpleX, LXMF, voice (or none —
+   REPL + dashboard only).
+5. **Timezone** — an IANA name for timers and reported times.
+
+It then installs **only what those answers require**. Both ends of the spectrum
+are reachable by the end of a run:
+
+- **minimum** — local SemIf 4B + `essentials` (canned replies, time/timers,
+  calculator). No account, no network, no gateway, no heavy downloads.
+- **maximum** — every pack, a remote Winnow engine, remote `llm`/`codegen`
+  endpoints, and all gateways.
+
+Non-interactive runs: `--yes` takes the minimum defaults; `--answers FILE`
+replays a saved answer set (JSON matching the `setup` fields). The script is
+idempotent — on a rerun the interview is **skipped** and the existing config is
+used; pass `--reconfigure` to re-run it. `--voice` / `--browser` additionally
+install those optional stacks even if the plan did not pick them.
+
+The script:
 
 1. installs system prereqs + enables linger;
-2. generates/uses `~/.ssh/id_ed25519` and clones + pins the SemIf engine;
-3. creates `.runtime/venv` and installs the pinned deps from
-   `requirements/staging.txt` (installing `semif-phase1` with `--no-deps`, since
-   the llama.cpp path never imports torch);
-4. downloads and sha256-verifies the pinned GGUF into `.runtime/models/`;
-5. pre-fetches the HF tokenizer into `.runtime/hf/`;
-6. downloads and sha256-verifies the pinned `simplex-chat` binary;
-7. seeds the split config (`config-init`) **only if `config.json` does not
-   already exist** — it never rewrites it (only a human edits it);
-8. renders and enables systemd **user** units:
-   `semif-simplex` (bot daemon), `semif-gateway` (agent gateway),
-   `semif-simplex-forward` (the bridge's own daemon), `semif-bridge`;
-9. prints the bot's SimpleX contact address.
+2. clones/updates the skill packs, then runs the setup interview and writes
+   `config/` + `secrets.json` (first run or `--reconfigure`);
+3. generates/uses `~/.ssh/id_ed25519` and, for a local engine, clones + pins the
+   SemIf engine;
+4. creates `.runtime/venv` and installs only the needed dep files:
+   `requirements/core.txt` always, `engine.txt` for a local engine,
+   `transports.txt` when a SimpleX/LXMF transport is selected (`voice.txt` /
+   `browser.txt` for those stacks);
+5. for a local engine, downloads/sha256-verifies the GGUF into `.runtime/models/`
+   and pre-fetches the HF tokenizer into `.runtime/hf/`;
+6. downloads/sha256-verifies the pinned `simplex-chat` binary **only** when a
+   SimpleX gateway or the simplex pack is selected;
+7. renders and enables only the systemd **user** units the answers need
+   (`semif-simplex` bot daemon, `semif-gateway` agent, `semif-simplex-forward`
+   bridge daemon, `semif-bridge`), retiring any a reconfigure dropped;
+8. prints the SimpleX contact address(es) when those services are active.
 
-Flags (`--llm-url`, `--codegen-url`, `--llm-model`, `--codegen-model`,
-`--copy-data SRC`) override the values read from `config.json` for that run only.
-`--voice` additionally installs the optional voice-gateway stack
-(`requirements/voice.txt` + system PortAudio) and downloads its models (the
-openWakeWord models into the venv under `.runtime/venv`, the Piper voice into
-`.runtime/voice/tts`, the faster-whisper model into the `.runtime/hf` cache).
-Run `scripts/bootstrap.sh -h` for the full list.
-
-It installs **no ollama**; it expects one for `llm` and pulls `llm.model`,
-warning (never auto-pulling) if the remote codegen host is missing its model.
-Pinned external refs (engine commit, GGUF url+sha256, HF tokenizer revision,
-simplex-chat version/url+sha256) live in the committed `pins.json`, not in
-`config.json`.
+Run `scripts/bootstrap.sh -h` for the full list. It installs **no ollama**; it
+pulls `llm.model` from the target host's ollama when configured, and never
+auto-pulls `codegen`. Pinned external refs (engine commit, GGUF url+sha256, HF
+tokenizer revision, simplex-chat version/url+sha256) live in the committed
+`pins.json`, not in `config.json`.
 
 ### Option B: core only (stdlib)
 
@@ -510,11 +532,12 @@ python3 -m pytest tests/ -q --ignore=tests/integration
 ```
 
 For a full install on a machine you manage, follow the same steps bootstrap
-performs (venv, `semif-phase1 --no-deps`, `requirements/staging.txt`, GGUF,
-tokenizer cache), then seed the split config and adjust paths:
+performs (venv, `semif-phase1 --no-deps`, the `requirements/` files, GGUF,
+tokenizer cache), then generate the split config:
 
 ```sh
-python -m semif_agent.cli config-init        # writes config/ + secrets.json
+python -m semif_agent.cli setup --interview    # or --yes / --answers FILE
+python -m semif_agent.cli config-init          # schema defaults, no interview
 ```
 
 ### Configuration
@@ -524,11 +547,13 @@ refuses to start without it. `config.json` is a thin **index**
 (`{"include": ["config/core.json", "config/gateway.json", ...]}`); the fragments
 under `config/` hold the values and are deep-merged in order. Credentials live in
 the gitignored `secrets.json` and are referenced from any fragment as
-`"!secret <key>"` (there is no `api_key_env`). `scripts/bootstrap.sh` seeds the
-split config once via `config-init`; afterwards only a human edits it.
+`"!secret <key>"` (there is no `api_key_env`). `scripts/bootstrap.sh` runs
+`setup` to generate the split config from your answers; afterwards only a human
+edits it (`--reconfigure` re-runs the interview).
 
 ```sh
-python -m semif_agent.cli config-init          # seed config/ + secrets.json (once)
+python -m semif_agent.cli setup --interview    # generate config/ from answers
+python -m semif_agent.cli config-init          # seed schema defaults (no interview)
 python -m semif_agent.cli check-config         # validate against the schemas
 ```
 
@@ -572,9 +597,12 @@ host/port/token, so there is no duplicate top-level key to keep in sync. A bridg
 with no block (or no port) leaves the variable unresolved and the operator is
 asked for it.
 
-`llm.model` and `codegen.model` are **required** (no default): set each to a
-model its endpoint serves. A missing model fails fast at startup with a clear
-config error rather than sending a request to a model that isn't there.
+`llm.model` and `codegen.model` are **required only when authoring is enabled**
+(`new_skill_creation` is `ask`/`allow`): set each to a model its endpoint serves.
+An empty `codegen.model` means "no authoring path" — the minimum config leaves it
+empty and the agent simply runs the shipped packs. With authoring on, a missing
+model fails fast at startup with a clear config error rather than sending a
+request to a model that isn't there.
 
 Runtime artifacts (`data/decisions.jsonl`, `data/runs.jsonl`,
 `data/categories.json`, `data/skills/`, `data/drafts/`) are gitignored too.
@@ -590,6 +618,7 @@ Runtime artifacts (`data/decisions.jsonl`, `data/runs.jsonl`,
 All subcommands go through the CLI:
 
 ```sh
+python -m semif_agent.cli setup --interview   # generate config/ from answers
 python -m semif_agent.cli run              # interactive REPL
 python -m semif_agent.cli run --script inputs.jsonl
 python -m semif_agent.cli dream            # cost report

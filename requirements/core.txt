@@ -1,0 +1,7 @@
+# Core agent deps (the agent itself is stdlib-only; this is the test runner).
+#
+# Every host installs this. The decision engine, messaging transports, voice,
+# and browser stacks are separate, optional files (engine.txt, transports.txt,
+# voice.txt, browser.txt) so a host installs only what its answers require.
+# `staging.txt` includes all of them for a full provision.
+pytest

@@ -1,23 +1,13 @@
-# Staging-machine engine deps (CPU llama.cpp path).
+# Full provision: every dependency this repo can need, for a host that runs the
+# local decision engine, all messaging transports, the voice gateway, and the
+# browser bridge. This is the union of the per-concern files below; a
+# `scripts/bootstrap.sh` run installs only the subset its answers require, so
+# prefer those files (engine.txt, transports.txt, voice.txt, browser.txt) when
+# provisioning by hand.
 #
-# semIF (semif-phase1) hard-pins torch/accelerate/safetensors/sentencepiece/
-# protobuf/numpy==2.2.6 in its BASE dependencies, but the llamacpp backend
-# never imports torch (it's lazy inside direct.score), and numpy 2.2.6 has no
-# cp314 wheel (source build fails). So semif-phase1 is installed with
-# `--no-deps` and exactly this set is brought in instead. The pins match the
-# proven staging venv; huggingface-hub is pinned to 1.31.0 (semif-phase1's
-# declared version) so the pip resolver stays quiet about it.
-numpy==2.3.5
-transformers==5.17.0
-tokenizers==0.23.2
-huggingface-hub==1.31.0
-llama-cpp-python==0.3.35
-pytest
-# Messaging gateway transport (SimpleX adapter). Optional: lazy-imported, the
-# gateway refuses to start without it. Not needed by the decision engine.
-websockets==15.0.1
-# LXMF (Reticulum) gateway transport. Optional: lazy-imported, the gateway
-# refuses to start without it. Runs in-process — there is no daemon binary.
-# rns pulls cryptography + pyserial transitively (resolved by pip).
-lxmf==1.2.0
-rns==1.5.7
+# Voice and browser stacks are hardware/optional and are NOT included here —
+# install them with `scripts/bootstrap.sh --voice` / `--browser` (or
+# `pip install -r requirements/voice.txt` / `browser.txt`).
+-r core.txt
+-r engine.txt
+-r transports.txt

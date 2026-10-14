@@ -1,0 +1,13 @@
+# Messaging transport deps (SimpleX + LXMF gateways/bridges).
+#
+# Only needed on a host that enables the SimpleX gateway or bridge (which uses
+# `websockets` against its simplex-chat daemon) or the LXMF gateway (in-process
+# `lxmf`/`rns`). Both are lazy-imported, so a host without them still runs every
+# other front end; the gateway refuses to start with an install hint.
+#
+# `websockets` is shared by the command gateway and the forwarding bridge (the
+# neutral `semif_agent/simplex_ws.py`). `lxmf` pulls `rns` (Reticulum) and
+# cryptography transitively; both are pinned so the resolver stays quiet.
+websockets==15.0.1
+lxmf==1.2.0
+rns==1.5.7

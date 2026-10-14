@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 # Provision a new Ubuntu machine into a running semif-agent host.
 #
-# Idempotent: safe to rerun; every stage no-ops on already-provisioned state,
-# so it can also bootstrap a machine of unknown state. The small
-# title/description model runs on this machine's local ollama (bootstrap pulls
-# it); codegen may point at a remote ollama host. This script installs NO ollama.
+# First run asks a few questions and writes this machine's config from the
+# answers (see `python -m semif_agent.cli setup`): the decision engine (local
+# SemIf 4B or a remote Winnow server), whether the agent may author new skills,
+# which capability packs to enable, and which gateways to run. Bootstrap then
+# installs ONLY what those answers require — a REPL-only host never downloads
+# the simplex-chat binary, Playwright, or the voice stack.
+#
+# The two ends of the spectrum are both reachable by the end of a run:
+#   * minimum — local SemIf 4B + the `essentials` pack (canned replies,
+#     time/timers, calculator). No account, no network, no gateway.
+#   * maximum — every pack (SimpleX, browser, Nextcloud, Outlook), a remote
+#     Winnow decision engine, remote `llm`/`codegen` endpoints, and all gateways.
+#
+# Idempotent: safe to rerun; every stage no-ops on already-provisioned state. On
+# a rerun the interview is SKIPPED and the existing config is used — pass
+# `--reconfigure` to re-run it. This script installs NO ollama; a local `llm`
+# pulls its model from the target host's ollama, and `codegen` may be remote.
 #
 # Must be run from a semif-agent checkout. The checkout is used as-is and never
 # re-cloned — only the SemIf engine, the simplex-chat binary, and the skill
@@ -13,15 +26,13 @@
 # named pack.<name> on the same host (see packs.json) into the gitignored
 # packs/ directory.
 #
-# config.json is the per-machine USER config (a thin index over config/*.json)
-# and this script NEVER rewrites it. It seeds the split config via `config-init`
-# (config/core.json, config/gateway.json, config/bridges.json, config/packs/*.json,
-# the config.json index, and an empty secrets.json) only when config.json is
-# absent, then reads every per-machine value from the merged config; only a human
-# edits it afterwards. Pinned external refs (SemIf commit, GGUF url+sha256,
-# HF tokenizer revision, simplex-chat version/url+sha256) live in the committed
-# pins.json and the python dep pins in requirements/staging.txt — bump those
-# (via git) and rerun to upgrade.
+# config.json is the per-machine USER config (a thin index over config/*.json).
+# This script seeds it from the interview the FIRST time (or with
+# --reconfigure), then reads every per-machine value from it; only a human edits
+# it afterwards. Pinned external refs (SemIf commit, GGUF url+sha256, HF
+# tokenizer revision, simplex-chat version/url+sha256) live in the committed
+# pins.json and the python dep pins in requirements/ — bump those (via git) and
+# rerun to upgrade.
 #
 # Every installation artifact lives INSIDE this checkout under .runtime/
 # (gitignored), so an end user can find and debug the whole stack in one tree:
@@ -32,21 +43,17 @@
 # Only artifacts that operationally must live elsewhere are outside: the SSH
 # key (~/.ssh) and the real systemd user dir/linger.
 #
-# Flags override the values read from the merged config FOR THIS RUN ONLY;
-# nothing is written back to the config.
-#
 # Usage:
-#   scripts/bootstrap.sh [--llm-url URL] [--codegen-url URL] [--llm-model MODEL]
-#                        [--codegen-model MODEL] [--copy-data SRC] [--voice]
-#                        [--browser] [--gpu MODE] [--pack-base URL] [-h]
+#   scripts/bootstrap.sh [--reconfigure] [--yes | --answers FILE]
+#                        [--copy-data SRC] [--voice] [--browser]
+#                        [--gpu MODE] [--pack-base URL] [-h]
 #
 # Run as the human user; sudo is used internally for system bits.
 set -euo pipefail
 
-LLM_URL=""
-CODEGEN_URL=""
-LLM_MODEL=""
-CODEGEN_MODEL=""
+RECONFIGURE=0
+YES=0
+ANSWERS_FILE=""
 COPY_DATA=""
 VOICE=0
 BROWSER=0
@@ -56,13 +63,12 @@ PACK_BASE=""
 usage() {
   sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
   echo
-  echo "  --llm-url URL          override llm.base_url from config.json for this run (else config.json, else http://127.0.0.1:11434)"
-  echo "  --codegen-url URL      override codegen.base_url from config.json for this run"
-  echo "  --llm-model MODEL      override llm.model from config.json for this run (pulled if the local ollama lacks it)"
-  echo "  --codegen-model MODEL  override codegen.model from config.json for this run"
+  echo "  --reconfigure          re-run the setup interview and rewrite config/ (default: use existing config)"
+  echo "  --yes                  non-interactive: take the minimum working defaults (no prompts)"
+  echo "  --answers FILE         non-interactive: read answers from a JSON file (see 'python -m semif_agent.cli setup --help')"
   echo "  --copy-data SRC        rsync SRC (e.g. user@host:/path/to/semif-agent/data) to data/ — opt-in"
-  echo "  --voice                install the optional voice-gateway stack + download its models"
-  echo "  --browser              install the optional browser-bridge stack (Playwright + Chromium)"
+  echo "  --voice                also install the optional voice-gateway stack + models"
+  echo "  --browser              also install the optional browser-bridge stack (Playwright + Chromium)"
   echo "  --gpu MODE             decision-engine llama.cpp backend: auto (default; a GPU build only when engine.gpu_layers is set), vulkan, rocm, cuda, cpu"
   echo "  --pack-base URL        base URL of the skill-pack repos (default: derived from this checkout's origin remote)"
   echo "  -h                     this help"
@@ -71,10 +77,9 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --llm-url) LLM_URL="$2"; shift 2 ;;
-    --codegen-url) CODEGEN_URL="$2"; shift 2 ;;
-    --llm-model) LLM_MODEL="$2"; shift 2 ;;
-    --codegen-model) CODEGEN_MODEL="$2"; shift 2 ;;
+    --reconfigure) RECONFIGURE=1; shift ;;
+    --yes) YES=1; shift ;;
+    --answers) ANSWERS_FILE="$2"; shift 2 ;;
     --copy-data) COPY_DATA="$2"; shift 2 ;;
     --voice) VOICE=1; shift ;;
     --browser) BROWSER=1; shift ;;
@@ -100,6 +105,7 @@ SIMPLEX_DB="$RUNTIME/simplex"
 UNITS="$RUNTIME/systemd"
 USER_UNITS="$HOME/.config/systemd/user"
 BROWSERS="$RUNTIME/browser"
+PLAN="$RUNTIME/bootstrap-plan.json"
 PYTHON="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
@@ -117,9 +123,8 @@ fi
 # gitignored packs/ directory; the agent loads every pack under skill_packs
 # (default "packs"). The list lives in the committed packs.json; each repo is a
 # sibling of this checkout's origin remote (pack.<name>) unless --pack-base
-# overrides the base. This runs BEFORE the config is seeded so config-init sees
-# the packs and generates their config/packs/*.json fragments. Idempotent:
-# clone when absent, fast-forward when present.
+# overrides the base. This runs BEFORE the interview so setup sees every pack
+# and can offer it. Idempotent: clone when absent, fast-forward when present.
 PACK_MANIFEST="$REPO_ROOT/packs.json"
 if [[ -f "$PACK_MANIFEST" ]]; then
   if [[ -z "$PACK_BASE" ]]; then
@@ -163,26 +168,95 @@ PY
   fi
 fi
 
-# config.json is per-machine USER config. Seed it once (as a thin index plus the
-# split config/ fragments + secrets.json), then never write it again — only a
-# human edits it. The committed config.example.json is GENERATED from the pack +
-# core schemas; see `python -m semif_agent.cli check-config --write-example`.
-if [[ ! -f "$CONFIG" ]]; then
-  echo "== seeding config/ + secrets.json (edit them to configure this machine)"
-  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m semif_agent.cli config-init --path "$CONFIG" \
-    || { echo "config-init failed; falling back to a flat config.json from the example" >&2; cp "$EXAMPLE" "$CONFIG"; }
+# --- configure this machine (interview -> config/ + secrets.json) --------------
+# On a fresh machine (or --reconfigure) ask the setup questions and generate the
+# split config from the answers; otherwise use the existing config. Either way
+# emit a machine-readable install plan that drives the conditional stages below.
+mkdir -p "$RUNTIME"
+setup_args=(--path "$CONFIG" --plan-out "$PLAN")
+if [[ -n "$ANSWERS_FILE" ]]; then
+  if [[ ! -f "$ANSWERS_FILE" ]]; then
+    echo "answers file not found: $ANSWERS_FILE" >&2
+    exit 1
+  fi
+  setup_args+=(--answers "$ANSWERS_FILE")
+elif [[ "$YES" = 1 ]]; then
+  setup_args+=(--yes)
+elif [[ -t 0 && -t 1 ]]; then
+  setup_args+=(--interview)
+else
+  echo "== no terminal for the setup interview; using the minimum defaults (--yes)" >&2
+  setup_args+=(--yes)
 fi
+
+run_setup() {
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m semif_agent.cli setup "$@"
+}
+
+if [[ ! -f "$CONFIG" || "$RECONFIGURE" = 1 ]]; then
+  if [[ "$RECONFIGURE" = 1 && -f "$CONFIG" ]]; then
+    echo "== reconfiguring $CONFIG (rewriting config/ + secrets.json)"
+    setup_args+=(--force)
+  else
+    echo "== configuring this machine"
+  fi
+  run_setup "${setup_args[@]}" || { echo "setup failed" >&2; exit 1; }
+else
+  echo "== using existing $CONFIG (pass --reconfigure to change it)"
+  run_setup --path "$CONFIG" --plan-only --plan-out "$PLAN" \
+    || { echo "could not derive the install plan from $CONFIG" >&2; exit 1; }
+fi
+
+# Read the plan (install decisions) and the merged config (per-machine values).
+# The ASCII unit separator (\x1f) delimits fields so an empty value never shifts
+# the fields after it.
+IFS=$'\x1f' read -r PLAN_ENGINE PLAN_AUTHORING PLAN_PACKS PLAN_GATEWAYS \
+  PLAN_GATEWAY_PLATFORMS PLAN_BRIDGE_PACKS PLAN_INSTALL_ENGINE PLAN_BRIDGE_SVC \
+  PLAN_GATEWAY_SVC PLAN_SIMPLEX_BIN PLAN_SIMPLEX_FWD PLAN_BROWSER PLAN_VOICE < <(
+  python3 - "$PLAN" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+def flag(key):
+    return "1" if p.get(key) else "0"
+print("\x1f".join([
+    str(p.get("engine_provider", "")),
+    str(p.get("authoring", "")),
+    ",".join(p.get("packs", [])),
+    ",".join(p.get("gateways", [])),
+    ",".join(p.get("gateway_platforms", [])),
+    ",".join(p.get("bridge_packs", [])),
+    flag("install_engine"),
+    flag("install_bridge_service"),
+    flag("install_gateway_service"),
+    flag("install_simplex_binary"),
+    flag("install_simplex_forward"),
+    flag("install_browser"),
+    flag("install_voice"),
+]))
+PY
+)
+
+# The optional-stack flags force an install even when the plan did not pick it
+# (e.g. a scripted pre-seed); enabling it in config is still the operator's call.
+[[ "$VOICE" = 1 ]] && PLAN_VOICE=1
+[[ "$BROWSER" = 1 ]] && PLAN_BROWSER=1
+
+# Messaging transports (websockets / lxmf) are needed by the SimpleX gateway or
+# bridge and the LXMF gateway.
+NEED_TRANSPORTS=0
+[[ "$PLAN_SIMPLEX_BIN" = 1 ]] && NEED_TRANSPORTS=1
+[[ ",$PLAN_GATEWAYS," == *",lxmf,"* ]] && NEED_TRANSPORTS=1
+
+echo "== plan: engine=$PLAN_ENGINE | authoring=$PLAN_AUTHORING | packs=$PLAN_PACKS"
+echo "         gateways=${PLAN_GATEWAYS:-none} | install: engine=$PLAN_INSTALL_ENGINE transports=$NEED_TRANSPORTS bridge=$PLAN_BRIDGE_SVC gateway=$PLAN_GATEWAY_SVC browser=$PLAN_BROWSER voice=$PLAN_VOICE"
 
 # The live config may be split (config.json includes config/*.json); merge it so
 # the reads below see one flat object. Stdlib-only, so it works before the venv.
 MERGED_CONFIG="$RUNTIME/config.merged.json"
-mkdir -p "$RUNTIME"
 python3 "$REPO_ROOT/scripts/config_merge.py" "$CONFIG" > "$MERGED_CONFIG" \
   || { echo "could not read $CONFIG" >&2; exit 1; }
 
 # --- read pins from the committed pins.json ---------------------------------
-# The ASCII unit separator (\x1f) delimits fields so an empty value never
-# shifts the fields after it (space-splitting collapses runs of whitespace).
 # The simplex-chat binary is per-arch: normalize `uname -m` to a pins key.
 SIMPLEX_ARCH="$(uname -m)"
 case "$SIMPLEX_ARCH" in
@@ -211,22 +285,27 @@ print("\x1f".join([
 PY
 )
 
-if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256" ]]; then
-  echo "engine pins missing in $PINS (semif_repo/semif_ref/gguf_url/gguf_sha256)" >&2
-  exit 1
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  if [[ -z "$SEMIF_REPO" || -z "$SEMIF_REF" || -z "$GGUF_URL" || -z "$GGUF_SHA256" ]]; then
+    echo "engine pins missing in $PINS (semif_repo/semif_ref/gguf_url/gguf_sha256)" >&2
+    exit 1
+  fi
 fi
-if [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" ]]; then
+if [[ "$PLAN_SIMPLEX_BIN" = 1 ]] && [[ -z "$SIMPLEX_BIN_URL" || -z "$SIMPLEX_SHA256" ]]; then
   echo "simplex_chat pins missing in $PINS for arch '$SIMPLEX_ARCH' (assets.<arch>.bin_url/sha256)" >&2
   exit 1
 fi
 
-# --- read per-machine values from config.json (flags override for this run) --
+# --- read per-machine values from config.json ----------------------------------
 IFS=$'\x1f' read -r CFG_LLM_URL CFG_LLM_MODEL CFG_LLM_PROVIDER CFG_CODEGEN_URL CFG_CODEGEN_MODEL \
+  CFG_CODEGEN_PROVIDER CFG_ENGINE_PROVIDER CFG_WINNOW_URL CFG_WINNOW_MODEL \
   SIMPLEX_PORT SIMPLEX_DISPLAY SIMPLEX_FORWARD_PORT SIMPLEX_FORWARD_DISPLAY < <(
   python3 - "$MERGED_CONFIG" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 s = cfg.get("simplex_chat", {})
+eng = cfg.get("engine", {})
+win = eng.get("winnow", {})
 def strip_v1(u):
     u = str(u or "").rstrip("/")
     return u[:-3] if u.endswith("/v1") else u
@@ -236,6 +315,10 @@ print("\x1f".join([
     str(cfg.get("llm", {}).get("provider", "ollama") or "ollama").lower(),
     strip_v1(cfg.get("codegen", {}).get("base_url")),
     str(cfg.get("codegen", {}).get("model", "") or ""),
+    str(cfg.get("codegen", {}).get("provider", "ollama") or "ollama").lower(),
+    str(eng.get("provider", "semif") or "semif").lower(),
+    strip_v1(win.get("base_url")),
+    str(win.get("model", "") or ""),
     str(s.get("port", "")),
     str(s.get("display_name", "") or ""),
     str(s.get("forward_port", "")),
@@ -244,12 +327,15 @@ print("\x1f".join([
 PY
 )
 
-# A flag overrides config.json for this run only; config.json is never touched.
-LLM_URL="${LLM_URL:-${CFG_LLM_URL:-http://127.0.0.1:11434}}"
-CODEGEN_URL="${CODEGEN_URL:-$CFG_CODEGEN_URL}"
-LLM_MODEL="${LLM_MODEL:-$CFG_LLM_MODEL}"
-CODEGEN_MODEL="${CODEGEN_MODEL:-$CFG_CODEGEN_MODEL}"
-LLM_PROVIDER="${LLM_PROVIDER:-${CFG_LLM_PROVIDER:-ollama}}"
+LLM_URL="${CFG_LLM_URL:-http://127.0.0.1:11434}"
+LLM_MODEL="$CFG_LLM_MODEL"
+LLM_PROVIDER="${CFG_LLM_PROVIDER:-ollama}"
+CODEGEN_URL="$CFG_CODEGEN_URL"
+CODEGEN_MODEL="$CFG_CODEGEN_MODEL"
+CODEGEN_PROVIDER="${CFG_CODEGEN_PROVIDER:-ollama}"
+ENGINE_PROVIDER="${CFG_ENGINE_PROVIDER:-semif}"
+WINNOW_URL="$CFG_WINNOW_URL"
+WINNOW_MODEL="$CFG_WINNOW_MODEL"
 
 if [[ -z "$SIMPLEX_PORT" || -z "$SIMPLEX_FORWARD_PORT" ]]; then
   echo "config.json: simplex_chat.port and simplex_chat.forward_port are required" >&2
@@ -264,11 +350,11 @@ CODEGEN_API="${CODEGEN_URL%/v1}"; CODEGEN_API="${CODEGEN_API%/}"
 with_v1() { local u="${1%/}"; [[ "$u" == */v1 ]] && printf '%s' "$u" || printf '%s/v1' "$u"; }
 LLM_V1="$(with_v1 "$LLM_URL")"
 
-echo "== pins: semif @ $SEMIF_REF | gguf sha256 ${GGUF_SHA256:0:12}… | simplex-chat sha256 ${SIMPLEX_SHA256:0:12}…"
-if [[ "$LLM_PROVIDER" == "semif" ]]; then
-  echo "== llm semif (in-process engine model) | codegen $CODEGEN_URL"
+echo "== pins: simplex-chat sha256 ${SIMPLEX_SHA256:0:12}… | gguf ${GGUF_SHA256:0:12}…"
+if [[ "$ENGINE_PROVIDER" = "winnow" ]]; then
+  echo "== decision engine: remote Winnow ($WINNOW_URL, model ${WINNOW_MODEL:-?})"
 else
-  echo "== llm $LLM_URL (local, model $LLM_MODEL) | codegen $CODEGEN_URL"
+  echo "== decision engine: local SemIf @ $SEMIF_REF"
 fi
 echo "== runtime tree: $RUNTIME"
 
@@ -304,35 +390,40 @@ if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) els
 fi
 echo "== python: $("$PY" --version)"
 
-# --- stage 2: ssh key + SemIf engine clone ------------------------------------
+# --- stage 2: ssh key + SemIf engine clone (local engine only) ----------------
 mkdir -p ~/.ssh
 if [[ ! -f ~/.ssh/id_ed25519 ]]; then
-  echo "== generating ~/.ssh/id_ed25519 (register this key on Gitea for the agent repo)"
+  echo "== generating ~/.ssh/id_ed25519 (register this key on your git host for the agent repo)"
   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
   cat ~/.ssh/id_ed25519.pub
 fi
 
 git -C "$REPO_ROOT" pull --ff-only || true
 
-if [[ ! -d "$ENGINE/.git" ]]; then
-  echo "== cloning SemIf engine from $SEMIF_REPO into $ENGINE"
-  git clone "$SEMIF_REPO" "$ENGINE"
-fi
-if [[ "$(git -C "$ENGINE" rev-parse HEAD 2>/dev/null)" != "$SEMIF_REF" ]]; then
-  echo "== pinning SemIf engine to $SEMIF_REF"
-  git -C "$ENGINE" fetch origin
-  git -C "$ENGINE" checkout "$SEMIF_REF"
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  if [[ ! -d "$ENGINE/.git" ]]; then
+    echo "== cloning SemIf engine from $SEMIF_REPO into $ENGINE"
+    git clone "$SEMIF_REPO" "$ENGINE"
+  fi
+  if [[ "$(git -C "$ENGINE" rev-parse HEAD 2>/dev/null)" != "$SEMIF_REF" ]]; then
+    echo "== pinning SemIf engine to $SEMIF_REF"
+    git -C "$ENGINE" fetch origin
+    git -C "$ENGINE" checkout "$SEMIF_REF"
+  fi
+else
+  echo "== remote decision engine selected; skipping the local engine clone"
 fi
 
-# --- stage 2b: pick the llama.cpp GPU backend ---------------------------------
-# The decision engine scores the GGUF through llama.cpp, which runs on CPU
-# unless llama-cpp-python was built with a GPU backend. A GPU-enabled build is
-# opt-in: llama.cpp's Vulkan backend splits the compute graph across CPU and
-# Vulkan even with `n_gpu_layers=0`, roughly doubling CPU latency, so a CPU-only
-# host must not get one. `--gpu <backend>` forces a build; `--gpu auto` (the
-# default) builds a GPU backend only when config.json asks for offload
-# (`engine.gpu_layers` nonzero).
-CONFIG_GPU_LAYERS="$(python3 - "$MERGED_CONFIG" <<'PY'
+# --- stage 2b: pick the llama.cpp GPU backend (local engine only) -------------
+# A GPU-enabled build is opt-in: llama.cpp's Vulkan backend splits the compute
+# graph across CPU and Vulkan even with `n_gpu_layers=0`, roughly doubling CPU
+# latency, so a CPU-only host must not get one. `--gpu <backend>` forces a build;
+# `--gpu auto` (default) builds a GPU backend only when config.json asks for
+# offload (`engine.gpu_layers` nonzero).
+GPU_BACKEND=cpu
+CONFIG_GPU_LAYERS=0
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  CONFIG_GPU_LAYERS="$(python3 - "$MERGED_CONFIG" <<'PY'
 import json, sys
 try:
     print(int(json.load(open(sys.argv[1])).get("engine", {}).get("gpu_layers", 0) or 0))
@@ -340,37 +431,38 @@ except Exception:
     print(0)
 PY
 )"
-detect_gpu_backend() {
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-    echo cuda; return
-  fi
-  if [[ -d /opt/rocm ]]; then
-    echo rocm; return
-  fi
-  if command -v glslc >/dev/null 2>&1 && compgen -G "/usr/share/vulkan/icd.d/*.json" >/dev/null; then
-    echo vulkan; return
-  fi
-  echo cpu
-}
-case "$GPU_MODE" in
-  cpu) GPU_BACKEND=cpu ;;
-  vulkan|rocm|cuda) GPU_BACKEND="$GPU_MODE" ;;
-  auto)
-    if [[ "$CONFIG_GPU_LAYERS" != 0 ]]; then
-      GPU_BACKEND="$(detect_gpu_backend)"
-    else
-      GPU_BACKEND=cpu
+  detect_gpu_backend() {
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      echo cuda; return
     fi
-    ;;
-  *) echo "unknown --gpu mode: $GPU_MODE (want auto, vulkan, rocm, cuda, cpu)" >&2; exit 2 ;;
-esac
+    if [[ -d /opt/rocm ]]; then
+      echo rocm; return
+    fi
+    if command -v glslc >/dev/null 2>&1 && compgen -G "/usr/share/vulkan/icd.d/*.json" >/dev/null; then
+      echo vulkan; return
+    fi
+    echo cpu
+  }
+  case "$GPU_MODE" in
+    cpu) GPU_BACKEND=cpu ;;
+    vulkan|rocm|cuda) GPU_BACKEND="$GPU_MODE" ;;
+    auto)
+      if [[ "$CONFIG_GPU_LAYERS" != 0 ]]; then
+        GPU_BACKEND="$(detect_gpu_backend)"
+      else
+        GPU_BACKEND=cpu
+      fi
+      ;;
+    *) echo "unknown --gpu mode: $GPU_MODE (want auto, vulkan, rocm, cuda, cpu)" >&2; exit 2 ;;
+  esac
+  echo "== decision-engine llama.cpp backend: $GPU_BACKEND (engine.gpu_layers=$CONFIG_GPU_LAYERS)"
+fi
 case "$GPU_BACKEND" in
   vulkan) LLAMA_CMAKE_ARGS="-DGGML_VULKAN=on" ;;
   rocm)   LLAMA_CMAKE_ARGS="-DGGML_HIP=on" ;;
   cuda)   LLAMA_CMAKE_ARGS="-DGGML_CUDA=on" ;;
   *)      LLAMA_CMAKE_ARGS="" ;;
 esac
-echo "== decision-engine llama.cpp backend: $GPU_BACKEND (engine.gpu_layers=$CONFIG_GPU_LAYERS)"
 
 if [[ "$GPU_BACKEND" = vulkan ]]; then
   VULKAN_PKGS=(libvulkan-dev glslc spirv-headers glslang-tools)
@@ -388,31 +480,42 @@ if [[ ! -x "$PYTHON" ]]; then
   echo "== creating venv at $VENV"
   "$PY" -m venv "$VENV"
 fi
-echo "== installing engine deps into $VENV"
+echo "== installing core deps into $VENV"
 "$PIP" install --upgrade pip setuptools wheel
-"$PIP" install -e "$ENGINE" --no-deps
-CMAKE_ARGS="$LLAMA_CMAKE_ARGS" CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 \
-  "$PIP" install -r "$REPO_ROOT/requirements/staging.txt"
+"$PIP" install -r "$REPO_ROOT/requirements/core.txt"
 
-# Make the installed llama-cpp-python match the requested backend: pip ships a
-# CPU wheel and its wheel cache hands it back even when CMAKE_ARGS asks for a
-# GPU backend, so force a source build whenever offload support disagrees.
-installed_gpu=no
-"$PYTHON" -c 'import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)' 2>/dev/null && installed_gpu=yes
-want_gpu=yes
-[[ "$GPU_BACKEND" = cpu ]] && want_gpu=no
-if [[ "$installed_gpu" != "$want_gpu" ]]; then
-  LLAMA_PIN="$(grep -m1 -E '^llama-cpp-python==' "$REPO_ROOT/requirements/staging.txt")"
-  echo "== rebuilding llama-cpp-python for the $GPU_BACKEND backend ($LLAMA_PIN)"
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  echo "== installing engine deps (llama.cpp CPU/GPU path)"
+  "$PIP" install -e "$ENGINE" --no-deps
   CMAKE_ARGS="$LLAMA_CMAKE_ARGS" CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 \
-    "$PIP" install --no-deps --force-reinstall --no-cache-dir --no-binary llama-cpp-python "$LLAMA_PIN"
+    "$PIP" install -r "$REPO_ROOT/requirements/engine.txt"
+
+  # Make the installed llama-cpp-python match the requested backend: pip ships a
+  # CPU wheel and its wheel cache hands it back even when CMAKE_ARGS asks for a
+  # GPU backend, so force a source build whenever offload support disagrees.
+  installed_gpu=no
+  "$PYTHON" -c 'import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)' 2>/dev/null && installed_gpu=yes
+  want_gpu=yes
+  [[ "$GPU_BACKEND" = cpu ]] && want_gpu=no
+  if [[ "$installed_gpu" != "$want_gpu" ]]; then
+    LLAMA_PIN="$(grep -m1 -E '^llama-cpp-python==' "$REPO_ROOT/requirements/engine.txt")"
+    echo "== rebuilding llama-cpp-python for the $GPU_BACKEND backend ($LLAMA_PIN)"
+    CMAKE_ARGS="$LLAMA_CMAKE_ARGS" CMAKE_BUILD_PARALLEL_LEVEL=6 MAKEFLAGS=-j6 \
+      "$PIP" install --no-deps --force-reinstall --no-cache-dir --no-binary llama-cpp-python "$LLAMA_PIN"
+  fi
 fi
+
+if [[ "$NEED_TRANSPORTS" = 1 ]]; then
+  echo "== installing messaging transport deps (websockets / lxmf)"
+  "$PIP" install -r "$REPO_ROOT/requirements/transports.txt"
+fi
+
 "$PIP" install -e "$REPO_ROOT" --no-deps
 
-# --- stage 3b: optional voice-gateway stack (--voice) --------------------------
+# --- stage 3b: optional voice-gateway stack ------------------------------------
 # Hardware-dependent: only the host with a microphone/speaker needs it. The
 # stack is lazy-imported, so a host without it still runs every other front end.
-if [[ "$VOICE" = 1 ]]; then
+if [[ "$PLAN_VOICE" = 1 ]]; then
   # libportaudio2 is the I/O backend sounddevice needs; alsa-utils provides
   # amixer/alsamixer/alsactl so the operator can unmute and set the mic/speaker
   # levels (PortAudio itself has no volume control).
@@ -434,12 +537,12 @@ if [[ "$VOICE" = 1 ]]; then
   "$PIP" install --no-deps openwakeword==0.6.0
 fi
 
-# --- stage 3c: optional browser-bridge stack (--browser) -----------------------
+# --- stage 3c: optional browser-bridge stack -----------------------------------
 # Playwright + its Chromium binaries. Optional: lazy-imported, so a host without
 # it still runs every other bridge. Browsers go under the checkout's
 # .runtime/browser (the containment rule); the bridge sets PLAYWRIGHT_BROWSERS_PATH
 # to the same path at launch.
-if [[ "$BROWSER" = 1 ]]; then
+if [[ "$PLAN_BROWSER" = 1 ]]; then
   echo "== installing browser-bridge deps into $VENV"
   "$PIP" install -r "$REPO_ROOT/requirements/browser.txt"
   BROWSER_ENGINE="$("$PYTHON" - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
@@ -471,73 +574,100 @@ PY
   fi
 fi
 
-# --- stage 4: GGUF --------------------------------------------------------------
-GGUF_NAME="$(basename "$GGUF_URL")"
-GGUF="$MODELS/$GGUF_NAME"
-sha_ok() { [[ -f "$GGUF" ]] && [[ "$(sha256sum "$GGUF" | cut -d' ' -f1)" == "$GGUF_SHA256" ]]; }
-if ! sha_ok; then
-  echo "== downloading GGUF ($GGUF_NAME) into $MODELS"
-  rm -f "$GGUF" "$GGUF.tmp"
-  curl -fL --retry 3 -o "$GGUF.tmp" "$GGUF_URL"
-  mv "$GGUF.tmp" "$GGUF"
-fi
-sha_ok || { echo "GGUF sha256 mismatch: expected $GGUF_SHA256" >&2; exit 1; }
-echo "== GGUF verified ($GGUF)"
+# --- stage 4: GGUF (local engine only) ------------------------------------------
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  GGUF_NAME="$(basename "$GGUF_URL")"
+  GGUF="$MODELS/$GGUF_NAME"
+  sha_ok() { [[ -f "$GGUF" ]] && [[ "$(sha256sum "$GGUF" | cut -d' ' -f1)" == "$GGUF_SHA256" ]]; }
+  if ! sha_ok; then
+    echo "== downloading GGUF ($GGUF_NAME) into $MODELS"
+    rm -f "$GGUF" "$GGUF.tmp"
+    curl -fL --retry 3 -o "$GGUF.tmp" "$GGUF_URL"
+    mv "$GGUF.tmp" "$GGUF"
+  fi
+  sha_ok || { echo "GGUF sha256 mismatch: expected $GGUF_SHA256" >&2; exit 1; }
+  echo "== GGUF verified ($GGUF)"
 
-# --- stage 5: HF tokenizer cache --------------------------------------------------
-export HF_HOME="$HF_CACHE"
-mkdir -p "$HF_CACHE"
-echo "== pre-fetching tokenizer $HF_SOURCE @ $HF_REV into $HF_CACHE"
-"$PYTHON" - "$HF_SOURCE" "$HF_REV" <<'PY'
+  # --- stage 5: HF tokenizer cache ---
+  export HF_HOME="$HF_CACHE"
+  mkdir -p "$HF_CACHE"
+  echo "== pre-fetching tokenizer $HF_SOURCE @ $HF_REV into $HF_CACHE"
+  "$PYTHON" - "$HF_SOURCE" "$HF_REV" <<'PY'
 import sys
 from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained(sys.argv[1], revision=sys.argv[2])
 PY
+else
+  echo "== remote decision engine: no GGUF/tokenizer to fetch"
+fi
 
-# --- stage 5b: optional voice models (--voice) ----------------------------------
+# --- stage 5b: optional voice models -------------------------------------------
 # Downloads the openWakeWord models (into the venv) + the Piper voice (into
 # .runtime/voice/tts) and warms the faster-whisper model into the HF cache.
-# Reads gateway.voice from config.json
-# so the models match the configured names. Best-effort: a download failure
-# warns (the gateway reports the missing model at startup) rather than aborting.
-if [[ "$VOICE" = 1 ]]; then
+# Reads gateway.voice from config.json so the models match the configured names.
+# Best-effort: a download failure warns (the gateway reports the missing model at
+# startup) rather than aborting.
+if [[ "$PLAN_VOICE" = 1 ]]; then
   echo "== downloading voice models (openWakeWord + Piper + faster-whisper)"
   HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" --config "$MERGED_CONFIG" \
     || echo "WARN: voice model download failed; re-run scripts/voice-models.py" >&2
 fi
 
-# --- stage 6: simplex-chat daemon binary -------------------------------------------
-SIMPLEX_BIN="$TOOLDIR/simplex-chat"
-simplex_ok() {
-  [[ -f "$SIMPLEX_BIN" ]] && [[ "$(sha256sum "$SIMPLEX_BIN" | cut -d' ' -f1)" == "$SIMPLEX_SHA256" ]]
-}
-if ! simplex_ok; then
-  echo "== downloading simplex-chat into $SIMPLEX_BIN"
-  rm -f "$SIMPLEX_BIN" "$SIMPLEX_BIN.tmp"
-  curl -fL --retry 3 -o "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN_URL"
-  mv "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN"
-  chmod +x "$SIMPLEX_BIN"
+# --- stage 6: simplex-chat daemon binary (only when needed) --------------------
+if [[ "$PLAN_SIMPLEX_BIN" = 1 ]]; then
+  SIMPLEX_BIN="$TOOLDIR/simplex-chat"
+  simplex_ok() {
+    [[ -f "$SIMPLEX_BIN" ]] && [[ "$(sha256sum "$SIMPLEX_BIN" | cut -d' ' -f1)" == "$SIMPLEX_SHA256" ]]
+  }
+  if ! simplex_ok; then
+    echo "== downloading simplex-chat into $SIMPLEX_BIN"
+    rm -f "$SIMPLEX_BIN" "$SIMPLEX_BIN.tmp"
+    curl -fL --retry 3 -o "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN_URL"
+    mv "$SIMPLEX_BIN.tmp" "$SIMPLEX_BIN"
+    chmod +x "$SIMPLEX_BIN"
+  fi
+  simplex_ok || { echo "simplex-chat sha256 mismatch: expected $SIMPLEX_SHA256" >&2; exit 1; }
+  echo "== simplex-chat verified ($SIMPLEX_BIN)"
+else
+  echo "== SimpleX not selected; skipping the simplex-chat binary"
 fi
-simplex_ok || { echo "simplex-chat sha256 mismatch: expected $SIMPLEX_SHA256" >&2; exit 1; }
-echo "== simplex-chat verified ($SIMPLEX_BIN)"
 
-# config.json is USER config: seeded above if absent, read for per-machine values,
-# and never written by this script. Edit config.json to change endpoints, models,
-# ports, the dashboard bind, or the gateway allowlist.
-
-# --- stage 8: systemd user units -----------------------------------------------------
+# --- stage 8: systemd user units (only the ones the answers need) --------------
 render_unit() {
   local src="$1" dst="$2"
   sed -e "s|@REPO@|$REPO_ROOT|g" \
       -e "s|@PORT@|$SIMPLEX_PORT|g" \
       -e "s|@DISPLAY_NAME@|$SIMPLEX_DISPLAY|g" \
       -e "s|@FORWARD_PORT@|$SIMPLEX_FORWARD_PORT|g" \
-      -e "s|@FORWARD_DISPLAY@|$SIMPLEX_FORWARD_DISPLAY|g" "$src" > "$dst"
+      -e "s|@FORWARD_DISPLAY@|$SIMPLEX_FORWARD_DISPLAY|g" \
+      -e "s|@PLATFORMS@|$PLAN_GATEWAY_PLATFORMS|g" "$src" > "$dst"
 }
-echo "== rendering systemd user units into $UNITS"
+
+WANTED_UNITS=()
+[[ "$PLAN_GATEWAY_SVC" = 1 ]] && WANTED_UNITS+=(semif-gateway.service)
+[[ ",$PLAN_GATEWAYS," == *",simplex,"* ]] && WANTED_UNITS+=(semif-simplex.service)
+[[ "$PLAN_SIMPLEX_FWD" = 1 ]] && WANTED_UNITS+=(semif-simplex-forward.service)
+[[ "$PLAN_BRIDGE_SVC" = 1 ]] && WANTED_UNITS+=(semif-bridge.service)
+ALL_UNITS=(semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service)
+
+unit_wanted() { local u="$1"; for w in "${WANTED_UNITS[@]:-}"; do [[ "$w" = "$u" ]] && return 0; done; return 1; }
+
+echo "== rendering systemd user units into $UNITS (wanted: ${WANTED_UNITS[*]:-none})"
 UNIT_CHANGED=0
 ACTIVE_BEFORE=""
-for unit in semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service; do
+for unit in "${ALL_UNITS[@]}"; do
+  if ! unit_wanted "$unit"; then
+    # A reconfigure can drop a component; retire its unit if it was installed.
+    if [[ -L "$USER_UNITS/$unit" || -f "$UNITS/$unit" ]]; then
+      if command -v systemctl >/dev/null 2>&1; then
+        export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        systemctl --user disable --now "$unit" 2>/dev/null || true
+      fi
+      rm -f "$USER_UNITS/$unit"
+      echo "   $unit: retired (no longer selected)"
+    fi
+    continue
+  fi
   tmp="$UNITS/$unit.new"
   render_unit "$REPO_ROOT/scripts/systemd/$unit.in" "$tmp"
   if [[ ! -f "$UNITS/$unit" ]] || ! cmp -s "$tmp" "$UNITS/$unit"; then
@@ -553,12 +683,12 @@ for unit in semif-simplex.service semif-simplex-forward.service semif-gateway.se
   fi
 done
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && [[ ${#WANTED_UNITS[@]} -gt 0 ]]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   if systemctl --user daemon-reload 2>/dev/null; then
-    systemctl --user enable --now semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service 2>/dev/null \
-      && echo "== enabled semif-simplex.service semif-simplex-forward.service semif-gateway.service semif-bridge.service" \
-      || echo "WARN: could not enable user services (run: systemctl --user enable --now semif-simplex semif-simplex-forward semif-gateway semif-bridge)" >&2
+    systemctl --user enable --now "${WANTED_UNITS[@]}" 2>/dev/null \
+      && echo "== enabled ${WANTED_UNITS[*]}" \
+      || echo "WARN: could not enable user services (run: systemctl --user enable --now ${WANTED_UNITS[*]})" >&2
     # Apply a changed unit to services that were already running (enable --now
     # leaves active units untouched). A daemon restart is safe: the simplex
     # profile persists and the gateway reconnects.
@@ -574,7 +704,7 @@ if command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 
-# --- stage 8b: SimpleX bot contact address -------------------------------------------
+# --- stage 8b: SimpleX bot contact address -------------------------------------
 SIMPLEX_ADDRESS=""
 if command -v systemctl >/dev/null 2>&1; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -593,7 +723,7 @@ if command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 
-# --- stage 8c: forwarding bridge contact address --------------------------------------
+# --- stage 8c: forwarding bridge contact address -------------------------------
 # The forwarding bridge owns a second daemon/profile; its own contact link is the
 # one `simplex.connect_link` shows. Print it too so the user can share it.
 BRIDGE_FORWARD_WS="$("$PYTHON" - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
@@ -619,30 +749,43 @@ if [[ -n "$BRIDGE_FORWARD_WS" ]] && command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 
-# --- stage 9: optional data copy -----------------------------------------------------
+# --- stage 9: optional data copy -----------------------------------------------
 if [[ -n "$COPY_DATA" ]]; then
   echo "== rsync data from $COPY_DATA"
   mkdir -p "$REPO_ROOT/data"
   rsync -a "$COPY_DATA/" "$REPO_ROOT/data/"
 fi
 
-# --- stage 10: verify + pull the local self-assessment model -------------------------
+# --- stage 10: verify imports + the configured endpoints ------------------------
 echo "== verifying imports"
-"$PYTHON" -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
+if [[ "$PLAN_INSTALL_ENGINE" = 1 ]]; then
+  "$PYTHON" -c "import semif_phase1, semif_agent; print('engine + agent import OK')"
+else
+  "$PYTHON" -c "import semif_agent; print('agent import OK')"
+fi
 
-# The small self-assessment model runs on this machine's local ollama; ensure it
-# is pulled so assess/fidelity work without a remote dependency.
-# With llm.provider == "semif" the loaded decision engine generates the text
-# in-process, so no ollama model/endpoint is involved.
-if [[ "$LLM_PROVIDER" == "semif" ]]; then
+# The decision engine is always real: a remote Winnow server must be reachable at
+# runtime (there is no fallback), so surface its address here.
+if [[ "$ENGINE_PROVIDER" = "winnow" ]]; then
+  echo "== decision engine: remote Winnow at ${WINNOW_URL:-?} (model ${WINNOW_MODEL:-?}) — must be reachable at runtime"
+fi
+
+# The `llm` (title/description + gateway cleanup) model. `semif` runs in-process
+# on the loaded decision model; a local ollama is pulled; hosted endpoints are
+# only reported. Authoring is off when the mode is `deny`.
+if [[ "$LLM_PROVIDER" = "semif" ]]; then
   echo "== llm provider semif: the loaded engine model generates text in-process (no ollama pull/probe)"
+elif [[ "$PLAN_AUTHORING" = "deny" ]]; then
+  echo "== skill authoring is disabled; the llm/codegen endpoints are not required"
+elif [[ "$LLM_PROVIDER" = "opencode" ]]; then
+  echo "== llm: hosted OpenCode Console ($LLM_URL, model ${LLM_MODEL:-?})"
 elif [[ -z "$LLM_MODEL" ]]; then
-  echo "WARN: llm.model is not set in config.json — set it (and codegen.model) before starting the agent" >&2
+  echo "WARN: llm.model is not set in config.json — authoring needs it" >&2
 else
   echo "== llm ollama ($LLM_API), model $LLM_MODEL"
   if ! curl -sf --max-time 5 "$LLM_API/api/tags" >/dev/null 2>&1; then
     echo "WARN: no local ollama at $LLM_API — install/run ollama and pull $LLM_MODEL" >&2
-    echo "      (bootstrap installs no ollama; only codegen is remote)" >&2
+    echo "      (bootstrap installs no ollama; only codegen may be remote)" >&2
   else
     LLM_TAGS="$(curl -sf --max-time 5 "$LLM_API/api/tags" || true)"
     if grep -qF "\"$LLM_MODEL\"" <<<"$LLM_TAGS"; then
@@ -670,8 +813,15 @@ else
   fi
 fi
 
-# Codegen is the larger model, possibly on a remote host. Warn only — never auto-pull.
-if [[ -n "$CODEGEN_URL" && -n "$CODEGEN_MODEL" ]]; then
+# Codegen writes skill bodies; only needed when authoring is enabled. Warn only —
+# never auto-pull.
+if [[ "$PLAN_AUTHORING" = "deny" ]]; then
+  : # authoring disabled; no codegen endpoint required
+elif [[ -z "$CODEGEN_MODEL" ]]; then
+  echo "WARN: new_skill_creation is enabled but codegen.model is unset — authoring will not run" >&2
+elif [[ "$CODEGEN_PROVIDER" = "opencode" ]]; then
+  echo "== codegen: hosted OpenCode Console ($CODEGEN_URL, model $CODEGEN_MODEL)"
+elif [[ -n "$CODEGEN_URL" ]]; then
   echo "== codegen ollama ($CODEGEN_API)"
   CODEGEN_TAGS="$(curl -sf --max-time 5 "$CODEGEN_API/api/tags" || true)"
   if grep -qF "$CODEGEN_MODEL" <<<"$CODEGEN_TAGS"; then
@@ -679,26 +829,28 @@ if [[ -n "$CODEGEN_URL" && -n "$CODEGEN_MODEL" ]]; then
   else
     echo "WARN: codegen host $CODEGEN_API serves no $CODEGEN_MODEL (offline? new-skill authoring will fail)" >&2
   fi
-else
-  echo "WARN: codegen.base_url/model is not set in config.json — set it before starting the agent" >&2
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-  echo "== gateway + bridge services"
-  systemctl --user is-active semif-simplex.service 2>/dev/null | sed 's/^/  semif-simplex: /' || true
-  systemctl --user is-active semif-gateway.service 2>/dev/null | sed 's/^/  semif-gateway: /' || true
-  systemctl --user is-active semif-simplex-forward.service 2>/dev/null | sed 's/^/  semif-simplex-forward: /' || true
-  systemctl --user is-active semif-bridge.service 2>/dev/null | sed 's/^/  semif-bridge: /' || true
+  echo "== services"
+  for unit in "${ALL_UNITS[@]}"; do
+    state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+    [[ -n "$state" ]] && echo "  ${unit%.service}: $state"
+  done
 fi
 
 cat <<EOF
 
-Done. Next steps:
-  1. Edit the split config (config/core.json, config/gateway.json,
-     config/packs/*.json) — set llm.model/llm.base_url and
-     codegen.model/codegen.base_url; put credentials in secrets.json.
-     bootstrap.sh seeded the config via config-init (if it was absent)
-     and NEVER rewrites it; only you edit it.
+Done. What this machine is configured for:
+  engine:    $ENGINE_PROVIDER
+  authoring: $PLAN_AUTHORING
+  packs:     $PLAN_PACKS
+  gateways:  ${PLAN_GATEWAYS:-none (REPL + dashboard)}
+
+Next steps:
+  1. Edit the split config if you need to (config/core.json, config/gateway.json,
+     config/packs/*.json); credentials live in secrets.json. To re-run the setup
+     interview instead: scripts/bootstrap.sh --reconfigure
   2. Skill packs are cloned from their own repos into packs/ (see packs.json);
      they are gitignored here. Update them with:
        for d in packs/*/; do git -C "\$d" pull --ff-only; done
@@ -706,6 +858,10 @@ Done. Next steps:
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run
   HF_HOME="$HF_CACHE" "$PYTHON" -m pytest tests/integration -q -s  (needs real engine+LLM)
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli dashboard --port 8765
+EOF
+
+if [[ ",$PLAN_GATEWAYS," == *",simplex,"* ]]; then
+  cat <<EOF
 
 SimpleX command gateway (commands only):
   - Runs as systemd user services 'semif-simplex' (bot daemon, port $SIMPLEX_PORT) and
@@ -721,19 +877,26 @@ SimpleX command gateway (commands only):
     gateway rejects everyone — that is the safe default.
   - The gateway takes commands and replies. It never reads history, shows invite
     links, or composes messages: that is the forwarding bridge's job.
+EOF
+fi
+
+if [[ ",$PLAN_GATEWAYS," == *",lxmf,"* ]]; then
+  cat <<EOF
 
 LXMF command gateway (commands only):
   - Runs IN-PROCESS inside the same 'semif-gateway' service (no separate daemon);
-    the transport is installed from requirements/staging.txt (lxmf + rns).
-    Enable it in config.json with gateway.lxmf.enabled = true, then restart the
-    gateway (the unit runs `gateway --platform all`, so SimpleX + LXMF share one
-    scheduler).
+    the transport is installed from requirements/transports.txt (lxmf + rns).
   - Its LXMF address (32 hex chars) is printed on connect:
       journalctl --user -u semif-gateway -f
     Add that address as a contact in an LXMF client (Sideband, MeshChatX, ...)
     and put it in gateway.lxmf.allowed_users (discover a sender from a
     'gateway_denied' trace event). With an empty allowlist it rejects everyone —
     the safe default.
+EOF
+fi
+
+if [[ "$PLAN_SIMPLEX_FWD" = 1 ]]; then
+  cat <<EOF
 
 SimpleX forwarding bridge (messaging UX for skills):
   - Runs as 'semif-simplex-forward' (a second bot daemon/profile, port $SIMPLEX_FORWARD_PORT)
@@ -743,35 +906,32 @@ SimpleX forwarding bridge (messaging UX for skills):
   - Skills reach it over HTTP at the address derived from bridges.simplex
     (host/port, default http://127.0.0.1:5227); simplex.connect_link shows its
     address and simplex.next_message reads messages sent to it.
-
-LLM bridge (generation for skills):
-  - Runs inside the same 'semif-bridge' process. It reuses the top-level `llm`
-    model (configured once) and serves a generic POST /chat; skills call it at
-    the address derived from bridges.llm (default http://127.0.0.1:5229).
-
-Nextcloud bridge (files/calendar/tasks/contacts/notes for skills):
-  - Runs inside the same 'semif-bridge' process (Nextcloud is plain HTTPS, so
-    there is no separate daemon). Configure the account once in config.json under
-    bridges.nextcloud (url/username/app_password) — or reuse the top-level
-    nextcloud_* values the nextcloud pack skills collect. Skills call it at the address
-    derived from bridges.nextcloud (default http://127.0.0.1:5230).
-
-Browser bridge (browser automation for skills):
-  - Disabled by default; it needs the optional Playwright stack. Enable it with
-    bridges.browser.enabled = true (install the deps with scripts/bootstrap.sh
-    --browser). It runs inside the same 'semif-bridge' process and keeps a
-    persistent browser profile under .runtime/browser/profile. Skills call it at
-    the address derived from bridges.browser (default http://127.0.0.1:5232).
 EOF
+fi
 
-if [[ "$VOICE" = 1 ]]; then
+if [[ "$PLAN_BRIDGE_SVC" = 1 ]]; then
+  cat <<EOF
+
+Bridge services (run inside 'semif-bridge'):
+  - LLM bridge: a generic POST /chat in front of the configured `llm` model
+    (address derived from bridges.llm, default http://127.0.0.1:5229).
+  - Nextcloud bridge: files/calendar/tasks/contacts/notes over one JSON surface
+    (configure bridges.nextcloud, default http://127.0.0.1:5230).
+  - Outlook bridge: Microsoft Graph mail/calendar/To Do/OneDrive
+    (configure bridges.outlook; run packs/outlook/scripts/outlook-auth.py once).
+  - Browser bridge: Playwright automation with a persistent profile under
+    .runtime/browser/profile (address derived from bridges.browser, default
+    http://127.0.0.1:5232).
+EOF
+fi
+
+if [[ "$PLAN_VOICE" = 1 ]]; then
   cat <<EOF
 
 Voice command gateway (wake word + speech-to-text + text-to-speech):
   - The stack is installed and its models downloaded (openWakeWord into the
     venv, the Piper voice into .runtime/voice/tts, faster-whisper into .runtime/hf).
-    Enable it in config.json with gateway.voice.enabled = true, then run it in
-    the foreground (it needs your audio session; it is NOT a systemd unit):
+    Run it in the foreground (it needs your audio session; it is NOT a systemd unit):
       HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli gateway --platform voice
   - Say the wake word (gateway.voice.wake.model, default 'hey_computer' — phrase
     "Hey Computer") and speak; the reply is spoken back. The wake word is
@@ -782,27 +942,21 @@ Voice command gateway (wake word + speech-to-text + text-to-speech):
       sudo alsactl store
     List devices with: $PYTHON -c "import sounddevice as sd; print(sd.query_devices())"
     and put the input/output device indices in gateway.voice.audio.
-  - Re-download / switch models any time with:
-      HF_HOME="$HF_CACHE" "$PYTHON" scripts/voice-models.py --config config.json
 EOF
 fi
 
-if [[ "$BROWSER" = 1 ]]; then
+if [[ "$PLAN_BROWSER" = 1 ]]; then
   cat <<EOF
 
 Browser bridge (browser automation for skills):
   - The Playwright stack is installed and the '$BROWSER_ENGINE' browser is under
-    $BROWSERS. Enable it in config.json with bridges.browser.enabled = true, then
-    restart the bridge service:
-      systemctl --user restart semif-bridge.service
-  - It runs inside 'semif-bridge' (no separate daemon) and keeps a persistent
-    profile at .runtime/browser/profile, so a login you do once survives across
-    calls and restarts. Set bridges.browser.headless = false to watch the window
-    (useful the first time you sign in to a site); POST /reset with purge=true
-    wipes the stored profile.
-  - Skills call it at the address derived from bridges.browser (host/port,
-    default http://127.0.0.1:5232); the shipped pack skills are browser.open_page,
-    browser.read_page, and browser.screenshot.
+    $BROWSERS. It runs inside 'semif-bridge' (no separate daemon) and keeps a
+    persistent profile at .runtime/browser/profile, so a login you do once
+    survives across calls and restarts. Set bridges.browser.headless = false to
+    watch the window (useful the first time you sign in to a site); POST /reset
+    with purge=true wipes the stored profile.
+  - The shipped pack skills are browser.open_page, browser.read_page, and
+    browser.screenshot.
   - If the bridge reports 503, the browser failed to launch — run:
       PLAYWRIGHT_BROWSERS_PATH=$BROWSERS "$PYTHON" -m playwright install $BROWSER_ENGINE
 EOF
