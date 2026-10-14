@@ -20,11 +20,11 @@
 # pulls its model from the target host's ollama, and `codegen` may be remote.
 #
 # Must be run from a semif-agent checkout. The checkout is used as-is and never
-# re-cloned — only the SemIf engine, the simplex-chat binary, and the skill
-# packs are fetched. Clone the agent repo first (its SSH key must be registered
-# on your git host); each skill pack is then cloned from a sibling repository
-# named pack.<name> on the same host (see packs.json) into the gitignored
-# packs/ directory.
+# re-cloned — only the SemIf engine, the simplex-chat binary, the pack index,
+# and the skill packs are fetched. Clone the agent repo first (its SSH key must
+# be registered on your git host); the pack index repo (semif-packs, a sibling
+# of the origin remote) is then fetched and read for the list of pack repos, and
+# only the packs the answers select are cloned into the gitignored packs/ dir.
 #
 # config.json is the per-machine USER config (a thin index over config/*.json).
 # This script seeds it from the interview the FIRST time (or with
@@ -118,91 +118,184 @@ if [[ ! -f "$PINS" ]]; then
   exit 1
 fi
 
-# --- skill packs ----------------------------------------------------------------
-# Each pack ships in its own repository named pack.<name>, cloned into the
-# gitignored packs/ directory; the agent loads every pack under skill_packs
-# (default "packs"). The list lives in the committed packs.json; each repo is a
-# sibling of this checkout's origin remote (pack.<name>) unless --pack-base
-# overrides the base. This runs BEFORE the interview so setup sees every pack
-# and can offer it. Idempotent: clone when absent, fast-forward when present.
-PACK_MANIFEST="$REPO_ROOT/packs.json"
-if [[ -f "$PACK_MANIFEST" ]]; then
-  if [[ -z "$PACK_BASE" ]]; then
-    ORIGIN_URL="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-    PACK_BASE="${ORIGIN_URL%/*}"
-  fi
-  PACK_BASE="${PACK_BASE%/}"
-  if [[ -z "$PACK_BASE" ]]; then
-    echo "WARN: no 'origin' remote to derive the skill-pack repos from; clone them into packs/ or pass --pack-base URL" >&2
+# --- skill packs (index repo + clone helpers) -----------------------------------
+# Which packs exist is owned by a dedicated index repo (`semif-packs`), NOT this
+# checkout: it holds packs.json (a name + clone URL per pack). The index is a
+# sibling of this checkout's origin remote unless --pack-base overrides the base.
+# It is fetched BEFORE the interview so setup can offer its packs; only the packs
+# the answers select are cloned (after the interview, before config is written).
+# Idempotent: clone when absent, fast-forward when present.
+PACK_INDEX_REPO="semif-packs"
+PACK_INDEX_DIR="$RUNTIME/pack-index"
+PACK_INDEX_FILE="$PACK_INDEX_DIR/packs.json"
+if [[ -z "$PACK_BASE" ]]; then
+  ORIGIN_URL="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  PACK_BASE="${ORIGIN_URL%/*}"
+fi
+PACK_BASE="${PACK_BASE%/}"
+
+# clone_repo URL DEST LABEL — clone when absent, fast-forward when present.
+clone_repo() {
+  local url="$1" dst="$2" label="$3"
+  if [[ -d "$dst/.git" ]]; then
+    if git -C "$dst" pull --ff-only --quiet 2>/dev/null; then
+      echo "   $label: up to date"
+    else
+      echo "   WARN: could not update $label (leaving the local checkout)" >&2
+    fi
+  elif [[ -e "$dst" ]]; then
+    echo "   WARN: $label exists but is not a git clone; leaving it" >&2
+  elif git clone --quiet "$url" "$dst" 2>/dev/null; then
+    echo "   $label: cloned"
   else
-    echo "== skill packs (from $PACK_BASE/pack.<name>)"
-    mkdir -p "$REPO_ROOT/packs"
-    while IFS= read -r pack_name; do
-      [[ -z "$pack_name" ]] && continue
-      pack_dst="$REPO_ROOT/packs/$pack_name"
-      pack_url="$PACK_BASE/pack.$pack_name.git"
-      if [[ -d "$pack_dst/.git" ]]; then
-        if git -C "$pack_dst" pull --ff-only --quiet 2>/dev/null; then
-          echo "   $pack_name: up to date"
-        else
-          echo "   WARN: could not update pack $pack_name (leaving the local checkout)" >&2
-        fi
-      elif [[ -e "$pack_dst" ]]; then
-        echo "   WARN: packs/$pack_name exists but is not a git clone; leaving it" >&2
-      elif git clone --quiet "$pack_url" "$pack_dst" 2>/dev/null; then
-        echo "   $pack_name: cloned"
-      else
-        echo "   WARN: could not clone $pack_name from $pack_url" >&2
-      fi
-    done < <(python3 - "$PACK_MANIFEST" <<'PY'
+    echo "   WARN: could not clone $label from $url" >&2
+    return 1
+  fi
+}
+
+# Fetch (or update) the pack index repo. Succeeds when packs.json is present.
+fetch_pack_index() {
+  if [[ -z "$PACK_BASE" ]]; then
+    echo "no 'origin' remote to derive the pack index from; pass --pack-base URL" >&2
+    return 1
+  fi
+  echo "== pack index (from $PACK_BASE/$PACK_INDEX_REPO)"
+  mkdir -p "$RUNTIME"
+  clone_repo "$PACK_BASE/$PACK_INDEX_REPO.git" "$PACK_INDEX_DIR" "$PACK_INDEX_REPO" || true
+  [[ -f "$PACK_INDEX_FILE" ]]
+}
+
+# clone_selected_packs NAME... — clone just these packs, by their index URLs.
+clone_selected_packs() {
+  local names="$1"
+  [[ -z "$names" ]] && return 0
+  echo "== skill packs"
+  mkdir -p "$REPO_ROOT/packs"
+  while read -r name url; do
+    [[ -z "$name" ]] && continue
+    clone_repo "$url" "$REPO_ROOT/packs/$name" "$name" || true
+  done < <(python3 - "$PACK_INDEX_FILE" $names <<'PY'
 import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    raise SystemExit(0)
-for name in data.get("packs", []):
-    if str(name).strip():
-        print(str(name).strip())
+data = json.load(open(sys.argv[1]))
+want = set(sys.argv[2:])
+for pack in data.get("packs", []):
+    name = str(pack.get("name", "")).strip()
+    if name in want:
+        print(name, pack.get("url", ""))
 PY
 )
-  fi
-fi
+  for name in $names; do
+    [[ -f "$REPO_ROOT/packs/$name/pack.json" ]] \
+      || echo "WARN: pack '$name' is not present after cloning; its skills will be unavailable" >&2
+  done
+}
 
 # --- configure this machine (interview -> config/ + secrets.json) --------------
-# On a fresh machine (or --reconfigure) ask the setup questions and generate the
-# split config from the answers; otherwise use the existing config. Either way
-# emit a machine-readable install plan that drives the conditional stages below.
+# On a fresh machine (or --reconfigure) this runs in two passes so only the packs
+# the answers select are ever cloned:
+#   1. collect answers (the interview; no packs needed — the offered list comes
+#      from the pack index),
+#   2. clone the selected packs (essentials always; +simplex for the gateway's
+#      address script; +browser for --browser),
+#   3. write config/ + secrets.json from the now-present packs and emit the plan.
+# A rerun (existing config) skips the interview and clones only the packs the
+# config references, then derives the plan. Either way a machine-readable plan
+# drives the conditional install stages below.
 mkdir -p "$RUNTIME"
-setup_args=(--path "$CONFIG" --plan-out "$PLAN")
-if [[ -n "$ANSWERS_FILE" ]]; then
-  if [[ ! -f "$ANSWERS_FILE" ]]; then
-    echo "answers file not found: $ANSWERS_FILE" >&2
-    exit 1
-  fi
-  setup_args+=(--answers "$ANSWERS_FILE")
-elif [[ "$YES" = 1 ]]; then
-  setup_args+=(--yes)
-elif [[ -t 0 && -t 1 ]]; then
-  setup_args+=(--interview)
-else
-  echo "== no terminal for the setup interview; using the minimum defaults (--yes)" >&2
-  setup_args+=(--yes)
-fi
+ANSWERS_TMP="$RUNTIME/bootstrap-answers.json"
+trap 'rm -f "$ANSWERS_TMP"' EXIT
 
 run_setup() {
   PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m semif_agent.cli setup "$@"
 }
 
+# Interaction flags for the answers-collection pass.
+collect_args=()
+if [[ -n "$ANSWERS_FILE" ]]; then
+  if [[ ! -f "$ANSWERS_FILE" ]]; then
+    echo "answers file not found: $ANSWERS_FILE" >&2
+    exit 1
+  fi
+  collect_args+=(--answers "$ANSWERS_FILE")
+elif [[ "$YES" = 1 ]]; then
+  collect_args+=(--yes)
+elif [[ -t 0 && -t 1 ]]; then
+  collect_args+=(--interview)
+else
+  echo "== no terminal for the setup interview; using the minimum defaults (--yes)" >&2
+  collect_args+=(--yes)
+fi
+
+# The index is the source of truth for which packs exist; without it nothing can
+# be installed. Fetch it before the interview so the offered list comes from it.
+if ! fetch_pack_index; then
+  echo "ERROR: could not fetch the pack index ($PACK_BASE/$PACK_INDEX_REPO.git)" >&2
+  echo "       packs cannot be installed — pass --pack-base URL, or clone the index" >&2
+  echo "       manually into $PACK_INDEX_DIR" >&2
+  exit 1
+fi
+INDEX_ARG=(--pack-index "$PACK_INDEX_FILE")
+
 if [[ ! -f "$CONFIG" || "$RECONFIGURE" = 1 ]]; then
   if [[ "$RECONFIGURE" = 1 && -f "$CONFIG" ]]; then
     echo "== reconfiguring $CONFIG (rewriting config/ + secrets.json)"
-    setup_args+=(--force)
   else
     echo "== configuring this machine"
   fi
-  run_setup "${setup_args[@]}" || { echo "setup failed" >&2; exit 1; }
+  # 1. Collect answers (writes $ANSWERS_TMP; touches no config, needs no packs).
+  run_setup --path "$CONFIG" --answers-out "$ANSWERS_TMP" \
+    "${INDEX_ARG[@]}" "${collect_args[@]}" \
+    || { echo "setup failed" >&2; exit 1; }
+  # 2. Clone only the packs the answers selected.
+  SELECTED_PACKS="$(python3 - "$ANSWERS_TMP" "$BROWSER" <<'PY'
+import json, sys
+answers = json.load(open(sys.argv[1]))
+packs = list(dict.fromkeys(["essentials", *(answers.get("packs") or [])]))
+if sys.argv[2] == "1" and "browser" not in packs:
+    packs.append("browser")            # --browser needs the Playwright fallback script
+if "simplex" in (answers.get("gateways") or []) and "simplex" not in packs:
+    packs.append("simplex")            # the gateway prints its address via the pack script
+print(" ".join(packs))
+PY
+)"
+  clone_selected_packs "$SELECTED_PACKS"
+  # 3. Write config/ + secrets.json from the now-present packs, and the plan.
+  write_args=(--path "$CONFIG" --answers "$ANSWERS_TMP" --plan-out "$PLAN")
+  [[ "$RECONFIGURE" = 1 ]] && write_args+=(--force)
+  run_setup "${write_args[@]}" || { echo "setup failed" >&2; exit 1; }
+  rm -f "$ANSWERS_TMP"
 else
   echo "== using existing $CONFIG (pass --reconfigure to change it)"
+  # A rerun clones only the packs the existing config references, then derives the
+  # plan from them (the pack manifests are needed to compute the install plan).
+  MERGED_EARLY="$RUNTIME/config.merged.json"
+  python3 "$REPO_ROOT/scripts/config_merge.py" "$CONFIG" > "$MERGED_EARLY" \
+    || { echo "could not read $CONFIG" >&2; exit 1; }
+  RERUN_PACKS="$(python3 - "$MERGED_EARLY" "$PACK_INDEX_FILE" "$BROWSER" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+index = json.load(open(sys.argv[2]))
+bridges = cfg.get("bridges", {}) or {}
+packs_cfg = cfg.get("packs", {}) or {}
+gateway = cfg.get("gateway", {}) or {}
+names = [str(p.get("name", "")).strip() for p in index.get("packs", [])]
+out = []
+for name in names:
+    if not name or name == "essentials":
+        continue
+    block = bridges.get(name) if name in bridges else packs_cfg.get(name)
+    if isinstance(block, dict) and block.get("enabled", True):
+        out.append(name)
+if "essentials" not in out:
+    out.insert(0, "essentials")
+if bool((gateway.get("simplex") or {}).get("enabled")) and "simplex" not in out:
+    out.append("simplex")
+if sys.argv[3] == "1" and "browser" not in out:
+    out.append("browser")
+print(" ".join(out))
+PY
+)"
+  clone_selected_packs "$RERUN_PACKS"
   run_setup --path "$CONFIG" --plan-only --plan-out "$PLAN" \
     || { echo "could not derive the install plan from $CONFIG" >&2; exit 1; }
 fi
@@ -851,8 +944,8 @@ Next steps:
   1. Edit the split config if you need to (config/core.json, config/gateway.json,
      config/packs/*.json); credentials live in secrets.json. To re-run the setup
      interview instead: scripts/bootstrap.sh --reconfigure
-  2. Skill packs are cloned from their own repos into packs/ (see packs.json);
-     they are gitignored here. Update them with:
+  2. Skill packs are cloned from their own repos into packs/ (the list lives in
+     the semif-packs index repo); they are gitignored here. Update them with:
        for d in packs/*/; do git -C "\$d" pull --ff-only; done
   cd "$REPO_ROOT"
   HF_HOME="$HF_CACHE" "$PYTHON" -m semif_agent.cli run

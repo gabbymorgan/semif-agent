@@ -79,7 +79,7 @@ config.py       layered per-machine config: config.json is a thin index
                 pack's `config` schema, GENERATES config.example.json
                 (check-config --write-example) and validates a live config
 packs.py        SkillPack + PackRegistry: discovers packs/ (a `pack.json`
-                manifest + skills/<category>/<leaf>/; each pack is cloned from its own repo — see packs.json), binds a concern to its
+                manifest + skills/<category>/<leaf>/; each pack is cloned from its own repo — the list is the semif-packs index repo), binds a concern to its
                 categories, bridge(s), requirements, and config schema;
                 merge_packs loads every enabled pack into the tree
 scheduler.py    no up-front gate: every input is dispatched
@@ -867,15 +867,21 @@ CLI, unit tests (24) + integration tests (2).
   config from the answers — decision engine (local SemIf 4B or remote Winnow),
   new-skill authoring mode (+ `llm`/`codegen` endpoints when enabled), capability
   packs, gateways, and timezone — then installs only what those answers require
-  (the install *plan* drives every conditional stage). `--yes` takes the minimum
+  (the install *plan* drives every conditional stage). Which packs exist is owned
+  by the **pack index** repo (`semif-packs`), not this checkout: bootstrap fetches
+  the index first, the interview offers its packs, and bootstrap runs setup in two
+  passes (`--answers-out` collects the answers, **only the selected packs are
+  cloned**, then setup writes the config) so it never clones a pack the user did
+  not choose. `--yes` takes the minimum
   working defaults unattended; `--answers FILE` replays a saved answer set;
   `--reconfigure` re-runs the interview and rewrites `config/` + `secrets.json`.
   `--voice` / `--browser` additionally install those optional stacks
   (`requirements/voice.txt` + system `libportaudio2` + `alsa-utils`;
   `requirements/browser.txt` + a browser) even when the plan did not pick them.
   The script must be run from a checkout — it reads pins from that checkout's
-  `pins.json` and never re-clones the agent repo (only the SemIf engine and the
-  simplex-chat binary). Idempotent and rerunnable; every stage no-ops on existing
+  `pins.json` and never re-clones the agent repo (only the pack index, the
+  selected packs, the SemIf engine, and the simplex-chat binary). Idempotent and
+  rerunnable; every stage no-ops on existing
   state, so it also boots an unknown-state machine (a rerun SKIPS the interview
   and uses the existing config). It installs **no ollama**: `llm` is the local
   ollama (bootstrap pulls `llm.model` when configured), `codegen` may point at a
@@ -1018,8 +1024,8 @@ CLI, unit tests (24) + integration tests (2).
   network) that never certifies the live integration — only a real run does.
   The body owns no data; everything comes from the runner via `ctx.config`.
 - **Skill packs.** Each pack lives in its own repository (`pack.<name>`, listed
-  in the committed `packs.json`); `scripts/bootstrap.sh` clones them into the
-  gitignored `packs/<name>/`. A pack bundles a concern with its skills: a
+  in the `semif-packs` pack-index repo); `scripts/bootstrap.sh` clones them into
+  the gitignored `packs/<name>/`. A pack bundles a concern with its skills: a
   `pack.json` manifest (name, concern, `categories` → descriptions, `bridges`
   referenced by name, `requires`, and a `config` schema) plus
   `skills/<category>/<name>/` in the exact generated-skill folder format
@@ -1522,8 +1528,9 @@ CLI, unit tests (24) + integration tests (2).
 - **What they are.** A pack bundles a concern/product with the skills that serve
   it, in `packs/<name>/`: a `pack.json` manifest plus
   `skills/<category>/<leaf>/` folders (the exact generated-skill format). Each
-  pack is its own repository (`pack.<name>`, listed in `packs.json`), cloned by
-  `scripts/bootstrap.sh` into the gitignored `packs/<name>/`. The
+  pack is its own repository (`pack.<name>`, listed in the `semif-packs`
+  pack-index repo), cloned by `scripts/bootstrap.sh` into the gitignored
+  `packs/<name>/`. The
   manifest binds the pieces that used to be scattered by convention:
   `concern`/`title`, `categories` (id -> scope description, feeding
   `CATEGORY_DESCRIPTIONS`), `bridges` (names the pack ships under `bridge/` and

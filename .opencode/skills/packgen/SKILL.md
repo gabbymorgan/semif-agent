@@ -47,9 +47,11 @@ truth and this skill is only the workflow.
    pack).
 9. **Verify a real run** against the user's actual service — a passing hermetic
    test proves mechanics only, never the live integration.
-10. **Register and publish:** add the pack's name to the committed `packs.json`
-    in the agent repo, then commit and push the pack's own repository
-    (`pack.<name>`). `scripts/bootstrap.sh` clones it into `packs/`.
+10. **Register and publish:** add the pack to the `semif-packs` pack-index repo
+    (an entry in its `packs.json`: name + clone URL, plus title/description for
+    the interview), then commit and push the pack's own repository
+    (`pack.<name>`). `scripts/bootstrap.sh` reads the index and clones it into
+    `packs/`.
 
 ## Guardrails
 

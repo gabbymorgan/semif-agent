@@ -23,6 +23,7 @@ from semif_agent.setup import (
     build_config,
     build_plan,
     build_secrets,
+    load_pack_index,
     plan_from_config,
     run_interview,
     run_setup,
@@ -200,7 +201,17 @@ def test_interview_collects_authoring_endpoints_and_packs():
             "Europe/Paris",  # timezone
         ]
     )
-    answers = run_interview(input_fn=script, output=_silent)
+    # The offered packs come from the pack index (letters a,b,c,d in order).
+    answers = run_interview(
+        input_fn=script,
+        output=_silent,
+        pack_choices=[
+            ("simplex", "SimpleX"),
+            ("browser", "Browser"),
+            ("nextcloud", "Nextcloud"),
+            ("outlook", "Outlook"),
+        ],
+    )
     assert answers.engine_provider == "semif"
     assert answers.new_skill_creation == "ask"
     assert answers.llm_provider == "semif"
@@ -217,6 +228,53 @@ def test_interview_non_interactive_returns_minimum():
     assert answers.new_skill_creation == "deny"
     assert answers.packs == ["essentials"]
     assert answers.gateways == []
+
+
+def test_interview_without_index_offers_essentials_only():
+    # No pack index -> the pack question is skipped (essentials only).
+    script = _scripted(
+        [
+            "1",  # engine: local semif
+            "1",  # authoring: deny
+            "",   # gateways: none
+            "",   # timezone: host
+        ]
+    )
+    answers = run_interview(input_fn=script, output=_silent, pack_choices=[])
+    assert answers.packs == ["essentials"]
+
+
+# --------------------------------------------------------------------------- #
+# Pack index (the source of truth for which packs exist)
+# --------------------------------------------------------------------------- #
+
+
+def test_load_pack_index_parses_entries(tmp_path):
+    index = tmp_path / "packs.json"
+    index.write_text(
+        json.dumps(
+            {
+                "packs": [
+                    {"name": "essentials", "url": "ssh://h/pack.essentials.git"},
+                    {
+                        "name": "simplex",
+                        "url": "ssh://h/pack.simplex.git",
+                        "title": "SimpleX",
+                        "description": "messaging",
+                    },
+                    {"name": "", "url": "ssh://h/ignored.git"},
+                ]
+            }
+        )
+    )
+    choices = load_pack_index(str(index))
+    assert choices == [
+        ("essentials", "essentials"),
+        ("simplex", "SimpleX — messaging"),
+    ]
+    # Missing/unreadable index -> no choices (essentials-only interview).
+    assert load_pack_index(None) == []
+    assert load_pack_index(str(tmp_path / "nope.json")) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +303,27 @@ def test_run_setup_writes_split_config_and_secrets(tmp_path):
     assert reloaded["engine"]["provider"] == "semif"
     assert reloaded["codegen"]["model"] == ""
     assert reloaded["packs"]["essentials"]["enabled"] is True
+
+
+def test_run_setup_answers_out_writes_answers_and_no_config(tmp_path):
+    # The bootstrap pre-clone pass: answers only, no packs, no config.
+    answers_out = tmp_path / "bootstrap-answers.json"
+    code = run_setup(
+        root=tmp_path,
+        path=tmp_path / "config.json",
+        packs=[],
+        yes=True,
+        answers_out=str(answers_out),
+        output=_silent,
+    )
+    assert code == 0
+    answers = json.loads(answers_out.read_text())
+    assert answers["packs"] == ["essentials"]
+    assert answers["engine_provider"] == "semif"
+    # Nothing else was written.
+    assert not (tmp_path / "config.json").exists()
+    assert not (tmp_path / "config").exists()
+    assert not (tmp_path / "secrets.json").exists()
 
 
 def test_run_setup_answers_file_and_secrets_merge(tmp_path):

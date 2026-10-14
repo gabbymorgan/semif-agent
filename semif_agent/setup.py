@@ -1,13 +1,20 @@
 """First-run setup: the bootstrap interview, config generation, and the plan.
 
-``scripts/bootstrap.sh`` clones the packs, then calls this module (via
-``python -m semif_agent.cli setup``) to ask the few questions that make a fresh
-machine work — which decision engine, whether the agent may author new skills,
-which capability packs, and which gateways — and to write the split ``config/``
-plus ``secrets.json`` from the answers. It also emits a machine-readable *plan*
-so bootstrap installs **only what the answers require** (no simplex-chat binary
-for a REPL-only host, no Playwright for a host that did not pick the browser
-pack, no voice stack without the voice gateway).
+``scripts/bootstrap.sh`` calls this module (via ``python -m semif_agent.cli
+setup``) to ask the few questions that make a fresh machine work — which decision
+engine, whether the agent may author new skills, which capability packs, and
+which gateways — and to write the split ``config/`` plus ``secrets.json`` from
+the answers. It also emits a machine-readable *plan* so bootstrap installs **only
+what the answers require** (no simplex-chat binary for a REPL-only host, no
+Playwright for a host that did not pick the browser pack, no voice stack without
+the voice gateway).
+
+Which packs exist is owned by a dedicated *pack index* repo (``semif-packs``),
+not this checkout; bootstrap fetches it and passes ``--pack-index FILE`` so the
+interview offers exactly the packs the index lists. Config generation still reads
+each pack's ``pack.json`` from the cloned ``packs/`` tree, so bootstrap runs setup
+in two passes: ``--answers-out FILE`` collects the answers (no packs needed),
+bootstrap clones only the selected packs, then a second pass writes the config.
 
 The two ends of the spectrum are both reachable here:
 
@@ -43,13 +50,11 @@ ENGINE_PROVIDERS = ("semif", "winnow")
 #: New-skill creation modes.
 AUTHORING_MODES = ("deny", "ask", "allow")
 
-#: Capability packs the wizard offers (essentials is always included).
-PACK_CHOICES: tuple[tuple[str, str], ...] = (
-    ("simplex", "SimpleX messaging (read/send messages, show your contact link)"),
-    ("browser", "Browser automation (Playwright: open/read/click/fill a site)"),
-    ("nextcloud", "Nextcloud (calendar, tasks, files, contacts, notes)"),
-    ("outlook", "Outlook / Microsoft 365 (mail, calendar, To Do, OneDrive)"),
-)
+# The capability packs the wizard offers come from the pack index repo
+# (`semif-packs`), passed as `--pack-index FILE` (see `load_pack_index`); the
+# index is the single source of truth for which packs exist. With no index the
+# interview offers essentials only (see `run_interview`).
+
 #: Gateway platforms the wizard offers.
 GATEWAY_CHOICES: tuple[tuple[str, str], ...] = (
     ("simplex", "SimpleX command gateway (DM the bot to run tasks)"),
@@ -280,17 +285,47 @@ def _collect_llm(
     setattr(answers, f"{label}_api_key", key)
 
 
+def load_pack_index(path: str | Path | None) -> list[tuple[str, str]]:
+    """The interview's pack choices ``(key, label)`` from a pack-index JSON file.
+
+    The index repo (``semif-packs``) owns which packs exist; bootstrap clones it
+    and passes ``--pack-index FILE``. Each entry is ``{name, url, title?,
+    description?}``; the label is ``"<title> — <description>"`` (or the name).
+    Returns ``[]`` for a missing/unreadable index — the interview then offers
+    essentials only.
+    """
+    if not path:
+        return []
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return []
+    choices: list[tuple[str, str]] = []
+    for entry in data.get("packs", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            continue
+        title = str(entry.get("title") or name).strip()
+        desc = str(entry.get("description") or "").strip()
+        choices.append((name, f"{title} — {desc}" if desc else title))
+    return choices
+
+
 def run_interview(
     *,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
     interactive: bool = True,
     prefill: Answers | None = None,
+    pack_choices: Sequence[tuple[str, str]] | None = None,
 ) -> Answers:
     """Run the setup interview and return the answers.
 
     ``interactive=False`` returns the prefill (or the minimum path) without
-    prompting — the ``--yes`` behaviour.
+    prompting — the ``--yes`` behaviour. ``pack_choices`` is the offered pack
+    list (from the pack index); empty means essentials only.
     """
     answers = prefill or Answers.minimal()
     if not interactive:
@@ -361,20 +396,28 @@ def run_interview(
         output("")
         _collect_llm(input_fn, output, answers, label="codegen", allow_semif=False)
 
-    # 3. Capability packs.
+    # 3. Capability packs (the offered list comes from the pack index; the
+    # always-on base pack is never offered — it is included automatically).
     output("")
     output("Capabilities (skill packs)")
-    output(
-        "  Essentials (time, timers, calculator) is always included. Enable more\n"
-        "  packs by their letter; separate several with commas (e.g. a,c)."
-    )
-    answers.packs = _ask_multi(
-        input_fn,
-        output,
-        "packs (blank for essentials only)",
-        PACK_CHOICES,
-        default=[p for p in answers.packs if p != BASE_PACK],
-    )
+    choices = [c for c in (pack_choices or []) if c[0] != BASE_PACK]
+    if choices:
+        output(
+            "  Essentials (time, timers, calculator) is always included. Enable more\n"
+            "  packs by their letter; separate several with commas (e.g. a,c)."
+        )
+        answers.packs = _ask_multi(
+            input_fn,
+            output,
+            "packs (blank for essentials only)",
+            choices,
+            default=[p for p in answers.packs if p != BASE_PACK],
+        )
+    else:
+        output(
+            "  No pack index was provided, so only essentials (time, timers,\n"
+            "  calculator) will be enabled. Pass --pack-index FILE to choose packs."
+        )
 
     # 4. Pack-specific connection details.
     if "nextcloud" in answers.packs:
@@ -633,13 +676,19 @@ def run_setup(
     plan_only: bool = False,
     plan_out: str | None = None,
     force: bool = False,
+    answers_out: str | None = None,
+    pack_index: str | None = None,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
 ) -> int:
     """Seed (or re-seed) the split config from an interview, or emit a plan.
 
     Returns a process exit code. In ``plan_only`` mode it reads the existing
-    config and writes the derived plan without touching anything.
+    config and writes the derived plan without touching anything. In
+    ``answers_out`` mode it collects the answers and writes them as JSON to that
+    path (no config, no packs needed) — the bootstrap phase that precedes cloning
+    the selected packs. ``pack_index`` is the pack-index file whose entries the
+    interview offers (see `load_pack_index`).
     """
     config_path = Path(path)
 
@@ -655,10 +704,6 @@ def run_setup(
         _emit_plan(plan, plan_out, output)
         return 0
 
-    if config_path.exists() and not force:
-        output(f"{config_path} already exists; leaving it alone (use --force)")
-        return 1
-
     prefill = None
     if answers_file:
         try:
@@ -667,9 +712,34 @@ def run_setup(
             output(f"could not read answers file {answers_file}: {exc}")
             return 1
 
+    choices = load_pack_index(pack_index)
+
+    # Answers-only pass: collect and persist the answers, then stop. Bootstrap
+    # uses this to learn which packs to clone before config generation needs them.
+    if answers_out is not None:
+        if interview and not yes:
+            answers = run_interview(
+                input_fn=input_fn, output=output, interactive=True,
+                prefill=prefill, pack_choices=choices,
+            )
+        else:
+            answers = prefill or Answers.minimal()
+        out_path = Path(answers_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(answers.to_dict(), indent=2) + "\n")
+        output("")
+        output("== answers captured")
+        _print_summary(answers, output)
+        return 0
+
+    if config_path.exists() and not force:
+        output(f"{config_path} already exists; leaving it alone (use --force)")
+        return 1
+
     if interview and not yes:
         answers = run_interview(
-            input_fn=input_fn, output=output, interactive=True, prefill=prefill
+            input_fn=input_fn, output=output, interactive=True,
+            prefill=prefill, pack_choices=choices,
         )
     else:
         answers = prefill or Answers.minimal()

@@ -406,8 +406,8 @@ semif_agent/
   config.py         layered config: index includes + !secret + schema/example
   packs.py          SkillPack + PackRegistry (bundles skills by concern/bridge)
 packs/              skill packs, each cloned from its own repo (pack.<name>)
-                    into this gitignored dir — each ships its own bridge/ — see
-                    packs.json + PACKGEN.md
+                    into this gitignored dir — each ships its own bridge/ — the
+                    pack list lives in the semif-packs index repo (see PACKGEN.md)
 scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
 requirements/       core.txt (test runner), engine.txt (local decision engine),
                     transports.txt (websockets/lxmf), voice.txt, browser.txt
@@ -422,7 +422,6 @@ config/             split config fragments (core, gateway, bridges, packs/*)
 secrets.json        gitignored credentials, referenced as "!secret <key>"
 config.example.json GENERATED per-machine config reference (from the schemas)
 pins.json           committed pins: engine/GGUF/tokenizer/simplex-chat refs
-packs.json          committed list of skill-pack repos cloned into packs/
 local/              gitignored: this deployment's notes (hosts, addresses, models)
 ```
 
@@ -477,8 +476,9 @@ config from the answers:
 1. **Decision engine** — local SemIf 4B, or a remote Winnow server (URL/model/key).
 2. **Skill authoring** — `deny` (default), `ask`, or `allow`; if enabled, the
    `llm` + `codegen` endpoints and credentials.
-3. **Capabilities** — the shipped skill packs to enable: SimpleX, browser,
-   Nextcloud, Outlook (the `essentials` pack is always on).
+3. **Capabilities** — the skill packs to enable, offered from the pack index
+   repo (`semif-packs`): SimpleX, browser, Nextcloud, Outlook, Gutendex (the
+   `essentials` pack is always on). Only the packs you pick are cloned.
 4. **Gateways** — how you talk to the agent: SimpleX, LXMF, voice (or none —
    REPL + dashboard only).
 5. **Timezone** — an IANA name for timers and reported times.
@@ -991,7 +991,7 @@ repair loop are for.
 **Packs** ship real starter integrations in the exact generated folder format,
 plus a `manifest.json` and a `pack.json` manifest binding the concern to its
 categories, bridge, and config schema. Each pack lives in its **own repository**
-(`pack.<name>`, listed in `packs.json`); `scripts/bootstrap.sh` clones them into
+(`pack.<name>`, listed in the `semif-packs` index repo); `scripts/bootstrap.sh` clones them into
 the gitignored `packs/<name>/`, and `merge_packs` loads every enabled pack into
 the tree at startup. Recorded config is written to the runtime store, so a pack
 repo never holds secrets. `PACKGEN.md` is the authoritative contract for

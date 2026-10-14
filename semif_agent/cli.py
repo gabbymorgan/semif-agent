@@ -1102,6 +1102,8 @@ def _setup_command(args) -> int:
         plan_only=args.plan_only,
         plan_out=args.plan_out,
         force=args.force,
+        answers_out=args.answers_out,
+        pack_index=args.pack_index,
     )
 
 
@@ -1160,7 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
             "  llm_provider (semif|ollama|opencode|openai), llm_base_url,\n"
             "    llm_model, llm_api_key\n"
             "  codegen_provider, codegen_base_url, codegen_model, codegen_api_key\n"
-            "  packs (list of: essentials, simplex, browser, nextcloud, outlook)\n"
+            "  packs (list of pack names; the offered set comes from --pack-index)\n"
             "  gateways (list of: simplex, lxmf, voice), timezone\n"
             "  nextcloud_url, nextcloud_username, nextcloud_app_password,\n"
             "    outlook_client_id"
@@ -1177,6 +1179,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     setup_p.add_argument(
         "--answers", default=None, metavar="FILE", help="JSON answers file (non-interactive)"
+    )
+    setup_p.add_argument(
+        "--answers-out",
+        default=None,
+        metavar="FILE",
+        help="collect the answers and write them as JSON to FILE, then exit "
+        "(no config; bootstrap's pre-clone pass)",
+    )
+    setup_p.add_argument(
+        "--pack-index",
+        default=None,
+        metavar="FILE",
+        help="pack-index JSON whose entries the interview offers "
+        "(semif-packs; see scripts/bootstrap.sh)",
     )
     setup_p.add_argument(
         "--plan-out",

@@ -15,7 +15,7 @@ product/concern a first-class part of the agent instead of scattered edits to
 Semif-agent ships a set of starter integrations. Each is a **pack**: a folder
 `packs/<name>/` holding a `pack.json` manifest plus a `skills/` store of leaves
 in the exact generated-skill format. Each pack lives in its **own repository**
-(`pack.<name>`, listed in the committed `packs.json`); `scripts/bootstrap.sh`
+(`pack.<name>`, listed in the `semif-packs` pack-index repo); `scripts/bootstrap.sh`
 clones them into the gitignored `packs/<name>/`. The manifest binds the pieces
 that would otherwise be scattered by convention:
 
@@ -421,6 +421,7 @@ HTTP). For a bridge with top-level fallbacks, see `packs/nextcloud/` (its
    pack).
 8. Verify a real run against the user's actual service — the only proof the
    integration works.
-9. Add the pack's name to the committed `packs.json`, then commit and push the
-   pack's own repository (`pack.<name>`); `scripts/bootstrap.sh` clones it into
-   `packs/`.
+9. Register the pack in the `semif-packs` index repo — add an entry (name + clone
+   URL, plus title/description for the interview) to its `packs.json` — then push
+   the pack's own repository (`pack.<name>`); `scripts/bootstrap.sh` reads the
+   index and clones the pack into `packs/`.
