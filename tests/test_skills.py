@@ -581,10 +581,10 @@ def test_scheduler_loads_committed_seed_skills(tmp_path):
     next_event = next(s for s in nextcloud if s.name == "next_event")
     assert next_event.description.startswith("Report the next")
     assert next_event.status == "ready"
-    assert next_event.integration["transport"] == "caldav"
+    assert next_event.integration["transport"] == "http"
     create_event = next(s for s in nextcloud if s.name == "create_event")
     assert create_event.description.startswith("Create a calendar event")
-    assert create_event.integration["transport"] == "caldav"
+    assert create_event.integration["transport"] == "http"
 
 
 def test_load_config_anchors_runtime_paths_to_checkout(tmp_path):

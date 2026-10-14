@@ -1036,11 +1036,12 @@ CLI, unit tests (24) + integration tests (2).
   skill. The shipped packs: `nextcloud`, `simplex`, `outlook`, `browser` (each
   owning its bridge), and `essentials` (the built-in local utilities `time` +
   `calculator`; no bridge). `nextcloud.create_event` is the authoritative worked
-  example (CalDAV PUT; derives the title/date/time from the query, asks for
+  example (creates a CalDAV event through the Nextcloud bridge; derives the
+  title/date/time from the query, asks for
   missing fields and resumes, resolves the target calendar with a SemIf choice
   over the owned calendars — a strong winner is used, otherwise the configured
-  default); `nextcloud.next_event` is the read counterpart (Nextcloud CalDAV,
-  recurring events expanded server-side); `nextcloud.create_task`
+  default); `nextcloud.next_event` is the read counterpart (through the Nextcloud
+  bridge, recurring events expanded server-side); `nextcloud.create_task`
   adds a task to a Nextcloud task list through the Nextcloud bridge (`GET
   /tasklists` for a VTODO-capable target, `POST /tasks` to create it, the LLM
   bridge to phrase the summary/description); `simplex.next_message` (read via the
@@ -1638,12 +1639,15 @@ CLI, unit tests (24) + integration tests (2).
   instantly inside the existing `semif-bridge.service`. HTTP Basic auth uses the
   username + app password. The connection is configured in `bridges.nextcloud`
   (`url`/`username`/`app_password`, plus `default_calendar`/`default_addressbook`
-  and `verify_tls`/`timeout`); `NextcloudBridge.from_config` passes the top-level
-  `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
-  `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback, so
-  the same account the nextcloud pack skills collect is configured once and a block value
-  wins. Bodies reach it via the derived `nextcloud_bridge_url` (+ optional
+  and `verify_tls`/`timeout`); `NextcloudBridge.from_config` also accepts the
+  top-level `nextcloud_url`/`nextcloud_username`/`nextcloud_app_password`/
+  `nextcloud_default_calendar`/`nextcloud_default_addressbook` as a fallback for a
+  hand-edited config, with a block value
+  winning. Bodies reach it via the derived `nextcloud_bridge_url` (+ optional
   `nextcloud_bridge_token`); the `BridgeInfo` declares only those two config vars.
+  `GET /calendars` also returns `default` (the configured default calendar name),
+  so a body can reproduce the strong-winner/else-default rule; with a bounded
+  window, `GET /calendars/events` expands recurrences server-side.
   Routes (reads `GET`, mutations `POST`): files (`/files`, `/files/stat`,
   `/files/read` text-or-base64, `/files/search`, `/files/write|mkdir|delete|move|copy`),
   calendars (`/calendars` with each collection's `supported-calendar-component-set`

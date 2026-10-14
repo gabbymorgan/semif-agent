@@ -359,8 +359,8 @@ fine-tuning loop — it is not yet the fine-tune itself.
   layer for third-party systems that need state/auth, a native protocol, or a
   sanitized surface; a plain HTTP API is called directly.
 - **Seeds** — shipped real starter skills: `nextcloud.create_event` (the
-  authoritative worked example), `nextcloud.next_event` (Nextcloud CalDAV),
-  `nextcloud.create_task` (Nextcloud task list),
+  authoritative worked example), `nextcloud.next_event` (the user's Nextcloud
+  calendar, through the bridge), `nextcloud.create_task` (Nextcloud task list),
   `simplex.next_message` / `simplex.send_message` / `simplex.connect_link`, and
   `calculator.calculate` (two operands, one SemIf-chosen operator, spoken answer).
 - **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
@@ -835,11 +835,12 @@ tasks, CardDAV contacts, and the OCS Notes API — behind one JSON surface, so a
 body never speaks DAV/OCS directly. It has **no service daemon** (Nextcloud is
 plain HTTPS) and is stdlib-only (`urllib` + `xml.etree`), so it starts instantly
 in the same `semif-bridge` process. The connection (base URL, username, app
-password) is configured in `bridges.nextcloud` and falls back to the top-level
-`nextcloud_url` / `nextcloud_username` / `nextcloud_app_password` /
-`nextcloud_default_calendar` the nextcloud pack skills use, so the account is
-configured once. Skills call it at the address derived from `bridges.nextcloud`
-(`nextcloud_bridge_url`, + optional `nextcloud_bridge_token`). Its HTTP surface:
+password) is configured in `bridges.nextcloud`; `NextcloudBridge.from_config`
+also accepts the top-level `nextcloud_url` / `nextcloud_username` /
+`nextcloud_app_password` / `nextcloud_default_calendar` as a fallback for a
+hand-edited config, with a block value winning. Skills call it at the address
+derived from `bridges.nextcloud` (`nextcloud_bridge_url`, + optional
+`nextcloud_bridge_token`). Its HTTP surface:
 
 ```
 GET  /health
@@ -851,8 +852,8 @@ GET  /files/read?path=<path>          # text, or base64 for binary
 GET  /files/search?query=<text>&path=<dir>
 POST /files/write   {"path","content","encoding"?,"overwrite"?}
 POST /files/mkdir | /files/delete | /files/move | /files/copy
-GET  /calendars
-GET  /calendars/events?calendar=<name>&start=<iso>&end=<iso>   # CalDAV VEVENT
+GET  /calendars                       # includes "default" (configured default name)
+GET  /calendars/events?calendar=<name>&start=<iso>&end=<iso>   # CalDAV VEVENT; recurrences expand with a window
 POST /calendars/events | /calendars/events/update | /calendars/events/delete
 GET  /tasks?calendar=<name>           # CalDAV VTODO
 POST /tasks | /tasks/update | /tasks/complete | /tasks/delete
@@ -996,15 +997,15 @@ the tree at startup. Recorded config is written to the runtime store, so a pack
 repo never holds secrets. `PACKGEN.md` is the authoritative contract for
 authoring a new pack (and a new bridge to back one).
 
-- `nextcloud.create_event` — create an event on Nextcloud CalDAV (the
-  authoritative worked example); resolves the target calendar with a SemIf
-  choice over the owned calendars (strong winner, else the configured default);
-  config vars `nextcloud_url`, `nextcloud_username`, `nextcloud_app_password`,
-  `nextcloud_default_calendar`, plus the LLM bridge (`llm_bridge_url`,
-  `llm_bridge_token`).
-- `nextcloud.next_event` — next upcoming event from Nextcloud CalDAV (recurring
-  events expanded server-side); config vars `nextcloud_url`,
-  `nextcloud_username`, `nextcloud_app_password`, `nextcloud_default_calendar`.
+- `nextcloud.create_event` — create an event on the user's Nextcloud calendar
+  through the Nextcloud bridge (`GET /calendars`, `POST /calendars/events`);
+  resolves the target calendar with a SemIf choice over the owned calendars
+  (strong winner, else the configured default); config vars
+  `nextcloud_bridge_url`, `nextcloud_bridge_token`, plus the LLM bridge
+  (`llm_bridge_url`, `llm_bridge_token`).
+- `nextcloud.next_event` — next upcoming event through the Nextcloud bridge
+  (`GET /calendars`, `GET /calendars/events`; recurring events expanded
+  server-side); config vars `nextcloud_bridge_url`, `nextcloud_bridge_token`.
 - `nextcloud.create_task` — add a task to a Nextcloud task list through the
   Nextcloud bridge (`GET /tasklists`, `POST /tasks`); config vars
   `nextcloud_bridge_url`, `nextcloud_bridge_token`, `llm_bridge_url`,
