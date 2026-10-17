@@ -894,6 +894,230 @@ def test_lxmf_voice_reply_bounds_length(monkeypatch):
     assert len(synth.calls[0]) <= 10
 
 
+# ---- LXMF read-aloud (a book streamed as voice messages) -------------------
+
+def _read_aloud(chat, path, bookmarks, start=0, key="k", title="T"):
+    from semif_agent.speech import ReadAloud
+
+    return ReadAloud(
+        path=str(path),
+        key=key,
+        bookmarks_path=str(bookmarks),
+        source=f"lxmf:{chat}",
+        start=start,
+        title=title,
+    )
+
+
+def _drain_lxmf_daemon(adapter):
+    items = []
+    while not adapter.daemon._outbound.empty():
+        items.append(adapter.daemon._outbound.get_nowait())
+    return items
+
+
+def test_lxmf_speech_stream_ready_only_for_voice_chats():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        synthesizer=FakeSynthesizer(),
+    )
+    assert adapter.supports_speech_stream is True
+    assert adapter.speech_stream_ready("ab") is False
+    adapter._mark_voice_chat("ab")
+    assert adapter.speech_stream_ready("ab") is True
+
+    # Voice replies off: no read-aloud at all.
+    off = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True, "reply_with_voice": False}},
+        synthesizer=FakeSynthesizer(),
+    )
+    off._mark_voice_chat("ab")
+    assert off.supports_speech_stream is False
+    assert off.speech_stream_ready("ab") is False
+
+
+def test_lxmf_streams_a_read_aloud_as_voice_messages(tmp_path, monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+    from semif_agent.reading import read_offset
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OGG")
+    chat = "ab" * 16
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True, "read": {"max_lead": 100000}}},
+        synthesizer=FakeSynthesizer(),
+    )
+    adapter._mark_voice_chat(chat)
+    text = "Sentence one. " * 80
+    book = tmp_path / "book.txt"
+    book.write_text(text, encoding="utf-8")
+    bookmarks = tmp_path / "bookmarks.json"
+
+    adapter._stream(_read_aloud(chat, book, bookmarks))
+
+    items = _drain_lxmf_daemon(adapter)
+    assert len(items) > 1, "the book must be sent as several messages"
+    assert all(item[0] == chat for item in items)
+    assert all(item[2] == b"OGG" for item in items)
+    # The chunks reconstruct the text, and completion parks the bookmark at the end.
+    assert "".join(item[1] for item in items).replace(" ", "") == text.replace(" ", "")
+    assert read_offset(bookmarks, "k") == len(text)
+
+
+def test_lxmf_read_aloud_stops_on_a_stop_command(tmp_path, monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+    from semif_agent.reading import read_offset
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OGG")
+    chat = "ab" * 16
+    seen: list = []
+
+    class StoppingSynth(FakeSynthesizer):
+        def synthesize(self, text):
+            if len(self.calls) == 1:  # during the second chunk
+                adapter._deliver({"source_hash": chat}, "stop")
+            return super().synthesize(text)
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        synthesizer=StoppingSynth(),
+    )
+    adapter._on_inbound = seen.append
+    adapter._mark_voice_chat(chat)
+    text = "Sentence one. " * 80
+    book = tmp_path / "book.txt"
+    book.write_text(text, encoding="utf-8")
+    bookmarks = tmp_path / "bookmarks.json"
+
+    adapter._stream(_read_aloud(chat, book, bookmarks))
+
+    assert seen == [], "a bare stop must not be submitted as a request"
+    items = _drain_lxmf_daemon(adapter)
+    assert len(items) == 2, "the read stops at the next chunk"
+    offset = read_offset(bookmarks, "k")
+    assert 0 < offset < len(text)
+
+
+def test_lxmf_new_command_stops_the_read_and_is_forwarded(tmp_path, monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OGG")
+    chat = "ab" * 16
+    seen: list = []
+
+    class StoppingSynth(FakeSynthesizer):
+        def synthesize(self, text):
+            if len(self.calls) == 1:
+                adapter._deliver({"source_hash": chat}, "what time is it")
+            return super().synthesize(text)
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        synthesizer=StoppingSynth(),
+    )
+    adapter._on_inbound = seen.append
+    adapter._mark_voice_chat(chat)
+    book = tmp_path / "book.txt"
+    book.write_text("Sentence one. " * 80, encoding="utf-8")
+
+    adapter._stream(_read_aloud(chat, book, tmp_path / "bookmarks.json"))
+    assert [m.text for m in seen] == ["what time is it"]
+
+
+def test_lxmf_read_aloud_skips_a_non_voice_chat(tmp_path, monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OGG")
+    chat = "ab" * 16
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        synthesizer=FakeSynthesizer(),
+    )
+    # Not marked as a voice chat: nothing is streamed.
+    book = tmp_path / "book.txt"
+    book.write_text("Sentence one. " * 80, encoding="utf-8")
+    adapter._stream(_read_aloud(chat, book, tmp_path / "bookmarks.json"))
+    assert _drain_lxmf_daemon(adapter) == []
+
+
+def test_lxmf_read_aloud_backpressures_the_outbound_queue(tmp_path, monkeypatch):
+    # The stream keeps only a few messages queued ahead, so a stop is prompt
+    # even though the transport sends them slowly.
+    import threading
+
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OGG")
+    chat = "ab" * 16
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True, "read": {"max_lead": 3}}},
+        synthesizer=FakeSynthesizer(),
+    )
+    adapter._mark_voice_chat(chat)
+    book = tmp_path / "book.txt"
+    book.write_text("Sentence one. " * 400, encoding="utf-8")
+    read = _read_aloud(chat, book, tmp_path / "bookmarks.json")
+
+    done = threading.Event()
+
+    def run():
+        adapter._stream(read)
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    deadline = time.time() + 3
+    while adapter.daemon.pending_sends() < 3 and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.1)
+    assert adapter.daemon.pending_sends() == 3, "the stream must not outrun the queue"
+    assert not done.is_set(), "the stream waits while the queue is full"
+
+    adapter._deliver({"source_hash": chat}, "stop")
+    assert done.wait(timeout=2), "a stop releases the waiting stream"
+    assert adapter._read_key is None
+
+
+def test_service_marks_streamable_sources(tmp_path):
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    scheduler = build_scheduler(tmp_path)
+    chat = "ab" * 16
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        synthesizer=FakeSynthesizer(),
+    )
+    service = GatewayService(scheduler, adapter, config={})
+    assert scheduler.speech.supports(f"lxmf:{chat}") is False
+    adapter._mark_voice_chat(chat)
+    assert scheduler.speech.supports(f"lxmf:{chat}") is True
+
+    # A read registered for that chat is routed to the adapter's outbound queue.
+    scheduler.speech.read_aloud(
+        path="/books/f.txt",
+        key="k",
+        bookmarks_path="/books/bookmarks.json",
+        run_id="r1",
+        source=f"lxmf:{chat}",
+    )
+    service._owners["r1"] = ("lxmf", chat)
+    service.surface()
+    message = service.outbound["lxmf"].get_nowait()
+    assert message.stream is not None
+    assert message.stream.key == "k"
+
+
+def test_service_marks_voice_gateway_streamable(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    GatewayService(scheduler, FakeStreamAdapter(), config={})
+    assert scheduler.speech.supports("voice:c") is True
+
+
 # ---- service: multiple platforms ----
 
 class FakeLxmfAdapter:
@@ -928,3 +1152,51 @@ def test_service_reply_routes_to_owning_platform(tmp_path):
     )
     assert not service.outbound["lxmf"].empty()
     assert service.outbound["simplex"].empty()
+
+
+# ---- service: read-aloud streams route to a streaming front end ------------
+
+
+class FakeStreamAdapter:
+    name = "voice"
+    supports_speech_stream = True
+
+
+def test_service_routes_read_aloud_to_streaming_adapter(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = GatewayService(scheduler, FakeStreamAdapter(), config={})
+    scheduler.speech.read_aloud(
+        path="/books/p.txt",
+        key="gutenberg-1342",
+        bookmarks_path="/books/bookmarks.json",
+        run_id="r1",
+        source="voice:c",
+        title="Pride and Prejudice",
+        start=10,
+    )
+    service._owners["r1"] = ("voice", "c")
+    service.surface()
+
+    message = service.outbound["voice"].get_nowait()
+    assert message.stream is not None
+    assert message.stream.key == "gutenberg-1342"
+    assert message.stream.start == 10
+    assert message.text == ""
+
+
+def test_service_skips_read_aloud_for_a_non_streaming_platform(tmp_path):
+    scheduler = build_scheduler(tmp_path)
+    service = build_service(scheduler)  # FakeAdapter (simplex) cannot stream
+    scheduler.speech.read_aloud(
+        path="/books/p.txt",
+        key="gutenberg-1342",
+        bookmarks_path="/books/bookmarks.json",
+        run_id="r1",
+        source="simplex:4",
+    )
+    service._owners["r1"] = ("simplex", "4")
+    service.surface()
+    assert service.outbound["simplex"].empty()
+    assert any(
+        e["kind"] == "gateway_stream_unsupported" for e in scheduler.trace.read()
+    )

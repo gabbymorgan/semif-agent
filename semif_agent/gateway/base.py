@@ -35,14 +35,72 @@ class InboundMessage:
 
 @dataclass
 class OutboundMessage:
-    """One reply destined for an external chat."""
+    """One reply destined for an external chat.
+
+    `text` is the reply. `stream` optionally carries a long-form read-aloud
+    request (a `semif_agent.speech.ReadAloud`) instead of a plain line: the
+    voice front end streams it chunk-by-chunk with text-to-speech until the user
+    stops it. A platform that does not stream leaves it None and speaks `text`.
+    """
 
     chat_id: str
     text: str
+    stream: Any = None
 
 
 #: Callback the adapter invokes for each authorized inbound message.
 InboundHandler = Callable[[InboundMessage], None]
+
+
+#: Words/phrases that abort a long-form read-aloud (and a spoken reply) when
+#: heard/typed. The match is on the whole normalized utterance (so "stop the
+#: timer" stays a real command) with a first-word fallback only for a short
+#: utterance with trailing filler ("stop please", "cancel that"). Shared by the
+#: voice and LXMF adapters, which both stream read-aloud text.
+_STOP_PHRASES = {
+    "stop",
+    "stop it",
+    "stop talking",
+    "stop please",
+    "cancel",
+    "cancel that",
+    "cancel please",
+    "quiet",
+    "quiet down",
+    "be quiet",
+    "silence",
+    "hush",
+    "shut up",
+    "never mind",
+    "nevermind",
+    "enough",
+}
+_STOP_FIRST_WORDS = {"stop", "cancel", "quiet", "silence", "hush", "shut", "enough"}
+_STOP_FILLER = {"please", "now", "it", "that", "talking", "down", "up", "already"}
+
+#: Characters stripped from a spoken utterance's edges before matching.
+_STOP_PUNCT = " \t\r\n.,!?;:\"'()[]{}"
+
+
+def is_stop_command(text: str) -> bool:
+    """Whether an utterance means "stop talking" (vs a new command).
+
+    Deterministic vocabulary, no model: a bare "stop"/"cancel" (or a short
+    variant like "stop please") aborts a spoken reply / long-form read. Anything
+    longer is a real command and is submitted as a new request.
+    """
+    cleaned = (text or "").strip().lower().strip(_STOP_PUNCT)
+    if not cleaned:
+        return False
+    if cleaned in _STOP_PHRASES:
+        return True
+    words = cleaned.split()
+    if len(words) > 3:
+        return False
+    first = words[0].strip(_STOP_PUNCT)
+    if first not in _STOP_FIRST_WORDS:
+        return False
+    return all(word.strip(_STOP_PUNCT) in _STOP_FILLER for word in words[1:])
 
 
 class GatewayAdapter(ABC):

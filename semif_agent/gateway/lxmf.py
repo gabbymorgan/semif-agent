@@ -44,8 +44,10 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 
 from semif_agent.lxmf_transport import LxmfDaemon
+from semif_agent.reading import DEFAULT_CHUNK_CHARS, chunk_text, save_bookmark
 from semif_agent.voice_transport import (
     OPUS_OGG_BITRATE,
     build_synthesizer,
@@ -58,7 +60,7 @@ from semif_agent.voice_transport import (
     pcm_to_wav,
 )
 
-from .base import GatewayAdapter, InboundMessage, OutboundMessage
+from .base import GatewayAdapter, InboundMessage, OutboundMessage, is_stop_command
 
 #: Sent (once) when a voice message can't be transcribed at all. A spoken or
 #: typed command still works, so the user is not left guessing.
@@ -141,6 +143,38 @@ class LxmfAdapter(GatewayAdapter):
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
         self._on_inbound = None
+        #: Read-aloud: a book is streamed to a voice chat as a sequence of
+        #: voice messages, one Piper-synthesized chunk each, until the user
+        #: sends "stop" or a new command. Only a voice chat can receive it, so
+        #: a text chat keeps the skill's saved-file summary.
+        read_cfg = self.voice_cfg.get("read", {}) or {}
+        self._read_enabled = bool(read_cfg.get("enabled", True))
+        self._read_chunk_chars = max(
+            1, int(read_cfg.get("chunk_chars", DEFAULT_CHUNK_CHARS) or DEFAULT_CHUNK_CHARS)
+        )
+        #: How many messages may be queued on the daemon ahead of the stream
+        #: (backpressure so a stop is prompt).
+        self._read_max_lead = max(1, int(read_cfg.get("max_lead", 4) or 4))
+        self._read_lock = threading.Lock()
+        self._read_stop = threading.Event()
+        self._read_key: str | None = None
+        self._read_chat: str | None = None
+
+    @property
+    def supports_speech_stream(self) -> bool:
+        """Whether this adapter can deliver a read-aloud at all.
+
+        Only when voice replies are on: a read-aloud is sent as voice messages.
+        Whether a *particular* chat can receive one is `speech_stream_ready`.
+        """
+        return bool(self.voice_enabled and self.reply_with_voice and self._read_enabled)
+
+    def speech_stream_ready(self, chat: str) -> bool:
+        """Whether `chat` should get a read-aloud (it last messaged by voice)."""
+        if not self.supports_speech_stream:
+            return False
+        with self._lock:
+            return str(chat) in self._voice_chats
 
     # ---- requirements ----
 
@@ -182,6 +216,15 @@ class LxmfAdapter(GatewayAdapter):
                 if message is None:
                     self.daemon.enqueue(None)
                     return
+                if message.stream is not None:
+                    try:
+                        self._stream(message.stream)
+                    except Exception as exc:
+                        # A read failure must never kill the outbound pump.
+                        self.daemon._event(
+                            "lxmf_read_failed", message=str(exc)[:300]
+                        )
+                    continue
                 audio = self._voice_reply(message)
                 self.daemon.enqueue(message.chat_id, message.text, audio=audio)
 
@@ -252,6 +295,14 @@ class LxmfAdapter(GatewayAdapter):
         """Hand one command to the service (never called on the router thread)."""
         source_hash = str(message.get("source_hash") or "")
         display_name = message.get("display_name")
+        # Any command interrupts a read-aloud playing to this chat; a bare
+        # "stop"/"cancel" is not submitted as a request.
+        if self._stop_read_for_command(source_hash):
+            self.daemon._event(
+                "lxmf_read_stopped", contact_id=source_hash, chars=len(text)
+            )
+            if is_stop_command(text):
+                return
         self.daemon._event(
             "gateway_message",
             contact_id=source_hash,
@@ -488,3 +539,96 @@ class LxmfAdapter(GatewayAdapter):
                 self.daemon._event("lxmf_voice_tts_unavailable", message=str(exc)[:300])
                 return None
             return self._synthesizer
+
+    # ---- read-aloud (a book streamed as voice messages) ----
+
+    def _stop_read_for_command(self, chat: str) -> bool:
+        """Stop a read-aloud playing to `chat`; report whether one was active."""
+        with self._read_lock:
+            if self._read_key is None or self._read_chat != str(chat):
+                return False
+            self._read_stop.set()
+        return True
+
+    def _synthesize_chunk(self, text: str) -> bytes | None:
+        """Piper-synthesize one chunk to Opus/OGG, or None (send it as text)."""
+        synthesizer = self._ensure_synthesizer()
+        if synthesizer is None:
+            return None
+        try:
+            pcm, sample_rate = synthesizer.synthesize(text)
+        except Exception as exc:
+            self.daemon._event("lxmf_voice_synth_failed", message=str(exc)[:300])
+            return None
+        if not pcm:
+            return None
+        audio = pcm_to_opus_ogg(pcm, sample_rate, self.voice_bitrate)
+        if not audio:
+            self.daemon._event("lxmf_voice_encode_failed", chars=len(text))
+            return None
+        return audio
+
+    def _stream(self, read) -> None:
+        """Stream a read-aloud request as a sequence of voice messages.
+
+        Runs on the outbound pump thread: each chunk is synthesized and queued
+        to the daemon, and the bookmark is written before it is sent so a stop
+        leaves the position at the interrupted chunk. The read ends when the
+        text is finished or the user interrupts (a stop flag set by `_deliver`).
+        """
+        chat = str(read.source or "").split(":", 1)[-1]
+        with self._read_lock:
+            self._read_stop.set()  # supersede any prior read
+            stop = threading.Event()
+            self._read_stop = stop
+            self._read_key = read.key
+            self._read_chat = chat
+        try:
+            if not chat or not self.speech_stream_ready(chat):
+                return
+            try:
+                with open(read.path, "r", encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+            except OSError as exc:
+                self.daemon._event(
+                    "lxmf_read_failed", contact_id=chat, message=str(exc)[:200]
+                )
+                return
+            chunk_chars = min(
+                self._read_chunk_chars,
+                max(1, int(read.chunk_chars or self._read_chunk_chars)),
+            )
+            if self.voice_max_chars > 0:
+                chunk_chars = min(chunk_chars, self.voice_max_chars)
+            self.daemon._event(
+                "lxmf_read_start",
+                contact_id=chat,
+                key=read.key,
+                start=read.start,
+                chars=len(text),
+            )
+            sent = 0
+            for offset, chunk in chunk_text(text, read.start, chunk_chars):
+                # Keep only a few messages queued ahead so a stop takes effect
+                # promptly instead of after a large backlog drains.
+                while not stop.is_set() and self.daemon.pending_sends() >= self._read_max_lead:
+                    time.sleep(0.05)
+                if stop.is_set():
+                    break
+                save_bookmark(read.bookmarks_path, read.key, offset, read.title)
+                self.daemon.enqueue(chat, chunk, audio=self._synthesize_chunk(chunk))
+                sent += 1
+            if stop.is_set():
+                self.daemon._event(
+                    "lxmf_read_interrupted", contact_id=chat, key=read.key, chunks=sent
+                )
+            else:
+                save_bookmark(read.bookmarks_path, read.key, len(text), read.title)
+                self.daemon._event(
+                    "lxmf_read_done", contact_id=chat, key=read.key, chunks=sent
+                )
+        finally:
+            with self._read_lock:
+                if self._read_stop is stop:
+                    self._read_key = None
+                    self._read_chat = None

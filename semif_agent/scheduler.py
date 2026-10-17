@@ -41,6 +41,7 @@ from .provider import ProviderError
 from .packs import disabled_categories, load_packs, merge_packs
 from .queue import RequestQueue
 from .skill import SkillRunner
+from .speech import SpeechService
 from .timers import TimerService
 from .skills import (
     CANNED_CATEGORIES,
@@ -436,6 +437,10 @@ class Scheduler:
         for category in disabled_categories(config, self.packs):
             self.tree.pop(category, None)
         self.timers = TimerService(trace=self.trace, timezone=config.get("timezone"))
+        # Long-form read-aloud requests a skill posts for the voice front end.
+        # A body registers one and returns immediately; the gateway drains it
+        # and streams it with text-to-speech (see `semif_agent.speech`).
+        self.speech = SpeechService(trace=self.trace)
         # Read-only introspection of the live tree for introspection skills
         # (listing categories / the skills in one), supplied as a locked
         # snapshot so a body never reaches into the scheduler.
@@ -444,6 +449,7 @@ class Scheduler:
             engine=self.engine,
             config=config,
             timers=self.timers,
+            speech=self.speech,
             admin=self,
             catalog=self.catalog,
         )
@@ -1064,6 +1070,13 @@ class Scheduler:
                 result=outcome.action_log or outcome.new_state or None,
             )
         verdict = outcome.outcome or ("done" if outcome.success else "failed")
+        if verdict == "continue" and self.speech.pending_for(request.id):
+            # The run handed off to a long-form read-aloud: the read IS the
+            # answer, so there is no further work for `assess:outcome` to find.
+            # Overriding to `done` keeps the chain from re-dispatching the
+            # request (which otherwise authors a spurious skill).
+            self.trace.append("read_aloud_terminal", request.id, skill=skill.name)
+            verdict = "done"
         self.trace.append(
             "assessed",
             request.id,

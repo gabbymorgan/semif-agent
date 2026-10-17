@@ -23,58 +23,14 @@ from __future__ import annotations
 import queue
 import threading
 
+from semif_agent.reading import DEFAULT_CHUNK_CHARS, chunk_text, save_bookmark
 from semif_agent.voice_transport import VoiceDaemon
 
-from .base import GatewayAdapter, InboundMessage, OutboundMessage
+from .base import GatewayAdapter, InboundMessage, OutboundMessage, is_stop_command
 
-#: Words/phrases that abort a spoken reply when heard after a barge-in. The
-#: match is on the whole normalized utterance (so "stop the timer" stays a real
-#: command) with a first-word fallback only for a short utterance with trailing
-#: filler ("stop please", "cancel that").
-_STOP_PHRASES = {
-    "stop",
-    "stop it",
-    "stop talking",
-    "stop please",
-    "cancel",
-    "cancel that",
-    "cancel please",
-    "quiet",
-    "quiet down",
-    "be quiet",
-    "silence",
-    "hush",
-    "shut up",
-    "never mind",
-    "nevermind",
-    "enough",
-}
-_STOP_FIRST_WORDS = {"stop", "cancel", "quiet", "silence", "hush", "shut", "enough"}
-_STOP_FILLER = {"please", "now", "it", "that", "talking", "down", "up", "already"}
-
-#: Characters stripped from a spoken utterance's edges before matching.
-_PUNCT = " \t\r\n.,!?;:\"'()[]{}"
-
-
-def _is_stop_command(text: str) -> bool:
-    """Whether an interrupt utterance means "stop talking" (vs a new command).
-
-    Deterministic vocabulary, no model: a bare "stop"/"cancel" (or a short
-    variant like "stop please") aborts the spoken reply. Anything longer is a
-    real command and is submitted as a new request.
-    """
-    cleaned = (text or "").strip().lower().strip(_PUNCT)
-    if not cleaned:
-        return False
-    if cleaned in _STOP_PHRASES:
-        return True
-    words = cleaned.split()
-    if len(words) > 3:
-        return False
-    first = words[0].strip(_PUNCT)
-    if first not in _STOP_FIRST_WORDS:
-        return False
-    return all(word.strip(_PUNCT) in _STOP_FILLER for word in words[1:])
+#: The stop vocabulary lives in `gateway.base` (shared with the LXMF adapter,
+#: which also streams read-aloud text). Kept under the old name for callers.
+_is_stop_command = is_stop_command
 
 
 class VoiceAdapter(GatewayAdapter):
@@ -103,6 +59,22 @@ class VoiceAdapter(GatewayAdapter):
         #: The outbound reply queue (set in `run`), so a "stop" can drop replies
         #: that were already queued behind the interrupted one.
         self._outbound: "queue.Queue[OutboundMessage | None] | None" = None
+        #: Long-form read-aloud: the adapter streams a saved text through the
+        #: daemon's Piper voice one chunk at a time, and any inbound command
+        #: interrupts it. `read.enabled` (default on) gates the whole path;
+        #: `read.chunk_chars` bounds one spoken chunk (clamped to the speakable
+        #: budget so a chunk is never truncated).
+        read_cfg = cfg.get("read", {}) or {}
+        self.supports_speech_stream = bool(read_cfg.get("enabled", True))
+        self._read_chunk_chars = max(
+            1, int(read_cfg.get("chunk_chars", DEFAULT_CHUNK_CHARS) or DEFAULT_CHUNK_CHARS)
+        )
+        self._read_lock = threading.Lock()
+        #: Set to ask the active read to stop; swapped per read so a stale read
+        #: never observes a new read's stop signal.
+        self._read_stop = threading.Event()
+        #: The bookmark key of the active read (None when nothing is being read).
+        self._read_key: str | None = None
 
     # ---- requirements ----
 
@@ -131,12 +103,23 @@ class VoiceAdapter(GatewayAdapter):
 
         def _pump() -> None:
             # Drain the service's replies onto the daemon's speaker. Speaking
-            # blocks (it plays audio), so this runs off the listening thread.
+            # blocks (it plays audio), so this runs off the listening thread. A
+            # read-aloud stream blocks here for as long as the user listens.
             while True:
                 message = outbound.get()
                 if message is None:
                     self.daemon.stop()
                     return
+                if message.stream is not None:
+                    try:
+                        self._stream(message.stream)
+                    except Exception as exc:
+                        # A read failure must never kill the outbound pump (and
+                        # with it the front end).
+                        self.daemon._event(
+                            "gateway_read_failed", message=str(exc)[:300]
+                        )
+                    continue
                 self.daemon._event("gateway_reply_dequeued", chars=len(message.text))
                 self.daemon.speak(message.text)
 
@@ -169,6 +152,11 @@ class VoiceAdapter(GatewayAdapter):
             self._handle(message)
 
     def _handle(self, message: InboundMessage) -> None:
+        # Any inbound command interrupts an in-progress read-aloud: the user
+        # either said "stop" or wants to do something else. The bookmark already
+        # points at the chunk that was interrupted, so a later request resumes
+        # there.
+        was_reading = self._stop_read_for_command(message)
         if message.raw.get("barge_in"):
             if _is_stop_command(message.text):
                 # A "stop"/"cancel" after a barge-in aborts the spoken reply and
@@ -190,6 +178,12 @@ class VoiceAdapter(GatewayAdapter):
             finally:
                 self.daemon.set_muted(False)
             return
+        if was_reading and _is_stop_command(message.text):
+            # A bare "stop" heard between chunks (not a barge-in) stops the
+            # reading and is not submitted as a request.
+            self.daemon._event("gateway_read_stopped", chars=len(message.text))
+            self._drop_pending_speech()
+            return
         if self._on_inbound is None:
             return
         try:
@@ -197,6 +191,91 @@ class VoiceAdapter(GatewayAdapter):
         except Exception as exc:
             self.daemon._event("gateway_handler_failed", message=str(exc)[:300])
             self.daemon.speak("Sorry, something went wrong handling that.")
+
+    # ---- read-aloud (long-form streaming) ----
+
+    def _read_active(self) -> bool:
+        with self._read_lock:
+            return self._read_key is not None
+
+    def _stop_read_for_command(self, message: InboundMessage) -> bool:
+        """Stop an active read when a command arrives; report whether one was."""
+        if not self._read_active():
+            return False
+        reason = "barge_in" if message.raw.get("barge_in") else "new_command"
+        self._stop_reading(reason)
+        return True
+
+    def _stop_reading(self, reason: str) -> None:
+        """Ask the active read to stop at the next chunk boundary.
+
+        The bookmark was already written for the chunk being spoken, so the
+        position is correct without any extra bookkeeping here.
+        """
+        with self._read_lock:
+            if self._read_key is None:
+                return
+            key = self._read_key
+            self._read_stop.set()
+        self.daemon._event("gateway_read_stop", key=key, reason=reason)
+
+    def _stream(self, read) -> None:
+        """Stream a read-aloud request through the daemon's Piper voice.
+
+        Chunks are spoken one at a time; the bookmark is written before each
+        chunk so a stop (or a crash) leaves the position at the interrupted
+        chunk. The read ends when the text is finished or the user interrupts
+        (a stop flag set by `_handle`, or a barge-in muting playback).
+        """
+        with self._read_lock:
+            self._read_stop.set()  # supersede any prior read
+            stop = threading.Event()
+            self._read_stop = stop
+            self._read_key = read.key
+        try:
+            try:
+                with open(read.path, "r", encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+            except OSError as exc:
+                self.daemon._event(
+                    "gateway_read_failed", key=read.key, message=str(exc)[:200]
+                )
+                return
+            chunk_chars = min(
+                self._read_chunk_chars,
+                max(1, int(read.chunk_chars or self._read_chunk_chars)),
+            )
+            # Never exceed the daemon's speakable budget, or a chunk would be
+            # truncated and text would be lost.
+            speak_limit = int(getattr(self.daemon, "max_speak_chars", 0) or 0)
+            if speak_limit > 0:
+                chunk_chars = min(chunk_chars, speak_limit)
+            self.daemon._event(
+                "gateway_read_start", key=read.key, start=read.start, chars=len(text)
+            )
+            spoken = 0
+            for offset, chunk in chunk_text(text, read.start, chunk_chars):
+                if stop.is_set() or self.daemon.stopping():
+                    break
+                save_bookmark(read.bookmarks_path, read.key, offset, read.title)
+                self.daemon.speak(chunk)
+                spoken += 1
+                # A barge-in mutes playback synchronously on the audio thread;
+                # break promptly so we do not skip through suppressed chunks
+                # before the transcribed "stop" reaches `_handle`.
+                if stop.is_set() or self.daemon.muted():
+                    break
+            if stop.is_set() or self.daemon.stopping():
+                self.daemon._event("gateway_read_interrupted", key=read.key, chunks=spoken)
+            else:
+                # Finished: park the bookmark at the end so a later request
+                # starts over rather than replaying the final chunk.
+                save_bookmark(read.bookmarks_path, read.key, len(text), read.title)
+                self.daemon._event("gateway_read_done", key=read.key, chunks=spoken)
+        finally:
+            with self._read_lock:
+                if self._read_stop is stop:
+                    self._read_key = None
 
     def _drop_pending_speech(self) -> None:
         """Discard replies already queued behind an interrupted one.

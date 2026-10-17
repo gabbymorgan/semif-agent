@@ -180,6 +180,12 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                                 'reply_with_voice': {'default': True, 'type': 'bool'},
                                 'max_speak_chars': {'default': 600, 'type': 'int'},
                                 'reply_bitrate': {'default': 24000, 'type': 'int'},
+                                # Read a long text (a book) aloud to a voice
+                                # chat as a sequence of voice messages until the
+                                # user sends "stop". Position is kept in a
+                                # bookmarks.json beside the saved text.
+                                'read': {'enabled': {'default': True, 'type': 'bool'},
+                                         'chunk_chars': {'default': 300, 'type': 'int'}},
                                 'stt': {'model': {'default': 'base.en', 'type': 'str'},
                                         'device': {'default': 'cpu', 'type': 'str'},
                                         'compute_type': {'default': 'int8', 'type': 'str'},
@@ -198,6 +204,13 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                        'reply_prefix': {'default': '', 'type': 'str'},
                        'result_only': {'default': True, 'type': 'bool'},
                        'max_speak_chars': {'default': 600, 'type': 'int'},
+                       # Read a long text (a book) aloud: a skill registers a
+                       # read-aloud request and this front end streams it through
+                       # Piper one chunk at a time until the user stops it. The
+                       # position is kept in a bookmarks.json beside the text.
+                       # `chunk_chars` bounds one spoken chunk.
+                       'read': {'enabled': {'default': True, 'type': 'bool'},
+                                'chunk_chars': {'default': 300, 'type': 'int'}},
                        'listen_timeout_s': {'default': 3.0, 'type': 'float'},
                        'cue': {'enabled': {'default': True, 'type': 'bool'},
                                'frequency': {'default': 880, 'type': 'int'},

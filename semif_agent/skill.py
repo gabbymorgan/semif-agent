@@ -148,6 +148,9 @@ class SkillRunner:
             engine=self.ctx.engine,
             config=merged,
             timers=self.ctx.timers,
+            # The scheduler's speech channel (a skill can post a long-form
+            # read-aloud for a voice front end) rides on every run.
+            speech=self.ctx.speech,
             # `admin` (mutation of the agent) is reserved for the built-in
             # housekeeping meta skills; an ordinary body only ever gets the
             # read-only `catalog`.

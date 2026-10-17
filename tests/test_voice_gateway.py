@@ -927,3 +927,206 @@ def test_download_wake_file_rejects_sha_mismatch(tmp_path):
     with pytest.raises(SystemExit):
         module.download_wake_file("hey_computer", ref, wake_dir)
     assert not (wake_dir / "hey_computer.onnx").exists()
+
+
+# ---- read-aloud (long-form streaming) --------------------------------------
+
+
+class FakeReadDaemon:
+    """A daemon double for the read-aloud loop: records events and speech."""
+
+    def __init__(self, on_speak=None, max_speak_chars=600):
+        self.events = []
+        self.spoken = []
+        self._muted = False
+        self._stopping = False
+        self.on_speak = on_speak
+        self.max_speak_chars = max_speak_chars
+
+    def _event(self, kind, **fields):
+        self.events.append((kind, fields))
+
+    def speak(self, text):
+        self.spoken.append(text)
+        if self.on_speak is not None:
+            self.on_speak(self, text)
+
+    def set_muted(self, muted):
+        self._muted = muted
+
+    def muted(self):
+        return self._muted
+
+    def stopping(self):
+        return self._stopping
+
+    def stop(self):
+        self._stopping = True
+
+
+def _adapter_with_daemon(on_speak=None, config=None):
+    adapter = VoiceAdapter(config or {})
+    daemon = FakeReadDaemon(on_speak=on_speak)
+    adapter.daemon = daemon
+    return adapter, daemon
+
+
+def _book(tmp_path, text):
+    path = tmp_path / "book.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _read(path, bookmarks, key="gutenberg-1", start=0, title="T"):
+    from semif_agent.speech import ReadAloud
+
+    return ReadAloud(
+        path=str(path),
+        key=key,
+        bookmarks_path=str(bookmarks),
+        start=start,
+        title=title,
+    )
+
+
+def test_adapter_streams_chunks_and_records_completion(tmp_path):
+    from semif_agent.reading import read_offset
+
+    text = "One two three. " * 60
+    book = _book(tmp_path, text)
+    bookmarks = tmp_path / "bookmarks.json"
+    adapter, daemon = _adapter_with_daemon()
+    adapter._stream(_read(book, bookmarks))
+
+    assert len(daemon.spoken) > 1, "the text must be spoken in chunks"
+    assert all(chunk.strip() for chunk in daemon.spoken)
+    kinds = [kind for kind, _ in daemon.events]
+    assert "gateway_read_start" in kinds
+    assert "gateway_read_done" in kinds
+    # Finished: the bookmark sits at the end so a later request starts over.
+    assert read_offset(bookmarks, "gutenberg-1") == len(text)
+    assert adapter._read_active() is False
+
+
+def test_adapter_stream_resumes_from_a_saved_offset(tmp_path):
+    from semif_agent.reading import read_offset, save_bookmark
+
+    text = "Sentence one. Sentence two. Sentence three. Sentence four."
+    book = _book(tmp_path, text)
+    bookmarks = tmp_path / "bookmarks.json"
+    save_bookmark(bookmarks, "gutenberg-1", 14, "T")  # start of "Sentence two."
+    adapter, daemon = _adapter_with_daemon()
+    adapter._stream(_read(book, bookmarks, start=14))
+
+    spoken = " ".join(daemon.spoken)
+    assert spoken.startswith("Sentence two")
+    assert "Sentence one" not in spoken
+    assert read_offset(bookmarks, "gutenberg-1") == len(text)
+
+
+def test_adapter_stream_stops_on_a_stop_signal(tmp_path):
+    from semif_agent.reading import read_offset
+
+    text = "Alpha beta gamma delta. " * 80
+    book = _book(tmp_path, text)
+    bookmarks = tmp_path / "bookmarks.json"
+
+    def on_speak(daemon, _text):
+        if len(daemon.spoken) == 2:
+            adapter._stop_reading("stop")
+
+    adapter, daemon = _adapter_with_daemon(on_speak=on_speak)
+    adapter._stream(_read(book, bookmarks))
+
+    assert len(daemon.spoken) == 2, "the read must stop at the next boundary"
+    kinds = [kind for kind, _ in daemon.events]
+    assert "gateway_read_stop" in kinds
+    assert "gateway_read_interrupted" in kinds
+    offset = read_offset(bookmarks, "gutenberg-1")
+    assert 0 < offset < len(text), "the interrupted chunk's start is the resume point"
+    assert adapter._read_active() is False
+
+
+def test_adapter_stream_stops_when_a_barge_in_mutes(tmp_path):
+    text = "Alpha. Beta. Gamma. Delta. Epsilon. Zeta."
+    book = _book(tmp_path, text)
+    bookmarks = tmp_path / "bookmarks.json"
+
+    def on_speak(daemon, _text):
+        if len(daemon.spoken) == 1:
+            daemon.set_muted(True)  # a barge-in landed during the first chunk
+
+    adapter, daemon = _adapter_with_daemon(on_speak=on_speak)
+    adapter._stream(_read(book, bookmarks))
+    assert len(daemon.spoken) == 1
+    assert adapter._read_active() is False
+
+
+def test_adapter_stream_missing_file_is_traced_not_raised(tmp_path):
+    adapter, daemon = _adapter_with_daemon()
+    read = _read(tmp_path / "nope.txt", tmp_path / "bookmarks.json")
+    adapter._stream(read)  # must not raise
+    assert daemon.spoken == []
+    assert any(kind == "gateway_read_failed" for kind, _ in daemon.events)
+    assert adapter._read_active() is False
+
+
+def test_adapter_stream_chunks_never_exceed_the_speakable_budget(tmp_path):
+    # A chunk larger than the daemon's `max_speak_chars` would be truncated and
+    # lose text, so the stream clamps its chunk size below that budget.
+    text = "word " * 200
+    book = _book(tmp_path, text)
+    bookmarks = tmp_path / "bookmarks.json"
+    adapter, daemon = _adapter_with_daemon(config={"read": {"chunk_chars": 500}})
+    daemon.max_speak_chars = 40
+    adapter._stream(_read(book, bookmarks))
+    assert daemon.spoken
+    assert max(len(chunk) for chunk in daemon.spoken) <= 40
+
+
+def test_adapter_supports_speech_stream_by_default_and_can_disable():
+    assert VoiceAdapter({}).supports_speech_stream is True
+    assert VoiceAdapter({"read": {"enabled": False}}).supports_speech_stream is False
+
+
+def test_adapter_handle_stop_command_ends_the_read_without_forwarding(tmp_path):
+    import queue
+
+    text = "Alpha. Beta. Gamma. Delta."
+    book = _book(tmp_path, text)
+    adapter, daemon = _adapter_with_daemon()
+    adapter._on_inbound = lambda message: None
+    adapter._outbound = queue.Queue()
+    # Mark a read active (as the pump would while streaming).
+    with adapter._read_lock:
+        adapter._read_key = "gutenberg-1"
+    adapter._on_utterance("stop")
+    adapter._handle(adapter._inbound.get())
+    assert adapter._read_stop.is_set(), "the active read must be asked to stop"
+    assert daemon._muted is False  # a normal stop never mutes
+
+
+def test_adapter_handle_new_command_stops_the_read_and_forwards():
+    adapter, _daemon = _adapter_with_daemon()
+    seen = []
+    adapter._on_inbound = seen.append
+    with adapter._read_lock:
+        adapter._read_key = "gutenberg-1"
+    adapter._on_utterance("turn on the lights")
+    adapter._handle(adapter._inbound.get())
+    assert adapter._read_stop.is_set(), "a new command interrupts the read"
+    assert [m.text for m in seen] == ["turn on the lights"]
+
+
+def test_adapter_barge_in_stop_also_ends_the_read():
+    adapter, _daemon = _adapter_with_daemon()
+    seen = []
+    adapter._on_inbound = seen.append
+    adapter._barged_in = True
+    with adapter._read_lock:
+        adapter._read_key = "gutenberg-1"
+    adapter._on_utterance("stop")
+    adapter._handle(adapter._inbound.get())
+    assert adapter._read_stop.is_set(), "a barge-in stop ends the read"
+    assert seen == []
+

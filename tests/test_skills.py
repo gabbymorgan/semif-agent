@@ -223,6 +223,35 @@ def test_scheduler_exposes_a_read_only_catalog(tmp_path):
     assert house_ctx.admin is scheduler
     assert plain_ctx.admin is None
     assert plain_ctx.catalog is scheduler.catalog
+    # The scheduler's speech channel rides on every run context (a skill can
+    # post a long-form read-aloud for a voice front end).
+    assert plain_ctx.speech is scheduler.speech
+
+
+def test_a_run_that_registers_a_read_is_terminal(tmp_path):
+    """A run that hands off to a long-form read is the answer: a `continue`
+    assessment must not re-dispatch it (which authored a spurious skill)."""
+    scheduler = _scheduler(
+        tmp_path, choices={"additional work to be done": "continue"}
+    )
+
+    def act(ctx, request):
+        ctx.speech.read_aloud(
+            path="/b/x.txt",
+            key="k",
+            bookmarks_path="/b/bookmarks.json",
+            run_id=request.id,
+            source=request.source,
+        )
+        return ActionResult(action_log="Reading X aloud.", new_state="ok")
+
+    skill = Skill(name="read_book", category="books", description="Read.", act=act)
+    scheduler.tree.setdefault("books", []).append(skill)
+    result = scheduler._run_skill(skill, Request("read x", source="voice:c"))
+    assert result.intermediate is False, "a read-registering run must not continue"
+    kinds = [entry["kind"] for entry in scheduler.trace.read()]
+    assert "read_aloud_terminal" in kinds
+    assert "continued" not in kinds
 
 
 def test_fidelity_gate_state_is_whole_body_without_the_request(tmp_path):

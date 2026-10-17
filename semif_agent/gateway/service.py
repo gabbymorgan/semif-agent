@@ -179,6 +179,13 @@ class GatewayService:
             setter = getattr(adapter, "set_input_ready", None)
             if callable(setter):
                 setter(self.input_ready)
+        #: Tell the scheduler's speech channel which sources this service can
+        #: stream a read-aloud to, so a skill asks before it posts one.
+        speech = getattr(self.scheduler, "speech", None)
+        if speech is not None:
+            setter = getattr(speech, "set_stream_check", None)
+            if callable(setter):
+                setter(self.stream_ready)
         self._owners: dict[str, Target] = {}
         self._parents: dict[str, str] = {}
         self._pending_owner: Target | None = None
@@ -341,6 +348,29 @@ class GatewayService:
         if getattr(scheduler, "pending", None) is not None:
             return True
         return getattr(scheduler, "current", None) is None
+
+    def stream_ready(self, source: str) -> bool:
+        """Whether this service can stream a read-aloud to `source`.
+
+        The owning platform's adapter decides: the voice gateway always can
+        (when `read.enabled`); the LXMF adapter only for a chat that last
+        messaged by voice (a text chat keeps the saved-file summary). A source
+        with no known owner is not streamed.
+        """
+        target = self._owner_from_source(source)
+        if target is None:
+            return False
+        platform, chat = target
+        adapter = self.adapters.get(platform)
+        if adapter is None:
+            return False
+        check = getattr(adapter, "speech_stream_ready", None)
+        if callable(check):
+            try:
+                return bool(check(chat))
+            except Exception:
+                return False
+        return bool(getattr(adapter, "supports_speech_stream", False))
 
     def handle_inbound(self, msg: InboundMessage, platform: str | None = None) -> None:
         """Handle one authorized inbound command. Called by the adapter."""
@@ -519,6 +549,16 @@ class GatewayService:
             if target:
                 self._reply(*target, fired.message, kind="notice")
 
+        # Long-form read-aloud requests a skill posted for a voice front end:
+        # route each to the platform that owns the run. Only a streaming adapter
+        # (the voice gateway) can deliver one; others are traced and skipped.
+        speech = getattr(self.scheduler, "speech", None)
+        if speech is not None:
+            for read in speech.drain():
+                target = self._resolve_target(read.run_id, origin)
+                if target:
+                    self._enqueue_stream(target, read)
+
     # ---- scheduler requeue hook (called under the scheduler lock) ----
 
     def on_request_requeued(self, parent_id: str, child_id: str) -> None:
@@ -593,3 +633,29 @@ class GatewayService:
             return
         self._trace("gateway_reply_queued", reply_kind=kind, chars=len(text))
         target_queue.put(OutboundMessage(chat_id=str(chat_id), text=text))
+
+    def _enqueue_stream(self, target: Target, read) -> None:
+        """Queue a read-aloud stream for the platform that can stream it.
+
+        Only an adapter that declares `supports_speech_stream` (the voice
+        gateway) can speak a long-form stream; a platform that cannot is traced
+        and skipped rather than handed a message it would drop silently.
+        """
+        platform, chat_id = target
+        adapter = self.adapters.get(platform)
+        if adapter is None or not getattr(adapter, "supports_speech_stream", False):
+            self._trace(
+                "gateway_stream_unsupported",
+                platform=platform,
+                key=getattr(read, "key", ""),
+            )
+            return
+        self._trace(
+            "gateway_stream_queued",
+            platform=platform,
+            key=getattr(read, "key", ""),
+            start=getattr(read, "start", 0),
+        )
+        self.outbound[platform].put(
+            OutboundMessage(chat_id=str(chat_id), text="", stream=read)
+        )

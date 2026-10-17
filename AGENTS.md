@@ -199,6 +199,20 @@ timers.py       in-process timer/alarm service (TimerService) owned by the
                 the gateway routes it to the originating chat, the dashboard
                 shows pending/fired). Real local compute (`compute` transport),
                 per-process, and deliberately NOT persisted across restarts.
+reading.py      neutral long-form reading helpers (stdlib): the
+                `bookmarks.json` beside the saved books (load/save/read a book
+                key -> last read offset, atomic write) and a deterministic
+                speakable chunker (`chunk_text` -> `(offset, chunk)` at
+                paragraph/sentence boundaries). Knows nothing about the
+                scheduler, a gateway, or audio.
+speech.py       the scheduler's speech channel (SpeechService on
+                ActionContext.speech, the sibling of timers): a skill that
+                resolves a long text to be read aloud registers a `ReadAloud`
+                (path + bookmark key + start offset) and returns immediately;
+                the gateway owning the chat drains it and hands it to the
+                platform adapter, which streams it with text-to-speech until
+                the user stops it. Neutral and stdlib-only; the skill never
+                reaches into a front end.
 engine.py       DecisionEngine (the pluggable contract: call/warm/loaded/
                 generate) + SemIfEngine, the default local provider ->
                 semif_phase1.llamacpp_backend (lazy import); call() scores a
@@ -726,6 +740,40 @@ CLI, unit tests (24) + integration tests (2).
   the venv under `.runtime/venv`, the Piper voice under `.runtime/voice/tts`,
   the faster-whisper model in the `.runtime/hf` cache). See
   "### gateway (messenger intake)".
+- **Read a book aloud over a voice front end** (Oct 2026): a skill that
+  resolves a long text can ask the front end to read it aloud instead of
+  returning a bounded summary. The skill asks the scheduler's speech channel
+  (`ctx.speech`, `semif_agent/speech.py` — the sibling of `ctx.timers`)
+  `supports(source)`; the gateway service registers the per-source predicate at
+  startup, so a skill only offers a read to a front end that can stream one
+  (a typed request, or a platform with no voice path, keeps the saved-file
+  summary). It then registers a `ReadAloud` and returns immediately;
+  `GatewayService.surface()` drains it and queues an `OutboundMessage` whose
+  `stream` field carries the request to the platform that owns the run (any
+  other platform is traced `gateway_stream_unsupported` and skipped, never
+  handed a message it would drop silently). Two adapters stream it: the local
+  **voice gateway** plays it through the daemon's Piper voice one chunk at a
+  time (`gateway.voice.read.enabled`), and the **LXMF voice gateway** sends it
+  to a voice chat as a sequence of Piper Opus/OGG voice messages
+  (`gateway.lxmf.voice.read.enabled`; a chat that last messaged by voice). Both
+  use `reading.chunk_text` with a chunk size clamped below the platform's
+  speakable budget so a chunk is never truncated, and write the bookmark before
+  each chunk so the position is the interrupted chunk's start. The read is
+  **background**: it does not hold the scheduler's single slot, so the agent
+  stays free. A run that registers a read is treated as **terminal**
+  (`read_aloud_terminal`): the read is the answer, so `assess:outcome` must not
+  re-dispatch the request (which otherwise authored a spurious skill). The user
+  stops it like any spoken reply — a wake-word barge-in "stop", or on LXMF a
+  "stop" message (any new command also interrupts it; traced
+  `gateway_read_stop`/`_interrupted`/`_done` on voice,
+  `lxmf_read_*` on LXMF). Position lives in a `bookmarks.json` beside the saved
+  books (`semif_agent/reading.py`), so a later request resumes where the
+  listener stopped. `gutendex.read_book` is the first consumer: it checks the
+  **local library** (the books folder) first — a book already saved is read from
+  disk (matched by id, or by the name in the request) with no network, and a
+  catalog-resolved book is reused from disk rather than re-downloaded — then
+  over a voice front end reads it aloud, while over any other source it keeps
+  returning the saved-file summary.
 - **Custom Piper voice (train your own)** (Oct 2026): the TTS voice is
   replaceable with one fine-tuned on the user's own recordings. This is an
   optional, off-bootstrap pipeline (`scripts/voice-record.py` records an
@@ -1477,6 +1525,14 @@ CLI, unit tests (24) + integration tests (2).
   is stripped — so a reply (text or voice) is the answer, not the scheduler's
   internals. Questions, repair offers, approvals, and timer notifications still
   pass through.
+  **Read-aloud**: a `ReadAloud` the service routes here (a skill posted it via
+  `ctx.speech`) is streamed to the chat as a sequence of voice messages: `_stream`
+  reads the saved text, Piper-synthesizes each chunk to Opus/OGG, and queues it
+  on the daemon, writing the bookmark before each chunk. It stops when the text
+  ends or the user interrupts — a "stop" message (intercepted in `_deliver`,
+  never submitted as a request) or any new command. Only a chat that last
+  messaged by voice receives one (`speech_stream_ready`); a text chat keeps the
+  skill's saved-file summary. `gateway.lxmf.voice.read.{enabled,chunk_chars}`.
 - **Voice adapter** (`gateway/voice.py`): the local microphone front end. It is
   a policy layer over the neutral `semif_agent/voice_transport.py` (`VoiceDaemon`)
   — openWakeWord wake word → `webrtcvad` endpointing → faster-whisper
@@ -1527,6 +1583,15 @@ CLI, unit tests (24) + integration tests (2).
   is stripped — so the spoken output is the answer, not the scheduler's
   internals. Questions, repair offers, approvals, and timer notifications are
   still spoken.
+  **Read-aloud**: the pump also handles an `OutboundMessage` whose `stream`
+  carries a `ReadAloud` (a skill posted it via `ctx.speech`; the service routes
+  it here — see the roadmap entry). `_stream` reads the saved text and speaks it
+  chunk by chunk through the daemon's Piper voice, writing the bookmark before
+  each chunk; it stops when the text ends, when the user stops it (a barge-in
+  "stop" — the daemon mutes playback, which the loop notices — or a bare "stop"
+  heard between chunks), or when any new command arrives. `supports_speech_stream`
+  (`gateway.voice.read.enabled`, default on) gates the whole path;
+  `read.chunk_chars` bounds one chunk (clamped below `max_speak_chars`).
   Every heavy dep
   (`sounddevice`/`openwakeword`/`faster_whisper`/`piper`/`onnxruntime`) is
   **lazy-imported**; `check_requirements()` returns an install hint and the
@@ -1710,7 +1775,8 @@ CLI, unit tests (24) + integration tests (2).
   `packs.<name>`. Shared, skill-less bridges (the LLM bridge) live in
   `semif_agent/config.py` `SHARED_BRIDGE_SCHEMA`.
 - **Shipped packs.** `nextcloud`, `simplex`, `outlook`, `browser` (each owning
-  its bridge) and `essentials` (the built-in local utilities `time` +
+  its bridge), `gutendex` (Project Gutenberg book catalog + full-text download;
+  no bridge) and `essentials` (the built-in local utilities `time` +
   `calculator` + `skills`; no bridge) — each in its own repository. Adding a
   concern means adding a pack repo, not editing `skills.py`.
 

@@ -164,6 +164,10 @@
         "reply_with_voice": true,
         "max_speak_chars": 600,
         "reply_bitrate": 24000,
+        "read": {
+          "enabled": true,
+          "chunk_chars": 300
+        },
         "stt": {
           "model": "base.en",
           "device": "cpu",
@@ -187,6 +191,10 @@
       "reply_prefix": "",
       "result_only": true,
       "max_speak_chars": 600,
+      "read": {
+        "enabled": true,
+        "chunk_chars": 300
+      },
       "listen_timeout_s": 3.0,
       "cue": {
         "enabled": true,

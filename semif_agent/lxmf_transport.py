@@ -439,6 +439,15 @@ class LxmfDaemon:
         except Exception:
             pass
 
+    def pending_sends(self) -> int:
+        """How many outbound items are queued (a stream's backpressure signal).
+
+        A long-form read-aloud uses this to keep only a few messages queued
+        ahead, so stopping it takes effect promptly instead of after a large
+        backlog drains.
+        """
+        return self._outbound.qsize()
+
     # ---- identity ----
 
     def _load_identity(self, RNS):

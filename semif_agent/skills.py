@@ -26,6 +26,7 @@ from .decisions import DecisionRequest, Option, Request
 from .engine import DecisionEngine
 from .llm import LLMClient
 from .log import DecisionLog
+from .speech import SpeechService
 from .timers import TimerService
 from .trace import TraceLog
 
@@ -45,6 +46,11 @@ class ActionContext:
     engine: DecisionEngine
     config: dict
     timers: TimerService | None = None
+    #: The scheduler's speech channel. A body that resolves a long text to be
+    #: read aloud (a book) registers it here and returns immediately; the voice
+    #: front end streams it and the user stops it. None for a body running
+    #: without a scheduler (a test) — callers must tolerate None.
+    speech: SpeechService | None = None
     # The scheduler, exposed to built-in meta skills (housekeeping) so they can
     # act on the agent's own tree/registry/store. None for ordinary bodies, which
     # must never reach into the agent (the read-only `catalog` is their view).

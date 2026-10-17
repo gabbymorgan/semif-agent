@@ -1385,6 +1385,14 @@ class VoiceDaemon:
         else:
             self._mute.clear()
 
+    def muted(self) -> bool:
+        """Whether spoken replies are currently muted (a barge-in is in flight)."""
+        return self._mute.is_set()
+
+    def stopping(self) -> bool:
+        """Whether the daemon is shutting down (a long stream should stop)."""
+        return self._stop.is_set()
+
     def speak(self, text: str) -> None:
         """Synthesize and play `text`; called from the outbound pump thread."""
         text = (text or "").strip()
