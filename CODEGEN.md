@@ -303,8 +303,12 @@ def act(ctx, request) -> ActionResult:
   `ctx.config` (the resolved values for this skill, including its own config),
   and `ctx.timers` (the in-process timer/alarm service — use it to schedule a
   notification, as the `time.set_timer` and `time.set_alarm` seeds do).
-  `ctx.admin` exists for the built-in housekeeping meta skills only; an ordinary
-  body must never touch it.
+  `ctx.catalog` is a **read-only** view of the agent's own skill tree for an
+  introspection skill that reports what the agent can do: `ctx.catalog.categories()`
+  returns a `{category_id: description}` map and `ctx.catalog.skills(category)`
+  the leaf names inside one category (the `skills.list_categories` /
+  `skills.list_skills` seeds). `ctx.admin` exists for the built-in housekeeping
+  meta skills only; an ordinary body must never touch it.
 - `request` is the `Request` being handled.
 - `ActionResult(action_log: str, new_state: str, needs_input: str | None = None,
   decisions: list = [])` is imported from `semif_agent.skills`; return that exact

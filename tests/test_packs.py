@@ -139,6 +139,8 @@ def test_expected_seeds_exist():
     assert "time.set_alarm" in ids
     assert "nextcloud.create_task" in ids
     assert "calculator.calculate" in ids
+    assert "skills.list_categories" in ids
+    assert "skills.list_skills" in ids
     assert "browser.open_page" in ids
     assert "browser.read_page" in ids
     assert "browser.screenshot" in ids

@@ -363,8 +363,10 @@ fine-tuning loop — it is not yet the fine-tune itself.
 - **Seeds** — shipped real starter skills: `nextcloud.create_event` (the
   authoritative worked example), `nextcloud.next_event` (the user's Nextcloud
   calendar, through the bridge), `nextcloud.create_task` (Nextcloud task list),
-  `simplex.next_message` / `simplex.send_message` / `simplex.connect_link`, and
-  `calculator.calculate` (two operands, one SemIf-chosen operator, spoken answer).
+  `simplex.next_message` / `simplex.send_message` / `simplex.connect_link`,
+  `calculator.calculate` (two operands, one SemIf-chosen operator, spoken answer),
+  and `skills.list_categories` / `skills.list_skills` (report the agent's own
+  skill categories, or the skills inside a named category).
 - **Fatal-on-engine-loss** — the engine is always real; its absence exits the app.
 - **Stdlib-only core** — SemIf/llama.cpp are lazy imports, so the package stays
   importable and testable without the heavy engine installed.
@@ -494,7 +496,8 @@ It then installs **only what those answers require**. Both ends of the spectrum
 are reachable by the end of a run:
 
 - **minimum** — local SemIf 4B + `essentials` (canned replies, time/timers,
-  calculator). No account, no network, no gateway, no heavy downloads.
+  calculator, skill listing). No account, no network, no gateway, no heavy
+  downloads.
 - **maximum** — every pack, a remote Winnow engine, remote `llm`/`codegen`
   endpoints, and all gateways.
 
@@ -1062,6 +1065,12 @@ authoring a new pack (and a new bridge to back one).
   cubes, square roots, cube roots, fractions, and percentages, and SemIf picks
   the operands when the request writes more numbers than the operation needs
   (pure local compute, no config).
+- `skills.list_categories` — list the categories of skills the agent has
+  (pure local compute, no config; reads the read-only `ctx.catalog`, not the
+  housekeeping-only `ctx.admin`).
+- `skills.list_skills` — list the skills inside a category named in the request
+  ("list skills in nextcloud"), asking for one when it is missing and reporting
+  an unknown category honestly (pure local compute, no config).
 
 ---
 

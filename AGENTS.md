@@ -116,7 +116,9 @@ scheduler.py    no up-front gate: every input is dispatched
                 recall never skips the actionability guard or feeds the
                 monotonic-progress guard;
                 housekeeping meta skills (delete/clear-config/regen/cancel-build)
-                operate on the tree via `ctx.admin`; new-skill creation is gated by
+                operate on the tree via `ctx.admin` (mutation); every other body
+                sees the tree only through the read-only `ctx.catalog`
+                (`ActionContext.catalog`, an `SkillCatalog`); new-skill creation is gated by
                 a tri-state mode (`new_skill_creation`: deny/allow/ask, **deny by
                 default**) with a
                 per-category override in the category config, with
@@ -186,7 +188,9 @@ skill.py        loop: observe -> act -> observe -> assess; the body is a single
                 a run paused for input is resumed by re-invoking act with the
                 answer on request.user_input; a
                 contract variable the runner cannot satisfy pauses BEFORE
-                act (pre_act), collects it, and re-runs the full path
+                act (pre_act), collects it, and re-runs the full path;
+                the run context supplies the read-only `catalog` to every body
+                and the mutating `admin` only to the housekeeping category
 timers.py       in-process timer/alarm service (TimerService) owned by the
                 scheduler and exposed on ActionContext.timers: a single
                 background thread fires scheduled timers on the host clock,
@@ -1100,7 +1104,7 @@ CLI, unit tests (24) + integration tests (2).
   never holds secrets, and a generated body with the same name replaces the pack
   skill. The shipped packs: `nextcloud`, `simplex`, `outlook`, `browser` (each
   owning its bridge), and `essentials` (the built-in local utilities `time` +
-  `calculator`; no bridge). `nextcloud.create_event` is the authoritative worked
+  `calculator` + `skills`; no bridge). `nextcloud.create_event` is the authoritative worked
   example (creates a CalDAV event through the Nextcloud bridge; derives the
   title/date/time from the query, asks for
   missing fields and resumes, resolves the target calendar with a SemIf choice
@@ -1127,6 +1131,14 @@ CLI, unit tests (24) + integration tests (2).
   roots/fractions/percentages, SemIf picks the operands when the request offers
   more numbers than the operator consumes, and the answer is spelled out in words
   for the ear (an inexact result is announced as "approximately ...");
+  `skills.list_categories` and `skills.list_skills` are the introspection skills
+  (`compute` transport, empty contract): they read the agent's own tree through
+  the read-only `ctx.catalog` (never the housekeeping-only `ctx.admin`) and
+  report the category list, or the leaf names inside a category named in the
+  request (asking for one when it is missing, and reporting an unknown category
+  honestly) — so a voice user can ask "list skill categories" or "list skills in
+  nextcloud". The closed `response` tree is filtered out of both (it is the
+  non-request catchall, not a capability);
   `tests/test_packs.py` keeps every pack skill honest.
 - **Contract provenance.** Each authored body records the CODEGEN.md revision it
   was written against. `skill_contract_ref()` (`codegen.py`) returns
@@ -1679,8 +1691,8 @@ CLI, unit tests (24) + integration tests (2).
   `semif_agent/config.py` `SHARED_BRIDGE_SCHEMA`.
 - **Shipped packs.** `nextcloud`, `simplex`, `outlook`, `browser` (each owning
   its bridge) and `essentials` (the built-in local utilities `time` +
-  `calculator`; no bridge) — each in its own repository. Adding a concern means
-  adding a pack repo, not editing `skills.py`.
+  `calculator` + `skills`; no bridge) — each in its own repository. Adding a
+  concern means adding a pack repo, not editing `skills.py`.
 
 ### bridges (third-party API services)
 

@@ -40,6 +40,7 @@ from semif_agent.skills import (
     CreateCategory,
     CreateSkill,
     Skill,
+    SkillCatalog,
     SkillDraft,
     SkillStore,
     build_category_prompt,
@@ -178,6 +179,50 @@ def test_scheduler_sizes_artifact_budgets_from_engine_context(tmp_path):
     assert scheduler.max_body_tokens == 4096 - 1024
     assert scheduler.max_body_chars == int((4096 - 1024) * 4.0)
     assert scheduler.max_test_chars == scheduler.max_body_chars
+
+
+def test_skill_catalog_lists_categories_and_skills():
+    """The read-only catalog reports the tree's categories and one category's
+    leaves, and follows the live provider."""
+    tree = {
+        "time": [
+            Skill(name="now", category="time", description="time"),
+            Skill(name="date", category="time", description="date"),
+        ],
+        "calculator": [Skill(name="calculate", category="calculator", description="math")],
+    }
+    catalog = SkillCatalog(lambda: tree)
+    assert set(catalog.categories()) == {"time", "calculator"}
+    assert catalog.skills("time") == ["date", "now"]
+    assert catalog.skills("missing") == []
+    # A skill added after construction is still listed (the provider is live).
+    tree["new"] = [Skill(name="thing", category="new", description="d")]
+    assert "new" in catalog.categories()
+
+
+def test_scheduler_exposes_a_read_only_catalog(tmp_path):
+    """The scheduler supplies the catalog on the run context, but reserves
+    `admin` for the built-in housekeeping meta skills."""
+    scheduler = _scheduler(tmp_path)
+    assert scheduler.catalog is not None
+    categories = scheduler.catalog.categories()
+    assert "housekeeping" in categories and "response" in categories
+    assert "delete_skill" in scheduler.catalog.skills("housekeeping")
+    # An ordinary body sees the catalog but not the mutating admin surface.
+    housekeeping = next(
+        s for s in scheduler.tree["housekeeping"] if s.name == "delete_skill"
+    )
+    ordinary = Skill(
+        name="probe",
+        category="tracking",
+        description="Probe.",
+        act=lambda ctx, request: ActionResult(action_log="ok", new_state="x"),
+    )
+    house_ctx = scheduler.runner._skill_context(housekeeping, Request("x"))
+    plain_ctx = scheduler.runner._skill_context(ordinary, Request("x"))
+    assert house_ctx.admin is scheduler
+    assert plain_ctx.admin is None
+    assert plain_ctx.catalog is scheduler.catalog
 
 
 def test_fidelity_gate_state_is_whole_body_without_the_request(tmp_path):

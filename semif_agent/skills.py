@@ -47,8 +47,35 @@ class ActionContext:
     timers: TimerService | None = None
     # The scheduler, exposed to built-in meta skills (housekeeping) so they can
     # act on the agent's own tree/registry/store. None for ordinary bodies, which
-    # must never reach into the agent.
+    # must never reach into the agent (the read-only `catalog` is their view).
     admin: object | None = None
+    # A read-only view of the agent's own skill catalog (categories -> skills),
+    # for an introspection skill that reports what the agent can do. Unlike
+    # `admin` it exposes no mutation, so an ordinary body may read it.
+    catalog: "SkillCatalog | None" = None
+
+
+@dataclass
+class SkillCatalog:
+    """Read-only introspection of the agent's own skill tree.
+
+    An ordinary skill body must never reach into the agent (`ctx.admin` is for
+    the built-in housekeeping meta skills), but a skill that reports the agent's
+    own capabilities legitimately needs to see the tree. This is that surface:
+    reads only — the category list and the skills inside one category — with no
+    way to mutate. `provider` returns the live tree (the scheduler supplies a
+    locked snapshot), so a skill authored after startup is still listed.
+    """
+
+    provider: Callable[[], dict[str, list[Skill]]]
+
+    def categories(self) -> dict[str, str]:
+        """Category id -> scope description, for every category in the tree."""
+        return category_descriptions(self.provider())
+
+    def skills(self, category: str) -> list[str]:
+        """The leaf names inside one category (empty when it is unknown)."""
+        return sorted(skill.name for skill in self.provider().get(category, []))
 
 
 def _noop_act(ctx: ActionContext, request: Request) -> ActionResult:

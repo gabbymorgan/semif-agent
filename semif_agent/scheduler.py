@@ -54,6 +54,7 @@ from .skills import (
     CreateSkill,
     DeletedSkills,
     Skill,
+    SkillCatalog,
     SkillDraft,
     SkillStore,
     apply_tombstones,
@@ -435,8 +436,16 @@ class Scheduler:
         for category in disabled_categories(config, self.packs):
             self.tree.pop(category, None)
         self.timers = TimerService(trace=self.trace, timezone=config.get("timezone"))
+        # Read-only introspection of the live tree for introspection skills
+        # (listing categories / the skills in one), supplied as a locked
+        # snapshot so a body never reaches into the scheduler.
+        self.catalog = SkillCatalog(self._tree_snapshot)
         self.ctx = ActionContext(
-            engine=self.engine, config=config, timers=self.timers, admin=self
+            engine=self.engine,
+            config=config,
+            timers=self.timers,
+            admin=self,
+            catalog=self.catalog,
         )
         self.runner = SkillRunner(
             self.ctx,

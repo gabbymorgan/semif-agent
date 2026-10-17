@@ -34,6 +34,7 @@ from .log import DecisionLog
 from .skills import (
     CANNED_CATEGORIES,
     DETERMINISTIC_CATEGORIES,
+    HOUSEKEEPING_CATEGORY,
     ActionContext,
     Skill,
     SkillStore,
@@ -147,7 +148,11 @@ class SkillRunner:
             engine=self.ctx.engine,
             config=merged,
             timers=self.ctx.timers,
-            admin=self.ctx.admin,
+            # `admin` (mutation of the agent) is reserved for the built-in
+            # housekeeping meta skills; an ordinary body only ever gets the
+            # read-only `catalog`.
+            admin=self.ctx.admin if skill.category == HOUSEKEEPING_CATEGORY else None,
+            catalog=self.ctx.catalog,
         )
 
     def _unresolved(self, skill: Skill, request: Request) -> list[str]:
