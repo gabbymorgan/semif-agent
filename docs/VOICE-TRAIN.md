@@ -175,6 +175,15 @@ Then on the gateway host set:
 "gateway": { "voice": { "tts": { "voice": "<name>" } } }
 ```
 
+The LXMF gateway's voice replies resolve a Piper voice the same way from
+`.runtime/voice/tts/` (`cli._build_gateway_adapter` anchors
+`gateway.lxmf.voice.tts.voice_dir` there too), so the same trained voice can back
+both the microphone gateway and Sideband push-to-talk replies:
+
+```json
+"gateway": { "lxmf": { "voice": { "tts": { "voice": "<name>" } } } }
+```
+
 Restart the gateway and speak a reply. **Only a real spoken reply proves the
 integration** — a generated test passing proves mechanics, not that the voice
 loads and sounds right.

@@ -48,6 +48,28 @@ _REQUIRED_MODULES: tuple[tuple[str, str], ...] = (
     ("onnxruntime", "onnxruntime"),
 )
 
+#: The one package a transcribe-only front end needs (see
+#: `check_transcription_requirements`). `faster-whisper` bundles PyAV, whose
+#: ffmpeg decodes an incoming Opus/OGG voice message to PCM.
+_TRANSCRIBE_MODULES: tuple[tuple[str, str], ...] = (
+    ("faster_whisper", "faster-whisper"),
+)
+
+#: The packages a voice-reply front end needs (see
+#: `check_synthesis_requirements`): Piper for text-to-speech and PyAV for the
+#: Opus/OGG container a Sideband HQ push-to-talk reply rides in. No microphone,
+#: wake word, or transcription is implied — a headless host can synthesize a
+#: reply without the hardware voice stack.
+_SYNTHESIS_MODULES: tuple[tuple[str, str], ...] = (
+    ("piper", "piper-tts"),
+    ("av", "av (PyAV, Opus/OGG encoding)"),
+)
+
+#: Sideband's HQ push-to-talk container (`LXMF.AM_OPUS_OGG`) is 48 kHz mono
+#: OGG/Opus; a reply's PCM is resampled to that rate before encoding.
+OPUS_OGG_SAMPLE_RATE = 48000
+OPUS_OGG_BITRATE = 24000
+
 
 # --------------------------------------------------------------------------- #
 # Engine interfaces (fakes are injected in tests)
@@ -81,6 +103,15 @@ class Transcriber:
     """Transcribes a complete utterance (16 kHz int16 PCM) to text."""
 
     def transcribe(self, pcm16: bytes) -> str:
+        raise NotImplementedError
+
+    def transcribe_bytes(self, data: bytes) -> str:
+        """Transcribe an encoded audio container (e.g. OGG/Opus) to text.
+
+        Default: not supported. `WhisperTranscriber` overrides it so a received
+        voice message (a Sideband PTT Opus/OGG payload) is transcribed without a
+        separate decode step.
+        """
         raise NotImplementedError
 
     def close(self) -> None:
@@ -236,6 +267,10 @@ class WhisperTranscriber(Transcriber):
         self._model = WhisperModel(str(model or "base.en"), device=str(device or "cpu"),
                                    compute_type=str(compute_type or "int8"))
 
+    @staticmethod
+    def _join(segments) -> str:
+        return " ".join(segment.text.strip() for segment in segments).strip()
+
     def transcribe(self, pcm16: bytes) -> str:
         import numpy as np
 
@@ -246,7 +281,25 @@ class WhisperTranscriber(Transcriber):
             beam_size=self.beam_size,
             vad_filter=self.vad_filter,
         )
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        return self._join(segments)
+
+    def transcribe_bytes(self, data: bytes) -> str:
+        """Transcribe an encoded audio container (e.g. OGG/Opus).
+
+        faster-whisper decodes the container to 16 kHz mono internally via PyAV
+        (its own bundled ffmpeg), so a PTT voice message's Opus/OGG payload is
+        transcribed directly — no separate decode step and no system ffmpeg.
+        `data` is the raw container bytes.
+        """
+        import io
+
+        segments, _info = self._model.transcribe(
+            io.BytesIO(bytes(data)),
+            language=self.language,
+            beam_size=self.beam_size,
+            vad_filter=self.vad_filter,
+        )
+        return self._join(segments)
 
 
 class PiperSynthesizer(Synthesizer):
@@ -572,10 +625,228 @@ def _build_vad(cfg: dict) -> VadGate:
     return EnergyVadGate(threshold=float(vad_cfg.get("energy_threshold", 200.0)))
 
 
+def build_transcriber(cfg: dict) -> Transcriber:
+    """Build just the speech-to-text engine from an `stt` config block.
+
+    `build_engines` also needs a microphone, a wake word, and TTS; a headless
+    front end that only transcribes received audio — the LXMF gateway handling a
+    Sideband PTT voice message — uses this instead, so it needs only
+    `faster-whisper` and none of the hardware voice stack.
+    """
+    stt_cfg = (cfg or {}).get("stt", {}) or {}
+    return WhisperTranscriber(
+        model=str(stt_cfg.get("model", "base.en") or "base.en"),
+        device=str(stt_cfg.get("device", "cpu") or "cpu"),
+        compute_type=str(stt_cfg.get("compute_type", "int8") or "int8"),
+        language=str(stt_cfg.get("language", "en") or "en"),
+    )
+
+
+def check_transcription_requirements() -> tuple[bool, str | None]:
+    """Return `(ok, install_hint)` for the transcribe-only path.
+
+    Unlike `VoiceDaemon.check_requirements` this needs no microphone, wake word,
+    or TTS — only `faster-whisper` — so a headless host can transcribe incoming
+    voice messages without the hardware voice stack. Never raises.
+    """
+    missing = []
+    for module, hint in _TRANSCRIBE_MODULES:
+        try:
+            importlib.import_module(module)
+        except Exception:
+            missing.append(hint)
+    if missing:
+        return False, (
+            "install the transcription stack (requirements/transcribe.txt): "
+            + "; ".join(missing)
+        )
+    return True, None
+
+
+def check_synthesis_requirements() -> tuple[bool, str | None]:
+    """Return `(ok, install_hint)` for the voice-reply (Piper) path.
+
+    A voice reply needs Piper (text-to-speech) and PyAV (to encode the
+    synthesized PCM into the Opus/OGG container a Sideband HQ push-to-talk
+    message rides in). Neither a microphone, a wake word, nor transcription is
+    implied — the headless counterpart of `VoiceDaemon.check_requirements`.
+    Never raises.
+    """
+    missing = []
+    for module, hint in _SYNTHESIS_MODULES:
+        try:
+            importlib.import_module(module)
+        except Exception:
+            missing.append(hint)
+    if missing:
+        return False, (
+            "install the voice-reply stack (requirements/tts.txt): "
+            + "; ".join(missing)
+        )
+    return True, None
+
+
+def pcm_to_opus_ogg(
+    pcm16: bytes, sample_rate: int, bitrate: int = OPUS_OGG_BITRATE
+) -> bytes:
+    """Encode 16-bit mono PCM into an OGG/Opus container (Sideband HQ PTT).
+
+    A received voice message is Opus/OGG (`LXMF.AM_OPUS_OGG`), so a voice reply
+    is encoded to the same container: the PCM is resampled to 48 kHz (Opus's
+    fullband rate) with PyAV's `AudioResampler` and muxed into OGG by its
+    bundled libopus. Returns `b""` on any failure (the caller falls back to a
+    text reply) — never raises, so a missing PyAV degrades gracefully.
+    """
+    if not pcm16 or len(pcm16) < BYTES_PER_SAMPLE:
+        return b""
+    try:
+        import av
+    except Exception:
+        return b""
+    try:
+        rate = int(sample_rate or OPUS_OGG_SAMPLE_RATE)
+        source = av.AudioFrame(
+            format="s16", layout="mono", samples=len(pcm16) // BYTES_PER_SAMPLE
+        )
+        source.sample_rate = rate
+        source.planes[0].update(pcm16)
+        if rate == OPUS_OGG_SAMPLE_RATE:
+            frames = [source]
+        else:
+            resampler = av.AudioResampler(
+                format="s16", layout="mono", rate=OPUS_OGG_SAMPLE_RATE
+            )
+            # PyAV's `resample` returns a list of frames (older versions a single
+            # frame or None); normalize both shapes.
+            frames = resampler.resample(source)
+            if not isinstance(frames, list):
+                frames = [frames]
+            tail = resampler.resample(None)
+            frames += tail if isinstance(tail, list) else [tail]
+        frames = [frame for frame in frames if frame is not None]
+        if not frames:
+            return b""
+        buffer = io.BytesIO()
+        container = av.open(buffer, mode="w", format="ogg")
+        stream = container.add_stream("libopus", rate=OPUS_OGG_SAMPLE_RATE)
+        stream.layout = "mono"
+        stream.bit_rate = int(bitrate or OPUS_OGG_BITRATE)
+        try:  # voice-optimised mode (Sideband's HQ PTT uses the voice profile)
+            stream.codec_context.options = {"application": "voip"}
+        except Exception:
+            pass
+        for frame in frames:
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+        container.close()
+        return buffer.getvalue()
+    except Exception:
+        return b""
+
+
+def check_codec2_requirements() -> tuple[bool, str | None]:
+    """Return `(ok, install_hint)` for Codec2 voice-message decoding.
+
+    Codec2 (Sideband's non-HQ push-to-talk) needs the optional `pycodec2`
+    bindings, which compile against the system `libcodec2`. Never raises.
+    """
+    try:
+        importlib.import_module("pycodec2")
+    except Exception:
+        return False, (
+            "pip install pycodec2 (needs the system libcodec2: "
+            "apt install libcodec2-dev)"
+        )
+    return True, None
+
+
+def decode_codec2(data: bytes, rate: int) -> bytes | None:
+    """Decode a raw Codec2 bitstream to 8 kHz mono int16 PCM.
+
+    `rate` is the codec2 bitrate in bits/s (700..3200). Returns None when the
+    optional `pycodec2` bindings (or the mode) are unavailable, so the caller
+    reports the message unsupported rather than guessing. Frames shorter than a
+    full codec frame are dropped; decoding mirrors Sideband's per-frame loop.
+    """
+    if not data or not rate:
+        return None
+    try:
+        import pycodec2
+    except Exception:
+        return None
+    try:
+        codec = pycodec2.Codec2(int(rate))
+        bytes_per_frame = int(codec.bytes_per_frame())
+    except Exception:
+        return None
+    if bytes_per_frame <= 0:
+        return None
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    frames = [
+        np.asarray(codec.decode(data[offset : offset + bytes_per_frame]), dtype=np.int16)
+        for offset in range(0, len(data) - bytes_per_frame + 1, bytes_per_frame)
+    ]
+    if not frames:
+        return None
+    return np.concatenate(frames).astype(np.int16).tobytes()
+
+
+def pcm_to_wav(pcm16: bytes, sample_rate: int, channels: int = 1) -> bytes:
+    """Wrap raw int16 PCM in a minimal in-memory WAV container (stdlib).
+
+    Lets a non-container payload (Codec2 frames decoded to 8 kHz PCM) ride the
+    same transcription path as an Opus/OGG message: faster-whisper's PyAV decodes
+    the WAV and resamples it to 16 kHz, so the boundary needs no manual resample.
+    """
+    import io
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(int(channels))
+        wav.setsampwidth(2)
+        wav.setframerate(int(sample_rate))
+        wav.writeframes(pcm16)
+    return buffer.getvalue()
+
+
+def _build_piper(tts_cfg: dict) -> PiperSynthesizer:
+    """Build the Piper synthesizer from a `tts` config block (shared by the
+    microphone front end and the headless LXMF voice-reply path)."""
+    tts_voice = resolve_model_path(
+        str(tts_cfg.get("voice", "") or ""),
+        str(tts_cfg.get("voice_dir", "") or ""),
+        (".onnx",),
+    )
+    return PiperSynthesizer(
+        tts_voice,
+        speaker_id=int(tts_cfg.get("speaker_id", 0) or 0),
+        length_scale=float(tts_cfg.get("length_scale", 1.0) or 1.0),
+        volume=float(tts_cfg.get("volume", 1.0) or 1.0),
+    )
+
+
+def build_synthesizer(cfg: dict) -> Synthesizer:
+    """Build just the text-to-speech engine from a `tts` config block.
+
+    `build_engines` also needs a microphone, a wake word, and speech-to-text; a
+    headless front end that only synthesizes a reply — the LXMF gateway
+    answering a Sideband push-to-talk voice message with a Piper voice message —
+    uses this instead, so it needs only `piper-tts` (and PyAV to encode the
+    reply), none of the hardware voice stack.
+    """
+    tts_cfg = (cfg or {}).get("tts", {}) or {}
+    return _build_piper(tts_cfg)
+
+
 def build_engines(cfg: dict, trace=None) -> VoiceEngines:
     """Construct the real engine bundle from a `gateway.voice` config block."""
     wake_cfg = cfg.get("wake", {}) or {}
-    stt_cfg = cfg.get("stt", {}) or {}
     tts_cfg = cfg.get("tts", {}) or {}
     audio_cfg = cfg.get("audio", {}) or {}
 
@@ -584,11 +855,6 @@ def build_engines(cfg: dict, trace=None) -> VoiceEngines:
         str(wake_cfg.get("model_dir", "") or ""),
         (".onnx", ".tflite"),
     )
-    tts_voice = resolve_model_path(
-        str(tts_cfg.get("voice", "") or ""),
-        str(tts_cfg.get("voice_dir", "") or ""),
-        (".onnx",),
-    )
     return VoiceEngines(
         wake=OpenWakeWordDetector(
             wake_model,
@@ -596,18 +862,8 @@ def build_engines(cfg: dict, trace=None) -> VoiceEngines:
             inference_framework=str(wake_cfg.get("inference_framework", "onnx")),
         ),
         vad=_build_vad(cfg),
-        stt=WhisperTranscriber(
-            model=str(stt_cfg.get("model", "base.en") or "base.en"),
-            device=str(stt_cfg.get("device", "cpu") or "cpu"),
-            compute_type=str(stt_cfg.get("compute_type", "int8") or "int8"),
-            language=str(stt_cfg.get("language", "en") or "en"),
-        ),
-        tts=PiperSynthesizer(
-            tts_voice,
-            speaker_id=int(tts_cfg.get("speaker_id", 0) or 0),
-            length_scale=float(tts_cfg.get("length_scale", 1.0) or 1.0),
-            volume=float(tts_cfg.get("volume", 1.0) or 1.0),
-        ),
+        stt=build_transcriber(cfg),
+        tts=_build_piper(tts_cfg),
         audio=SoundDeviceAudio(
             input_device=str(audio_cfg.get("input_device", "") or ""),
             output_device=str(audio_cfg.get("output_device", "") or ""),

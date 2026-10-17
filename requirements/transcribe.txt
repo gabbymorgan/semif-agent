@@ -1,0 +1,20 @@
+# Voice-message transcription deps (optional).
+#
+# Only needed on a host whose LXMF gateway transcribes Sideband push-to-talk
+# voice messages (`gateway.lxmf.voice.enabled`) but that does NOT run the voice
+# gateway — `requirements/voice.txt` is hardware-dependent (PortAudio mic +
+# speaker, wake word, TTS) and none of that is required here. faster-whisper
+# decodes the Opus/OGG container itself (its bundled PyAV/ffmpeg) and
+# transcribes, and is lazy-imported by semif_agent/voice_transport.py, so the
+# core stays stdlib-only on every other host.
+#
+# Install with scripts/bootstrap.sh after enabling gateway.lxmf.voice (the
+# install plan picks it up on the next run), or manually:
+#   .runtime/venv/bin/pip install -r requirements/transcribe.txt
+faster-whisper==1.2.1
+# PyAV 19.0.0 (2026-09-29) REMOVED the `metadata_errors` argument to av.open(),
+# which faster-whisper 1.2.1 (the latest release) still passes — so any voice
+# message fails to decode with `TypeError: open() got an unexpected keyword
+# argument 'metadata_errors'`. faster-whisper's git master handles both, but it
+# is unreleased; pin PyAV below 19 until a release ships the fix.
+av<19

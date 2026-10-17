@@ -87,6 +87,7 @@ def test_minimum_plan_installs_nothing_heavy():
     assert plan["install_simplex_forward"] is False
     assert plan["install_browser"] is False
     assert plan["install_voice"] is False
+    assert plan["install_transcribe"] is False
     assert plan["packs"] == ["essentials"]
     assert plan["pack_requirements"] == []
 
@@ -177,6 +178,41 @@ def test_gateway_platforms_exclude_voice():
     assert plan["install_gateway_service"] is True
 
 
+def test_lxmf_voice_opts_into_transcription_dep():
+    answers = Answers(gateways=["lxmf"], lxmf_voice=True)
+    config = build_config(answers, _packs())
+    assert config["gateway"]["lxmf"]["voice"]["enabled"] is True
+    assert config["gateway"]["lxmf"]["voice"]["reply_with_voice"] is True
+    assert validate_config(config, _packs()) == []
+
+    plan = build_plan(answers, _packs())
+    assert plan["install_transcribe"] is True
+    # A voice reply also pulls the Piper TTS deps.
+    assert plan["install_lxmf_tts"] is True
+    # The rerun path re-derives the same plan from the written config.
+    assert plan_from_config(config, _packs())["install_transcribe"] is True
+    assert plan_from_config(config, _packs())["install_lxmf_tts"] is True
+
+
+def test_lxmf_voice_transcribe_only_skips_tts_dep():
+    answers = Answers(gateways=["lxmf"], lxmf_voice=True, lxmf_voice_reply=False)
+    config = build_config(answers, _packs())
+    assert config["gateway"]["lxmf"]["voice"]["enabled"] is True
+    assert config["gateway"]["lxmf"]["voice"]["reply_with_voice"] is False
+    plan = build_plan(answers, _packs())
+    assert plan["install_transcribe"] is True
+    assert plan["install_lxmf_tts"] is False
+    assert plan_from_config(config, _packs())["install_lxmf_tts"] is False
+
+
+def test_lxmf_without_voice_does_not_install_transcription():
+    answers = Answers(gateways=["lxmf"])
+    config = build_config(answers, _packs())
+    assert config["gateway"]["lxmf"]["voice"]["enabled"] is False
+    assert build_plan(answers, _packs())["install_transcribe"] is False
+    assert build_plan(answers, _packs())["install_lxmf_tts"] is False
+
+
 # --------------------------------------------------------------------------- #
 # Interview branching
 # --------------------------------------------------------------------------- #
@@ -201,6 +237,7 @@ def test_interview_collects_authoring_endpoints_and_packs():
             "bob",  # nextcloud username
             "pw",  # nextcloud app password
             "b",  # gateways: lxmf
+            "3",  # lxmf voice: transcribe + reply with voice
             "Europe/Paris",  # timezone
         ]
     )
@@ -223,6 +260,8 @@ def test_interview_collects_authoring_endpoints_and_packs():
     assert answers.packs == ["essentials", "simplex", "nextcloud"]
     assert answers.nextcloud_url == "https://nc.example"
     assert answers.gateways == ["lxmf"]
+    assert answers.lxmf_voice is True
+    assert answers.lxmf_voice_reply is True
     assert answers.timezone == "Europe/Paris"
 
 

@@ -352,7 +352,9 @@ fine-tuning loop — it is not yet the fine-tune itself.
   with prompt hashes, tokens and timing.
 - **Run lifecycle tracing** — `runs.jsonl` keyed by `run_id`, powering a
   Redux-DevTools-style dashboard.
-- **Messenger command gateway (SimpleX + LXMF)** — take commands and reply over DM.
+- **Messenger command gateway (SimpleX + LXMF)** — take commands and reply over DM,
+  including Sideband push-to-talk **voice messages** on LXMF (local transcription,
+  and voice replies synthesized with Piper).
 - **Voice gateway** — a local microphone front end: wake word + speech-to-text +
   text-to-speech, all local (openWakeWord / faster-whisper / Piper).
 - **Standalone bridge services** — an optional token-guarded localhost HTTP
@@ -410,8 +412,11 @@ packs/              skill packs, each cloned from its own repo (pack.<name>)
                     pack list lives in the semif-packs index repo (see PACKGEN.md)
 scripts/            bootstrap.sh, config_merge.py, voice-*.py, systemd/*.in
 requirements/       core.txt (test runner), engine.txt (local decision engine),
-                    transports.txt (websockets/lxmf), voice.txt
-                    (staging.txt = the union of the non-hardware files);
+                    transports.txt (websockets/lxmf), voice.txt (microphone
+                    stack), transcribe.txt (faster-whisper, LXMF voice
+                    messages), tts.txt (piper-tts + PyAV, LXMF voice replies),
+                    codec2.txt (pycodec2, LXMF Codec2 PTT);
+                    staging.txt = union of the non-hardware files;
                     a pack's own deps live with the pack at
                     packs/<name>/requirements.txt
 tests/              stdlib unit tests + tests/integration (real engine + LLM)
@@ -509,8 +514,10 @@ The script:
 4. creates `.runtime/venv` and installs only the needed dep files:
    `requirements/core.txt` always, `engine.txt` for a local engine,
    `transports.txt` when a SimpleX/LXMF transport is selected (`voice.txt` for
-   the voice stack, and each selected pack's own `packs/<name>/requirements.txt`
-   — e.g. the browser pack's Playwright deps);
+   the voice stack, `transcribe.txt` when `gateway.lxmf.voice` is enabled —
+   plus `tts.txt` when `voice.reply_with_voice` is on, and `codec2.txt` + system
+   `libcodec2` best-effort for non-HQ Codec2 PTT — and each selected pack's own
+   `packs/<name>/requirements.txt` — e.g. the browser pack's Playwright deps);
 5. for a local engine, downloads/sha256-verifies the GGUF into `.runtime/models/`
    and pre-fetches the HF tokenizer into `.runtime/hf/`;
 6. downloads/sha256-verifies the pinned `simplex-chat` binary **only** when a
@@ -583,6 +590,7 @@ Key blocks:
 | `queue` | `max_size` |
 | `skill_bodies` / `skill_packs` / `log` / `trace` / `category_registry` | runtime paths (anchored to the checkout) |
 | `gateway.simplex` | command gateway: ws_url, allowlist, batching |
+| `gateway.lxmf` | LXMF gateway: allowlist, Reticulum paths, `result_only` replies, Sideband voice transcription (`voice.enabled` + `voice.stt` model) and voice replies (`voice.reply_with_voice` + `voice.tts` voice) |
 | `gateway.voice` | voice gateway: wake/STT/TTS engines + models, audio devices, VAD |
 | `bridges.simplex` | forwarding bridge: host/port/token/ws_url |
 | `bridges.llm` | LLM bridge: host/port/token (model comes from `llm`) |
@@ -717,6 +725,32 @@ matches the peer's LXMF address (32 hex) or a best-effort display name.
 `desired_method` is `direct` (reliable link) or `opportunistic` (single packet),
 and an optional `propagation_node` enables store-and-forward. Add the printed
 address as a contact in your LXMF client and DM it.
+
+**Voice commands (Sideband push-to-talk).** Set
+`gateway.lxmf.voice.enabled: true` and a Sideband PTT voice message is
+transcribed into a command, just like typed text. HQ PTT (Opus/OGG) is decoded
+and transcribed by faster-whisper, which needs only `requirements/transcribe.txt`
+(installed by the install plan — no microphone, no voice stack). Non-HQ Codec2
+PTT is decoded by the optional `pycodec2` bindings (`requirements/codec2.txt`,
+installed best-effort alongside the system `libcodec2`); without it a Codec2
+message is reported back rather than dropped. The audio is transient and never
+leaves the machine. The model is `gateway.lxmf.voice.stt.model` (default
+`base.en`).
+
+**Voice replies.** With `gateway.lxmf.voice.reply_with_voice: true` (the
+default), a chat that last messaged by voice is answered with a synthesized
+voice message: the reply text is spoken with Piper and sent back as a Sideband
+HQ push-to-talk message, with the text also carried as the message content so a
+text-only client still sees it. A later text message from that chat reverts it to
+text replies. This needs only `piper-tts` + PyAV (`requirements/tts.txt`,
+installed by the install plan — still no microphone); a missing stack or a
+synthesis failure falls back to a text reply rather than dropping it. The voice
+is `gateway.lxmf.voice.tts.voice` (default `en_US-lessac-medium`).
+
+**Result-only replies.** The LXMF gateway sends only the skill's result line:
+the scheduler's queue/urgency bookkeeping is dropped and the `<skill>: ok —`
+wrapper is stripped, so a DM is the answer, not the internals. Override with
+`gateway.lxmf.result_only: false` for the full scheduler output.
 
 > **Gateway isolation is non-negotiable.** The gateway takes commands and sends
 > replies — nothing else. It never reads history, shows or creates invite links,

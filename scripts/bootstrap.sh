@@ -306,7 +306,7 @@ fi
 IFS=$'\x1f' read -r PLAN_ENGINE PLAN_AUTHORING PLAN_PACKS PLAN_GATEWAYS \
   PLAN_GATEWAY_PLATFORMS PLAN_BRIDGE_PACKS PLAN_INSTALL_ENGINE PLAN_BRIDGE_SVC \
   PLAN_GATEWAY_SVC PLAN_SIMPLEX_BIN PLAN_SIMPLEX_FWD PLAN_BROWSER PLAN_VOICE \
-  PLAN_PACK_REQS < <(
+  PLAN_TRANSCRIBE PLAN_LXMF_TTS PLAN_PACK_REQS < <(
   python3 - "$PLAN" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
@@ -326,6 +326,8 @@ print("\x1f".join([
     flag("install_simplex_forward"),
     flag("install_browser"),
     flag("install_voice"),
+    flag("install_transcribe"),
+    flag("install_lxmf_tts"),
     ",".join(p.get("pack_requirements", [])),
 ]))
 PY
@@ -350,7 +352,7 @@ NEED_TRANSPORTS=0
 [[ ",$PLAN_GATEWAYS," == *",lxmf,"* ]] && NEED_TRANSPORTS=1
 
 echo "== plan: engine=$PLAN_ENGINE | authoring=$PLAN_AUTHORING | packs=$PLAN_PACKS"
-echo "         gateways=${PLAN_GATEWAYS:-none} | install: engine=$PLAN_INSTALL_ENGINE transports=$NEED_TRANSPORTS bridge=$PLAN_BRIDGE_SVC gateway=$PLAN_GATEWAY_SVC browser=$PLAN_BROWSER voice=$PLAN_VOICE"
+echo "         gateways=${PLAN_GATEWAYS:-none} | install: engine=$PLAN_INSTALL_ENGINE transports=$NEED_TRANSPORTS bridge=$PLAN_BRIDGE_SVC gateway=$PLAN_GATEWAY_SVC browser=$PLAN_BROWSER voice=$PLAN_VOICE transcribe=$PLAN_TRANSCRIBE lxmf_tts=$PLAN_LXMF_TTS"
 echo "         pack deps=${PLAN_PACK_REQS:-none}"
 
 # The live config may be split (config.json includes config/*.json); merge it so
@@ -640,6 +642,41 @@ if [[ "$PLAN_VOICE" = 1 ]]; then
   "$PIP" install --no-deps openwakeword==0.6.0
 fi
 
+# --- stage 3b2: optional voice-message transcription ---------------------------
+# The LXMF gateway can transcribe Sideband push-to-talk voice messages
+# (`gateway.lxmf.voice.enabled`). That needs only faster-whisper (it decodes the
+# Opus/OGG container itself), NOT the hardware voice stack above; lazy-imported,
+# so a host that never enables it still runs every other front end.
+if [[ "$PLAN_TRANSCRIBE" = 1 ]]; then
+  echo "== installing voice-message transcription dep (faster-whisper)"
+  "$PIP" install -r "$REPO_ROOT/requirements/transcribe.txt"
+
+  # Codec2 (Sideband's non-HQ PTT) is optional and native: `pycodec2` compiles
+  # against the system libcodec2. Best-effort — a host that can't build it still
+  # transcribes HQ (Opus) voice messages and reports Codec2 ones as unsupported.
+  if ! "$PYTHON" -c 'import pycodec2' 2>/dev/null; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libcodec2'; then
+      echo "== installing codec2 system library (optional)"
+      sudo apt-get update || true
+      sudo apt-get install -y libcodec2-dev \
+        || echo "WARN: libcodec2-dev install failed; Codec2 voice will be unavailable" >&2
+    fi
+    echo "== installing Codec2 python bindings (optional)"
+    "$PIP" install -r "$REPO_ROOT/requirements/codec2.txt" \
+      || echo "WARN: pycodec2 build failed; Codec2 voice will be unavailable (HQ Opus still works)" >&2
+  fi
+fi
+
+# --- stage 3b3: optional LXMF voice replies (Piper) -----------------------------
+# When the LXMF gateway replies to a voice chat with a synthesized voice message
+# (`gateway.lxmf.voice.reply_with_voice`), it needs Piper (text-to-speech) and
+# PyAV (Opus/OGG encoding). Still no microphone stack — lazy-imported, so a host
+# that only transcribes installs nothing extra.
+if [[ "$PLAN_LXMF_TTS" = 1 ]]; then
+  echo "== installing voice-reply deps (piper-tts + PyAV)"
+  "$PIP" install -r "$REPO_ROOT/requirements/tts.txt"
+fi
+
 # --- stage 3c: pack-declared python deps ---------------------------------------
 # A pack owns the python deps its skills/bridge need, shipped as
 # packs/<name>/requirements.txt (standard pip format). The install plan lists the
@@ -733,6 +770,49 @@ if [[ "$PLAN_VOICE" = 1 ]]; then
   echo "== downloading voice models (openWakeWord + Piper + faster-whisper)"
   HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" --config "$MERGED_CONFIG" \
     || echo "WARN: voice model download failed; re-run scripts/voice-models.py" >&2
+fi
+
+# --- stage 5c: LXMF voice-message STT model ------------------------------------
+# Warm the faster-whisper model the LXMF gateway uses for Sideband voice
+# messages into the HF cache (the model name comes from gateway.lxmf.voice.stt).
+# Best-effort: faster-whisper would download it on first use anyway.
+if [[ "$PLAN_TRANSCRIBE" = 1 ]]; then
+  LXMF_STT_MODEL="$(python3 - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    print(""); raise SystemExit(0)
+print(((cfg.get("gateway", {}) or {}).get("lxmf", {}) or {}).get("voice", {})
+      .get("stt", {}).get("model", "") or "")
+PY
+)"
+  echo "== warming voice-message STT model (${LXMF_STT_MODEL:-base.en})"
+  HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" \
+    --config "$MERGED_CONFIG" --skip-wake --skip-tts --stt "$LXMF_STT_MODEL" \
+    || echo "WARN: STT model download failed; it will download on first use" >&2
+fi
+
+# --- stage 5d: LXMF voice-reply TTS voice --------------------------------------
+# Download the Piper voice the LXMF gateway uses for a voice reply
+# (`gateway.lxmf.voice.tts.voice`) into .runtime/voice/tts. Best-effort: the
+# gateway reports the missing model on first use.
+if [[ "$PLAN_LXMF_TTS" = 1 ]]; then
+  LXMF_TTS_VOICE="$(python3 - "$MERGED_CONFIG" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    print(""); raise SystemExit(0)
+print(((cfg.get("gateway", {}) or {}).get("lxmf", {}) or {}).get("voice", {})
+      .get("tts", {}).get("voice", "") or "")
+PY
+)"
+  echo "== downloading voice-reply TTS voice (${LXMF_TTS_VOICE:-en_US-lessac-medium})"
+  HF_HOME="$HF_CACHE" "$PYTHON" "$REPO_ROOT/scripts/voice-models.py" \
+    --config "$MERGED_CONFIG" --skip-wake --skip-stt --tts "$LXMF_TTS_VOICE" \
+    --tts-dir "$RUNTIME/voice/tts" \
+    || echo "WARN: TTS voice download failed; re-run scripts/voice-models.py" >&2
 fi
 
 # --- stage 6: simplex-chat daemon binary (only when needed) --------------------

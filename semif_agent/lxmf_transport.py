@@ -31,6 +31,91 @@ MessageHandler = Callable[[InboundDict], None]
 #: Zero-argument callback invoked once the router is ready to receive.
 ConnectedHandler = Callable[[], None]
 
+#: The LXMF `FIELD_AUDIO` (0x07) field a Sideband push-to-talk voice message
+#: rides in. `LXMF` is optional and lazy-imported, so its stable, committed wire
+#: constants are mirrored here (the same way `simplex_ws` mirrors the v7 shapes).
+FIELD_AUDIO = 0x07
+
+#: Audio modes — the first element of a `FIELD_AUDIO` value (mirrors
+#: `LXMF.AM_*`). `AM_OPUS_OGG` is a complete OGG/Opus container a decoder (PyAV,
+#: which `faster-whisper` bundles) reads directly; the Codec2 modes are raw
+#: frames decoded by `pycodec2`.
+AM_OPUS_OGG = 0x10
+AUDIO_MODE_NAMES = {
+    0x01: "codec2_450pwb", 0x02: "codec2_450", 0x03: "codec2_700c",
+    0x04: "codec2_1200", 0x05: "codec2_1300", 0x06: "codec2_1400",
+    0x07: "codec2_1600", 0x08: "codec2_2400", 0x09: "codec2_3200",
+    0x10: "opus_ogg", 0x11: "opus_lbw", 0x12: "opus_mbw", 0x13: "opus_ptt",
+    0x14: "opus_rt_hdx", 0x15: "opus_rt_fdx", 0x16: "opus_standard",
+    0x17: "opus_hq", 0x18: "opus_broadcast", 0x19: "opus_lossless",
+}
+#: Codec2 audio modes -> the codec2 bitrate (bits/s) they decode at. `pycodec2`
+#: has bindings for these; 450PWB/450 (0x01/0x02) have none, so they stay
+#: undecodable. (Mirrors Sideband's `audioproc.codec2_modes`.)
+CODEC2_MODE_RATES = {
+    0x03: 700, 0x04: 1200, 0x05: 1300, 0x06: 1400,
+    0x07: 1600, 0x08: 2400, 0x09: 3200,
+}
+
+
+def audio_mode_name(codec: int) -> str:
+    """A human-readable name for an audio mode id (e.g. `AM_OPUS_OGG` ->
+    `opus_ogg`); an unknown id is rendered as hex."""
+    return AUDIO_MODE_NAMES.get(codec, f"0x{codec:02x}")
+
+
+def audio_decode_kind(codec: int) -> str:
+    """The decode path for an audio mode.
+
+    `"opus_ogg"` (a self-contained OGG/Opus container), `"codec2"` (raw Codec2
+    frames), or `"unknown"` (no decode path — e.g. the raw Opus `AM_OPUS_*`
+    modes and the binding-less 450 Codec2 modes).
+    """
+    if codec == AM_OPUS_OGG:
+        return "opus_ogg"
+    if codec in CODEC2_MODE_RATES:
+        return "codec2"
+    return "unknown"
+
+
+def parse_audio_field(value: Any) -> dict[str, Any] | None:
+    """Normalize an LXMF `FIELD_AUDIO` value into a plain dict.
+
+    The wire value is `[audio_mode, data]` (see `LXMF.FIELD_AUDIO`): an integer
+    codec id and the raw audio bytes. Returns
+    `{"codec", "codec_name", "data", "kind", "codec2_rate"}` or None when
+    malformed. `kind` is the decode path (`opus_ogg`/`codec2`/`unknown`);
+    `codec2_rate` is the bitrate for a Codec2 mode, else None.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    data = value[1]
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    try:
+        codec = int(value[0])
+    except (TypeError, ValueError):
+        return None
+    return {
+        "codec": codec,
+        "codec_name": audio_mode_name(codec),
+        "data": bytes(data),
+        "kind": audio_decode_kind(codec),
+        "codec2_rate": CODEC2_MODE_RATES.get(codec),
+    }
+
+
+def audio_fields(audio: bytes | None) -> dict[int, Any] | None:
+    """The LXMF fields for an outbound voice reply, or None for a text message.
+
+    A voice reply rides `FIELD_AUDIO` as `[AM_OPUS_OGG, ogg_bytes]` — the
+    Sideband HQ push-to-talk shape. Pure so the wire construction is testable
+    without a Reticulum router.
+    """
+    if not audio:
+        return None
+    return {FIELD_AUDIO: [AM_OPUS_OGG, bytes(audio)]}
+
 
 def _as_text(value: Any) -> str:
     """Best-effort UTF-8 text for a `str`/`bytes`/`None` LXMF field."""
@@ -87,12 +172,24 @@ def normalize_message(message: Any) -> InboundDict:
     if source is not None:
         display_name = _as_text(getattr(source, "display_name", None))
 
+    fields = getattr(message, "fields", None)
+    if not isinstance(fields, dict):
+        fields = {}
+    # A Sideband push-to-talk voice message carries its Opus/Codec2 payload in
+    # `FIELD_AUDIO` and an empty content; surface it as a normalized `audio` dict
+    # so a front end can transcribe it without knowing the wire shape.
+    audio = None
+    if FIELD_AUDIO in fields:
+        audio = parse_audio_field(fields.get(FIELD_AUDIO))
+
     return {
         "source_hash": source_hash,
         "display_name": display_name or None,
         "title": title,
         "content": content,
         "timestamp": getattr(message, "timestamp", None),
+        "fields": fields,
+        "audio": audio,
         "raw": message,
     }
 
@@ -138,7 +235,11 @@ class LxmfDaemon:
         self._reticulum = None
         self._destination = None
         self._address = ""
-        self._outbound: "queue.Queue[tuple[str, str] | None]" = queue.Queue()
+        #: Outbound items are `(chat_id, text, audio)`; `audio` is an OGG/Opus
+        #: container for a Sideband HQ push-to-talk voice reply, else None.
+        self._outbound: "queue.Queue[tuple[str, str, bytes | None] | None]" = (
+            queue.Queue()
+        )
         self._stop = threading.Event()
         self._on_message: MessageHandler | None = None
 
@@ -237,12 +338,19 @@ class LxmfDaemon:
         while not self._stop.wait(self._announce_wait()):
             self._announce()
 
-    def enqueue(self, chat_id: str | None, text: str = "") -> None:
-        """Queue an outbound send. `chat_id=None` is the stop sentinel."""
+    def enqueue(
+        self, chat_id: str | None, text: str = "", audio: bytes | None = None
+    ) -> None:
+        """Queue an outbound send. `chat_id=None` is the stop sentinel.
+
+        `audio` is an OGG/Opus container: it rides the LXMF `FIELD_AUDIO` field
+        (a Sideband HQ push-to-talk voice reply) with `text` as the message
+        content, so a text-only client still sees the reply.
+        """
         if chat_id is None:
             self._outbound.put(None)
         else:
-            self._outbound.put((str(chat_id), text))
+            self._outbound.put((str(chat_id), text, audio))
 
     def close(self) -> None:
         self._stop.set()
@@ -309,16 +417,26 @@ class LxmfDaemon:
             item = self._outbound.get()
             if item is None:
                 return
-            chat_id, text = item
+            chat_id, text, audio = item
             try:
-                self.send(chat_id, text)
+                self.send(chat_id, text, audio=audio)
             except Exception as exc:
                 self._event(
                     "lxmf_send_failed", contact=chat_id, message=str(exc)[:300]
                 )
 
-    def send(self, destination_hex: str, text: str, timeout: float = 15.0) -> None:
+    def send(
+        self,
+        destination_hex: str,
+        text: str,
+        audio: bytes | None = None,
+        timeout: float = 15.0,
+    ) -> None:
         """Send `text` to an LXMF address (destination hash hex).
+
+        When `audio` (an OGG/Opus container) is given it is attached in the
+        LXMF `FIELD_AUDIO` field as a Sideband HQ push-to-talk voice message
+        (`[AM_OPUS_OGG, audio]`), with `text` as the message content.
 
         Recalls the peer identity from the network; when the path is not yet
         known it requests it and waits briefly. Raises (never silently drops)
@@ -351,9 +469,14 @@ class LxmfDaemon:
             if self.desired_method == "opportunistic"
             else LXMF.LXMessage.DIRECT
         )
-        message = LXMF.LXMessage(dest, self._destination, text, desired_method=method)
+        fields = audio_fields(audio)
+        message = LXMF.LXMessage(
+            dest, self._destination, text, desired_method=method, fields=fields
+        )
         self._router.handle_outbound(message)
-        self._event("lxmf_sent", contact=destination_hex, chars=len(text))
+        self._event(
+            "lxmf_sent", contact=destination_hex, chars=len(text), audio=bool(audio)
+        )
 
     # ---- tracing ----
 

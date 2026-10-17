@@ -1,0 +1,15 @@
+# Codec2 voice-message decoding (optional).
+#
+# Sideband's non-HQ push-to-talk messages carry raw Codec2 frames
+# (`LXMF.AM_CODEC2_*`); decoding them needs the `pycodec2` bindings, which
+# compile against the system `libcodec2` (Debian/Ubuntu: `libcodec2-dev`). Only
+# needed for `gateway.lxmf.voice` when the sender uses non-HQ PTT — HQ Opus
+# works with `requirements/transcribe.txt` alone. Lazy-imported by
+# semif_agent/voice_transport.py, so the core stays stdlib-only; a missing
+# decoder is reported per-message, never a crash.
+#
+# Install with scripts/bootstrap.sh after enabling gateway.lxmf.voice (the plan
+# installs it best-effort), or manually:
+#   apt-get install -y libcodec2-dev
+#   .runtime/venv/bin/pip install -r requirements/codec2.txt
+pycodec2==4.1.1

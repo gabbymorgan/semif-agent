@@ -838,6 +838,14 @@ def _build_gateway_adapter(platform: str, cfg: dict, trace):
         # Contain Reticulum's config + identity under the checkout's .runtime/.
         cfg.setdefault("config_dir", str(REPO_ROOT / ".runtime" / "lxmf" / "reticulum"))
         cfg.setdefault("storage_path", str(REPO_ROOT / ".runtime" / "lxmf" / "router"))
+        # A voice reply's Piper voice lives with the voice gateway's, under the
+        # checkout's .runtime/ (bootstrap downloads it there).
+        voice_cfg = dict(cfg.get("voice") or {})
+        tts_cfg = dict(voice_cfg.get("tts") or {})
+        if not tts_cfg.get("voice_dir"):
+            tts_cfg["voice_dir"] = str(REPO_ROOT / ".runtime" / "voice" / "tts")
+        voice_cfg["tts"] = tts_cfg
+        cfg["voice"] = voice_cfg
         return LxmfAdapter(cfg, trace=trace)
     if platform == "voice":
         from .gateway.voice import VoiceAdapter

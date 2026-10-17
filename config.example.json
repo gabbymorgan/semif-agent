@@ -157,7 +157,27 @@
       "storage_path": "",
       "home_channel": "",
       "reply_prefix": "",
-      "text_batch_delay": 0.8
+      "text_batch_delay": 0.8,
+      "result_only": true,
+      "voice": {
+        "enabled": false,
+        "reply_with_voice": true,
+        "max_speak_chars": 600,
+        "reply_bitrate": 24000,
+        "stt": {
+          "model": "base.en",
+          "device": "cpu",
+          "compute_type": "int8",
+          "language": "en"
+        },
+        "tts": {
+          "voice": "en_US-lessac-medium",
+          "voice_dir": "",
+          "speaker_id": 0,
+          "length_scale": 1.0,
+          "volume": 1.0
+        }
+      }
     },
     "voice": {
       "enabled": false,

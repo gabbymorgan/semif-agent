@@ -26,6 +26,10 @@
 sounddevice==0.5.6
 onnxruntime==1.30.0
 faster-whisper==1.2.1
+# PyAV 19.0.0 removed the `metadata_errors` argument that faster-whisper 1.2.1
+# still passes to av.open(), breaking every transcription; see
+# requirements/transcribe.txt for the full note.
+av<19
 piper-tts==1.8.0
 webrtcvad-wheels==2.0.14.post1
 # openwakeword runtime deps (installed here because openwakeword is --no-deps).

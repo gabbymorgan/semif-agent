@@ -1,0 +1,22 @@
+# Voice-reply (text-to-speech) deps for the LXMF gateway (optional).
+#
+# When the LXMF gateway handles Sideband push-to-talk voice messages
+# (`gateway.lxmf.voice.enabled`) and is configured to reply with voice
+# (`gateway.lxmf.voice.reply_with_voice`, the default), it synthesizes the reply
+# with Piper and encodes it to the Opus/OGG container Sideband's HQ push-to-talk
+# uses (`LXMF.AM_OPUS_OGG`). That needs piper-tts (text-to-speech) and PyAV
+# (libopus encoding) — NOT the hardware voice stack in `requirements/voice.txt`
+# (no microphone, wake word, or speaker) and NOT transcription
+# (`requirements/transcribe.txt`, which already pulls PyAV for decoding).
+# Lazy-imported by semif_agent/voice_transport.py, so the core stays stdlib-only;
+# a missing stack makes the reply fall back to text, never a crash.
+#
+# Install with scripts/bootstrap.sh after enabling gateway.lxmf.voice (the
+# install plan picks it up on the next run), or manually:
+#   .runtime/venv/bin/pip install -r requirements/tts.txt
+piper-tts==1.8.0
+onnxruntime==1.30.0
+# PyAV 19.0.0 removed the `metadata_errors` argument that faster-whisper 1.2.1
+# still passes to av.open() (see requirements/transcribe.txt); pin below 19 here
+# too so the shared PyAV is the one both paths expect.
+av<19

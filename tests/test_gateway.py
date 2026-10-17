@@ -10,6 +10,7 @@ live-daemon integration concern, not a unit test.
 
 import asyncio
 import json
+import queue
 import time
 
 from semif_agent.cli import _gateway_address_callback
@@ -547,6 +548,350 @@ def test_lxmf_denies_unknown_sender_without_dispatch():
     adapter._on_item({"source_hash": "cd" * 16, "content": "hi"})
     time.sleep(0.1)
     assert seen == []
+
+
+def test_lxmf_adapter_is_result_only():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    # The LXMF gateway replies with the skill's result line only (drop the
+    # scheduler's bookkeeping and the `<skill>: ok —` wrapper), overridable via
+    # `gateway.lxmf.result_only: false`.
+    assert LxmfAdapter({}).result_only is True
+
+
+def test_lxmf_service_sends_result_only(tmp_path):
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    scheduler = build_scheduler(tmp_path)
+    service = GatewayService(scheduler, LxmfAdapter({"allow_all_users": True}))
+    service._reply("lxmf", "c", "time.now: ok — 12:00", kind="result")
+    service._reply("lxmf", "c", "queued", kind="status")
+    service._reply("lxmf", "c", "Which account?", kind="question")
+    assert drain_outbound(service) == ["12:00", "Which account?"]
+
+
+def test_lxmf_config_can_turn_result_only_off(tmp_path):
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    scheduler = build_scheduler(tmp_path)
+    service = GatewayService(
+        scheduler,
+        LxmfAdapter({"allow_all_users": True}),
+        config={"lxmf": {"result_only": False}},
+    )
+    service._reply("lxmf", "c", "time.now: ok — 12:00", kind="result")
+    service._reply("lxmf", "c", "queued", kind="status")
+    assert drain_outbound(service) == ["time.now: ok — 12:00", "queued"]
+
+
+# ---- LXMF voice (Sideband push-to-talk) messages ----
+
+OPUS_AUDIO = {
+    "codec": 0x10,
+    "codec_name": "opus_ogg",
+    "data": b"OggS-payload",
+    "kind": "opus_ogg",
+    "codec2_rate": None,
+}
+CODEC2_AUDIO = {
+    "codec": 0x08,
+    "codec_name": "codec2_2400",
+    "data": b"\x01\x02\x03\x04\x05\x06",
+    "kind": "codec2",
+    "codec2_rate": 2400,
+}
+
+
+class FakeTranscriber:
+    """A transcriber double: records the raw payloads, returns fixed text."""
+
+    def __init__(self, text="set a timer for five minutes", error=None):
+        self.text = text
+        self.error = error
+        self.calls: list = []
+
+    def transcribe_bytes(self, data):
+        self.calls.append(data)
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
+def _wait(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_lxmf_transcribes_voice_message_into_a_command():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    transcriber = FakeTranscriber("what time is it")
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}}, transcriber=transcriber
+    )
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item(
+        {
+            "source_hash": "ab" * 16,
+            "content": "",
+            "display_name": None,
+            "audio": dict(OPUS_AUDIO),
+        }
+    )
+    assert _wait(lambda: seen)
+    assert seen[0].text == "what time is it"
+    assert seen[0].chat_id == "ab" * 16
+    assert transcriber.calls == [b"OggS-payload"]
+
+
+def test_lxmf_voice_disabled_ignores_audio():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    # A transcriber is present, but `voice.enabled` is not — nothing runs.
+    adapter = LxmfAdapter({"allow_all_users": True}, transcriber=FakeTranscriber("hi"))
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    time.sleep(0.1)
+    assert seen == []
+
+
+def test_lxmf_voice_unsupported_codec_notifies_instead_of_dropping():
+    from semif_agent.gateway.lxmf import LxmfAdapter, VOICE_UNSUPPORTED_MESSAGE
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber(),
+    )
+    adapter._outbound = queue.Queue()
+    adapter._on_item(
+        {
+            "source_hash": "ab" * 16,
+            "content": "",
+            "audio": {"codec": 0x01, "codec_name": "codec2_450pwb", "data": b"x",
+                      "kind": "unknown", "codec2_rate": None},
+        }
+    )
+    message = adapter._outbound.get(timeout=2)
+    assert message.chat_id == "ab" * 16
+    assert message.text == VOICE_UNSUPPORTED_MESSAGE
+
+
+def test_lxmf_transcribes_codec2_voice_message(monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "check_codec2_requirements", lambda: (True, None))
+    decoded = []
+
+    def fake_decode(data, rate):
+        decoded.append((data, rate))
+        return b"\x00\x00" * 320  # 20 ms at 8 kHz
+
+    monkeypatch.setattr(lxmf, "decode_codec2", fake_decode)
+    transcriber = FakeTranscriber("turn on the kitchen light")
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}}, transcriber=transcriber
+    )
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(CODEC2_AUDIO)}
+    )
+    assert _wait(lambda: seen)
+    assert seen[0].text == "turn on the kitchen light"
+    assert decoded == [(CODEC2_AUDIO["data"], 2400)]
+    # The Codec2 PCM is wrapped in a WAV before transcription.
+    assert transcriber.calls and transcriber.calls[0][:4] == b"RIFF"
+
+
+def test_lxmf_codec2_unavailable_notifies(monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter, VOICE_CODEC2_MESSAGE
+
+    monkeypatch.setattr(lxmf, "check_codec2_requirements", lambda: (False, "no pycodec2"))
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber(),
+    )
+    adapter._outbound = queue.Queue()
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(CODEC2_AUDIO)}
+    )
+    message = adapter._outbound.get(timeout=2)
+    assert message.text == VOICE_CODEC2_MESSAGE
+
+
+def test_lxmf_transcribe_failure_notifies():
+    from semif_agent.gateway.lxmf import LxmfAdapter, VOICE_FAILED_MESSAGE
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber(error=RuntimeError("boom")),
+    )
+    adapter._outbound = queue.Queue()
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    message = adapter._outbound.get(timeout=2)
+    assert message.text == VOICE_FAILED_MESSAGE
+    assert seen == []
+
+
+def test_lxmf_voice_keeps_caption_when_transcription_fails():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber(error=RuntimeError("boom")),
+    )
+    adapter._outbound = queue.Queue()
+    seen: list = []
+    adapter._on_inbound = seen.append
+    adapter._on_item(
+        {
+            "source_hash": "ab" * 16,
+            "content": "please create a task",
+            "audio": dict(OPUS_AUDIO),
+        }
+    )
+    assert _wait(lambda: seen)
+    assert seen[0].text == "please create a task"
+    assert adapter._outbound.empty()
+
+
+# ---- LXMF voice replies (Piper -> Opus/OGG) ----
+
+class FakeSynthesizer:
+    """A synthesizer double: records texts, returns fixed PCM/rate."""
+
+    def __init__(self, pcm=b"\x00\x00" * 100, sample_rate=22050, error=None):
+        self.pcm = pcm
+        self.sample_rate = sample_rate
+        self.error = error
+        self.calls: list = []
+
+    def synthesize(self, text):
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        return self.pcm, self.sample_rate
+
+
+def _outbound(chat, text):
+    from semif_agent.gateway.base import OutboundMessage
+
+    return OutboundMessage(chat_id=chat, text=text)
+
+
+def test_lxmf_voice_message_marks_chat_and_replies_with_voice(monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OggS")
+    synth = FakeSynthesizer()
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber("what time is it"),
+        synthesizer=synth,
+    )
+    # A voice message marks the chat for voice replies.
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    assert "ab" * 16 in adapter._voice_chats
+    audio = adapter._voice_reply(_outbound("ab" * 16, "It is 12:00."))
+    assert audio == b"OggS"
+    assert synth.calls == ["It is 12:00."]
+
+
+def test_lxmf_text_chat_replies_with_text():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    synth = FakeSynthesizer()
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber("hi"),
+        synthesizer=synth,
+    )
+    # No voice message from this chat: a text reply.
+    assert adapter._voice_reply(_outbound("ab" * 16, "hello")) is None
+    assert synth.calls == []
+
+
+def test_lxmf_text_message_reverts_chat_to_text_replies():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    synth = FakeSynthesizer()
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber("hi"),
+        synthesizer=synth,
+    )
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    assert "ab" * 16 in adapter._voice_chats
+    adapter._on_item({"source_hash": "ab" * 16, "content": "now in text"})
+    assert "ab" * 16 not in adapter._voice_chats
+
+
+def test_lxmf_reply_with_voice_disabled_sends_text():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    synth = FakeSynthesizer()
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True, "reply_with_voice": False}},
+        transcriber=FakeTranscriber("hi"),
+        synthesizer=synth,
+    )
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    assert "ab" * 16 not in adapter._voice_chats
+    assert adapter._voice_reply(_outbound("ab" * 16, "hello")) is None
+
+
+def test_lxmf_voice_reply_falls_back_to_text_on_synth_failure():
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    synth = FakeSynthesizer(error=RuntimeError("piper boom"))
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True}},
+        transcriber=FakeTranscriber("hi"),
+        synthesizer=synth,
+    )
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    assert adapter._voice_reply(_outbound("ab" * 16, "hello")) is None
+
+
+def test_lxmf_voice_reply_bounds_length(monkeypatch):
+    import semif_agent.gateway.lxmf as lxmf
+    from semif_agent.gateway.lxmf import LxmfAdapter
+
+    monkeypatch.setattr(lxmf, "pcm_to_opus_ogg", lambda pcm, rate, bitrate=0: b"OggS")
+    synth = FakeSynthesizer()
+    adapter = LxmfAdapter(
+        {"allow_all_users": True, "voice": {"enabled": True, "max_speak_chars": 10}},
+        transcriber=FakeTranscriber("hi"),
+        synthesizer=synth,
+    )
+    adapter._on_item(
+        {"source_hash": "ab" * 16, "content": "", "audio": dict(OPUS_AUDIO)}
+    )
+    adapter._voice_reply(_outbound("ab" * 16, "one two three four five six"))
+    assert len(synth.calls[0]) <= 10
 
 
 # ---- service: multiple platforms ----

@@ -276,7 +276,11 @@ gateway/        messenger COMMAND intake/reply — and nothing else. base.py:
                 SimplexAdapter — command simplex-chat daemon over its JSON
                 WebSocket API (lazy `websockets`, allowlist, batching,
                 structured `/_send`). lxmf.py: LxmfAdapter — LXMF/Reticulum
-                (lazy `lxmf`), in-process, allowlist + batching. voice.py:
+                (lazy `lxmf`), in-process, allowlist + batching, plus Sideband
+                push-to-talk voice commands (transcribe `FIELD_AUDIO` locally
+                when `gateway.lxmf.voice.enabled`) and voice replies (Piper ->
+                Opus/OGG back in `FIELD_AUDIO` when `voice.reply_with_voice`).
+                voice.py:
                 VoiceAdapter — the local microphone front end (wake word +
                 speech-to-text + text-to-speech) over the neutral
                 `semif_agent/voice_transport.py`; no remote peer and no
@@ -337,9 +341,10 @@ simplex_ws.py   neutral SimpleX daemon protocol shared by the command gateway
 lxmf_transport.py
                 neutral LXMF (Reticulum) transport: one in-process Reticulum
                 instance + LXMF router, persisted delivery identity, announce
-                loop, inbound normalization, outbound send queue. Lazy `RNS`/
-                `LXMF` imports keep the module stdlib-only. Knows nothing about
-                the scheduler or the gateway.
+                loop, inbound normalization (text + the `FIELD_AUDIO`/`AM_*`
+                Sideband PTT voice payload, via `parse_audio_field`), outbound
+                send queue. Lazy `RNS`/`LXMF` imports keep the module
+                stdlib-only. Knows nothing about the scheduler or the gateway.
 voice_transport.py
                 neutral voice transport: a 16 kHz mono capture loop with an
                 always-on wake word (openWakeWord), VAD endpointing
@@ -647,6 +652,47 @@ CLI, unit tests (24) + integration tests (2).
   and one scheduler (`--platform simplex,lxmf|all`). DMs only for the first cut;
   groups/attachments/reactions are future work. See "### gateway (messenger
   intake)".
+- **LXMF voice commands (Sideband push-to-talk)** (Oct 2026): the LXMF gateway
+  accepts voice messages, so a Sideband PTT send is a command like any other.
+  Sideband delivers a PTT message with an empty body and the audio in
+  `LXMF.FIELD_AUDIO` (`[audio_mode, data]`); `lxmf_transport.normalize_message`
+  extracts it through `parse_audio_field`, which maps the `LXMF.AM_*` modes to a
+  decode `kind` (`opus_ogg`/`codec2`/`unknown`) and a `codec2_rate`, and the
+  adapter transcribes it when `gateway.lxmf.voice.enabled` is set. HQ PTT is
+  Opus/OGG, decoded and transcribed by
+  `voice_transport.WhisperTranscriber.transcribe_bytes` (no separate decode step;
+  faster-whisper bundles PyAV); non-HQ Codec2 is decoded to 8 kHz PCM by
+  `voice_transport.decode_codec2` (the optional `pycodec2` bindings), wrapped in a
+  WAV, and transcribed the same way. The Opus path needs only faster-whisper
+  (`requirements/transcribe.txt`) and Codec2 additionally `pycodec2`
+  (`requirements/codec2.txt`), **not** the microphone voice stack, so the install
+  plan's `install_transcribe` flag (from `gateway.lxmf.voice.enabled`) drives a
+  separate bootstrap stage (the Codec2 bindings best-effort, native) and the
+  `check_requirements` guard stays lxmf-only. Transcription runs on a dedicated
+  single-slot worker thread (the Reticulum callback thread only enqueues, since
+  a slow decode would stall the router); a failure, a missing decoder, an
+  undecodable mode, or a missing transcriber is traced and reported back to the
+  sender rather than silently dropped, and the audio is transient — never stored
+  or exposed, exactly like the voice gateway. See "### gateway (messenger
+  intake)".
+- **LXMF voice replies (Piper -> Sideband PTT)** (Oct 2026): a chat that last
+  messaged by voice is answered with a voice message when
+  `gateway.lxmf.voice.reply_with_voice` is on (the default): the adapter
+  synthesizes the reply text with Piper (`voice_transport.build_synthesizer`
+  from the `voice.tts` block), encodes it to an OGG/Opus container
+  (`voice_transport.pcm_to_opus_ogg` resamples to 48 kHz and muxes with PyAV's
+  bundled libopus), and the transport sends it back in `LXMF.FIELD_AUDIO` as a
+  Sideband HQ PTT message (`lxmf_transport.audio_fields` ->
+  `[AM_OPUS_OGG, ogg]`), with the reply text as the message content so a
+  text-only client still sees it. The reply *mode* follows the chat's most
+  recent inbound message — a text message reverts it to text replies. Synthesis
+  runs on the outbound pump thread (never the Reticulum callback thread); it
+  needs `piper-tts` + PyAV (`requirements/tts.txt`), never the microphone stack,
+  so the install plan's `install_lxmf_tts` flag (from
+  `gateway.lxmf.voice.reply_with_voice`) drives its own bootstrap stage. A
+  missing synthesizer, a synthesis failure, or an encode failure is traced and
+  the reply falls back to text — never dropped. The reply length is bounded by
+  `voice.max_speak_chars`. See "### gateway (messenger intake)".
 - **Voice gateway (wake word + STT + TTS)** (Oct 2026): `gateway/voice.py`
   (`VoiceAdapter`, platform `voice`) is the local microphone front end over the
   neutral `semif_agent/voice_transport.py`: an always-on openWakeWord wake word,
@@ -878,7 +924,12 @@ CLI, unit tests (24) + integration tests (2).
   `--voice` / `--browser` additionally install those optional stacks
   (`requirements/voice.txt` + system `libportaudio2` + `alsa-utils`;
   `packs/browser/requirements.txt` + a browser) even when the plan did not pick
-  them.
+  them. The plan's `install_transcribe` flag (from `gateway.lxmf.voice.enabled`)
+  installs `requirements/transcribe.txt` (faster-whisper only) and warms its STT
+  model, and `install_lxmf_tts` (from `gateway.lxmf.voice.reply_with_voice`)
+  installs `requirements/tts.txt` (piper-tts + PyAV) and downloads the reply
+  voice — a rerun picks either up after the operator enables the setting in
+  config.
   The script must be run from a checkout — it reads pins from that checkout's
   `pins.json` and never re-clones the agent repo (only the pack index, the
   selected packs, the SemIf engine, and the simplex-chat binary). Idempotent and
@@ -906,7 +957,10 @@ CLI, unit tests (24) + integration tests (2).
   `simplex_chat` ports/display names stay in `config.json`. The python dep pins
   live in `requirements/` split by concern (committed): `core.txt` (the test
   runner, always), `engine.txt` (the local decision engine), `transports.txt`
-  (websockets/lxmf), plus the optional `voice.txt`; `staging.txt`
+  (websockets/lxmf), plus the optional `voice.txt` (full microphone stack),
+  `transcribe.txt` (faster-whisper only), `tts.txt` (piper-tts + PyAV, for LXMF
+  voice replies) and `codec2.txt` (`pycodec2`, native, for
+  LXMF Codec2 voice messages); `staging.txt`
   is the union of the non-hardware files. A pack owns the deps its skills/bridge
   need, shipped at `packs/<name>/requirements.txt` (e.g. the browser pack's
   Playwright pin); the install plan lists the selected/enabled packs that ship
@@ -1360,6 +1414,48 @@ CLI, unit tests (24) + integration tests (2).
   Reticulum` and `LXMF.LXMRouter` install process signal handlers, which only
   work on the main thread** — `run_gateway` calls `daemon.prepare()` on the main
   thread before the transport threads start, and `run()` reuses it.
+  **Voice commands (Sideband push-to-talk).** A Sideband PTT message arrives as
+  LXMF content with an empty body and the audio in `FIELD_AUDIO`
+  (`[audio_mode, bytes]`); `lxmf_transport.parse_audio_field` normalizes it into
+  `{"codec","codec_name","data","kind","codec2_rate"}` (`kind` = the decode path
+  `opus_ogg`/`codec2`/`unknown`) and the adapter's `_on_item` routes it to
+  transcription when `gateway.lxmf.voice.enabled` is set, dispatching the
+  transcript as an ordinary command (same allowlist, same reply path). A
+  dedicated single-slot `lxmf-voice-worker` thread does the (slow) transcription
+  off the Reticulum callback thread, which only enqueues; on any failure the
+  sender gets a transport-level notice (`_notify`) rather than silence. HQ PTT
+  (`AM_OPUS_OGG`, the default) is decoded by `WhisperTranscriber.transcribe_bytes`
+  — it needs **only `faster-whisper`** (whose bundled PyAV decodes the Opus/OGG
+  container), never the microphone voice stack, so `check_requirements` stays
+  lxmf-only and a missing transcriber degrades gracefully (`voice.enabled` off,
+  or a traced `lxmf_voice_unavailable`). Non-HQ Codec2 PTT is decoded to 8 kHz
+  PCM by `voice_transport.decode_codec2` (the optional `pycodec2` bindings,
+  `requirements/codec2.txt`), wrapped in a WAV by `pcm_to_wav`, and transcribed
+  the same way; an absent decoder is traced `lxmf_voice_codec2_unavailable` and
+  reported, and the binding-less 450 modes as `lxmf_voice_unsupported_codec` —
+  never silently dropped. The audio is transient and never stored, exactly like
+  the voice gateway.
+  **Voice replies (Piper -> Opus/OGG).** When `voice.reply_with_voice` is on
+  (the default), a chat that last messaged by voice is answered with a voice
+  message: `_voice_reply` (on the outbound pump thread) synthesizes the reply
+  text with Piper (`voice_transport.build_synthesizer` from `voice.tts`),
+  encodes it to OGG/Opus with `voice_transport.pcm_to_opus_ogg` (48 kHz, PyAV's
+  bundled libopus), and `LxmfDaemon.send` attaches it in `FIELD_AUDIO`
+  (`lxmf_transport.audio_fields` -> `[AM_OPUS_OGG, ogg]`) with the reply text as
+  the message content (a text-only client still sees it). The reply mode follows
+  the chat's most recent inbound message — a text message reverts it to text
+  replies. It needs **only `piper-tts` + PyAV** (`requirements/tts.txt`), never
+  the microphone stack, so `check_requirements` stays lxmf-only; a missing
+  synthesizer (`lxmf_voice_tts_unavailable`), a synthesis failure
+  (`lxmf_voice_synth_failed`), or an encode failure (`lxmf_voice_encode_failed`)
+  is traced and the reply falls back to text — never dropped. The reply length
+  is bounded by `voice.max_speak_chars`.
+  **Result-only output**: `LxmfAdapter.result_only` (default true; per-platform
+  config `result_only` overrides) makes `GatewayService` send just the skill's
+  result line — scheduler bookkeeping is dropped and the `<skill>: ok —` wrapper
+  is stripped — so a reply (text or voice) is the answer, not the scheduler's
+  internals. Questions, repair offers, approvals, and timer notifications still
+  pass through.
 - **Voice adapter** (`gateway/voice.py`): the local microphone front end. It is
   a policy layer over the neutral `semif_agent/voice_transport.py` (`VoiceDaemon`)
   — openWakeWord wake word → `webrtcvad` endpointing → faster-whisper
@@ -1481,15 +1577,22 @@ CLI, unit tests (24) + integration tests (2).
   scheduler, no HTTP.
 - **Tests.** `tests/test_gateway.py` (stdlib): SimpleX adapter allowlist/auth,
   structured send command, batching (real `asyncio`), LXMF adapter
-  allowlist/auth and batching (a `threading.Timer`), cross-platform pending-run
-  guard and per-platform reply routing, and `GatewayService` routing against a
-  real `Scheduler` (lazy engine, unreachable LLM).
+  allowlist/auth and batching (a `threading.Timer`), LXMF voice-message
+  transcription through an injected fake transcriber (Opus dispatch, Codec2
+  decode/wrap via a stubbed `decode_codec2`, disabled-ignores, unsupported-codec,
+  missing-Codec2-decoder and failure notices, caption fallback) and LXMF voice
+  replies through an injected fake synthesizer (voice-chat marking, text-reverts,
+  `reply_with_voice` off, synthesis-failure fallback, length bound),
+  cross-platform
+  pending-run guard and per-platform reply routing, and `GatewayService` routing
+  against a real `Scheduler` (lazy engine, unreachable LLM).
   `tests/test_humanize.py` covers the optional result cleanup with an injected
   fake `llm` client (rewrite, quote/whitespace normalization, fallback on
   error/empty/runaway, disabled passthrough, and the global +
   per-platform gateway enable/disable wiring).
   `tests/test_lxmf_transport.py` covers the neutral LXMF transport's
-  missing-dep contract, default paths, and `normalize_message` (no real `lxmf`
+  missing-dep contract, default paths, and `normalize_message` (including the
+  `FIELD_AUDIO`/`AM_*` voice payload via `parse_audio_field`; no real `lxmf`
   needed). `tests/test_simplex_ws.py` covers the neutral protocol layer (parse
   shapes, accept ids, corrId round-trips, address show/create).
   `tests/test_bridges.py`
@@ -1507,7 +1610,12 @@ CLI, unit tests (24) + integration tests (2).
   service or driver).
   `tests/test_voice_gateway.py` drives the voice loop
   with injected fake engines (wake gating, endpointing, half-duplex,
-  `speak` truncation/failure, adapter + CLI wiring) — no
+  `speak` truncation/failure, adapter + CLI wiring) plus the transcribe-only
+  helpers (`check_codec2_requirements`, `decode_codec2` over an injected fake
+  `pycodec2`, `pcm_to_wav`) and the voice-reply helpers
+  (`check_synthesis_requirements`, `build_synthesizer` over a stubbed
+  `PiperSynthesizer`, `pcm_to_opus_ogg`'s empty-input contract and, when PyAV is
+  importable, its OGG/Opus round-trip) — no
   hardware, network, or heavy packages. `tests/test_voice_record.py` covers the
   recording helpers (`semif_agent/voice_train.py`) — prompt loading, WAV I/O,
   level math, the silence-endpointing loop, and the LJSpeech dataset writer —
@@ -1523,6 +1631,10 @@ CLI, unit tests (24) + integration tests (2).
   system `libportaudio2` + `alsa-utils`); it is lazy-imported too, and `bootstrap.sh --voice`
   installs it and downloads the models (openWakeWord into the venv package dir,
   the Piper voice into `.runtime/voice/tts`, faster-whisper into `.runtime/hf`).
+  The LXMF gateway's transcribe-only and voice-reply paths pin only what they
+  need (`requirements/transcribe.txt` faster-whisper; `requirements/tts.txt`
+  `piper-tts` + PyAV; `requirements/codec2.txt` `pycodec2`), never the
+  microphone stack.
 
 ### skill packs (bundles)
 

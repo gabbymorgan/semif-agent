@@ -166,7 +166,31 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                       'storage_path': {'default': '', 'type': 'str'},
                       'home_channel': {'default': '', 'type': 'str'},
                       'reply_prefix': {'default': '', 'type': 'str'},
-                      'text_batch_delay': {'default': 0.8, 'type': 'float'}},
+                      'text_batch_delay': {'default': 0.8, 'type': 'float'},
+                      # Reply with the skill's result line only (drop queue/
+                      # urgency chatter and the `<skill>: ok —` wrapper).
+                      'result_only': {'default': True, 'type': 'bool'},
+                      # Transcribe Sideband push-to-talk voice messages
+                      # (FIELD_AUDIO) into commands and (when reply_with_voice)
+                      # answer a voice chat with a Piper voice reply. Needs only
+                      # faster-whisper (requirements/transcribe.txt) plus
+                      # piper-tts + PyAV (requirements/tts.txt) for replies,
+                      # not the microphone stack.
+                      'voice': {'enabled': {'default': False, 'type': 'bool'},
+                                'reply_with_voice': {'default': True, 'type': 'bool'},
+                                'max_speak_chars': {'default': 600, 'type': 'int'},
+                                'reply_bitrate': {'default': 24000, 'type': 'int'},
+                                'stt': {'model': {'default': 'base.en', 'type': 'str'},
+                                        'device': {'default': 'cpu', 'type': 'str'},
+                                        'compute_type': {'default': 'int8', 'type': 'str'},
+                                        'language': {'default': 'en', 'type': 'str'}},
+                                'tts': {'voice': {'default': 'en_US-lessac-medium',
+                                                  'type': 'str'},
+                                        'voice_dir': {'default': '', 'type': 'str'},
+                                        'speaker_id': {'default': 0, 'type': 'int'},
+                                        'length_scale': {'default': 1.0,
+                                                         'type': 'float'},
+                                        'volume': {'default': 1.0, 'type': 'float'}}}},
              'voice': {'enabled': {'default': False, 'type': 'bool'},
                        'chat_id': {'default': 'voice', 'type': 'str'},
                        'display_name': {'default': 'voice', 'type': 'str'},

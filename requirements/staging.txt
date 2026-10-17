@@ -7,7 +7,11 @@
 # Voice (voice.txt) and browser (packs/browser/requirements.txt) stacks are
 # hardware/optional. Voice is a repo file installed with
 # `scripts/bootstrap.sh --voice`; the browser deps live WITH their pack and are
-# installed by bootstrap when that pack is selected.
+# installed by bootstrap when that pack is selected. transcribe.txt
+# (faster-whisper only, for LXMF Sideband voice messages), tts.txt (piper-tts +
+# PyAV, for LXMF voice replies) and codec2.txt (pycodec2, for non-HQ Codec2 PTT)
+# are likewise optional and installed by bootstrap when `gateway.lxmf.voice` is
+# enabled.
 -r core.txt
 -r engine.txt
 -r transports.txt

@@ -51,10 +51,10 @@ class GatewayAdapter(ABC):
     #: short platform name used in request sources (`"simplex:<chat_id>"`)
     name: str = "gateway"
 
-    #: Spoken front ends (the voice gateway) set this so the service speaks only
-    #: the skill's result line, not the scheduler's bookkeeping (queue/urgency
-    #: status) and not the `<skill>: ok —` wrapper. A per-platform config
-    #: `result_only` overrides it. Plain chat adapters leave it False.
+    #: Front ends that should send only the skill's result line set this, so the
+    #: service drops the scheduler's bookkeeping (queue/urgency status) and the
+    #: `<skill>: ok —` wrapper. The voice gateway and the LXMF gateway set it; a
+    #: per-platform config `result_only` overrides it either way.
     result_only: bool = False
 
     @abstractmethod

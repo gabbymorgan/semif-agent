@@ -99,6 +99,13 @@ class Answers:
     # Gateway platforms to enable.
     gateways: list[str] = field(default_factory=list)
 
+    # LXMF gateway: transcribe Sideband push-to-talk voice messages into
+    # commands (install `requirements/transcribe.txt`; faster-whisper only) and
+    # reply to a voice chat with a Piper voice message (install
+    # `requirements/tts.txt`; piper-tts + PyAV).
+    lxmf_voice: bool = False
+    lxmf_voice_reply: bool = True
+
     # IANA timezone; empty uses the host zone.
     timezone: str = ""
 
@@ -462,6 +469,29 @@ def run_interview(
         default=answers.gateways,
     )
 
+    # 5b. LXMF voice messages (Sideband push-to-talk).
+    if "lxmf" in answers.gateways:
+        output("")
+        output("LXMF voice messages")
+        output(
+            "  Sideband can send push-to-talk voice messages. The agent can\n"
+            "  transcribe them into commands, and reply to a voice chat with a\n"
+            "  synthesized voice message (Piper)."
+        )
+        mode = _ask_choice(
+            input_fn,
+            output,
+            "lxmf voice",
+            [
+                ("off", "ignore voice messages"),
+                ("transcribe", "transcribe to commands, reply with text"),
+                ("reply", "transcribe, and reply with a synthesized voice"),
+            ],
+            3,
+        )
+        answers.lxmf_voice = mode in ("transcribe", "reply")
+        answers.lxmf_voice_reply = mode == "reply"
+
     # 6. Timezone.
     output("")
     answers.timezone = _ask_text(
@@ -568,6 +598,12 @@ def build_config(answers: Answers, packs: Sequence[SkillPack]) -> dict:
     for platform in ("simplex", "lxmf", "voice"):
         gateway.setdefault(platform, {})["enabled"] = platform in answers.gateways
     gateway.setdefault("humanize", {})["enabled"] = bool(answers.gateways)
+    # Sideband voice messages are transcribed only when the LXMF gateway is on
+    # and the answer opted in; needs faster-whisper (requirements/transcribe.txt).
+    # A voice reply adds Piper + PyAV (requirements/tts.txt).
+    voice_block = gateway.setdefault("lxmf", {}).setdefault("voice", {})
+    voice_block["enabled"] = bool("lxmf" in answers.gateways and answers.lxmf_voice)
+    voice_block["reply_with_voice"] = bool(answers.lxmf_voice_reply)
 
     return config
 
@@ -632,6 +668,17 @@ def build_plan(answers: Answers, packs: Sequence[SkillPack]) -> dict:
         "install_simplex_forward": "simplex" in answers.packs,
         "install_browser": "browser" in answers.packs,
         "install_voice": "voice" in answers.gateways,
+        # faster-whisper only (no microphone stack): transcribe Sideband voice
+        # messages when the LXMF gateway is on and the answer opted in.
+        "install_transcribe": "lxmf" in answers.gateways and bool(answers.lxmf_voice),
+        # Piper + PyAV (no microphone stack): reply to a voice chat with a
+        # synthesized voice message when the LXMF gateway handles voice and the
+        # answer wants voice replies.
+        "install_lxmf_tts": (
+            "lxmf" in answers.gateways
+            and bool(answers.lxmf_voice)
+            and bool(answers.lxmf_voice_reply)
+        ),
     }
 
 
@@ -665,6 +712,21 @@ def plan_from_config(config: dict, packs: Sequence[SkillPack]) -> dict:
         "install_simplex_forward": "simplex" in enabled,
         "install_browser": "browser" in enabled,
         "install_voice": "voice" in gateways,
+        "install_transcribe": bool(
+            (((config.get("gateway", {}) or {}).get("lxmf", {}) or {})
+             .get("voice", {}) or {})
+            .get("enabled")
+        ),
+        "install_lxmf_tts": bool(
+            (((config.get("gateway", {}) or {}).get("lxmf", {}) or {})
+             .get("voice", {}) or {})
+            .get("enabled")
+        )
+        and bool(
+            (((config.get("gateway", {}) or {}).get("lxmf", {}) or {})
+             .get("voice", {}) or {})
+            .get("reply_with_voice", True)
+        ),
     }
 
 

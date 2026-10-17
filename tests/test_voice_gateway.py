@@ -459,6 +459,144 @@ def test_resolve_platforms_includes_enabled_voice():
 # ---- wake cue (beep) -------------------------------------------------------
 
 
+def test_transcription_requirements_never_raises():
+    from semif_agent.voice_transport import check_transcription_requirements
+
+    ok, hint = check_transcription_requirements()
+    assert isinstance(ok, bool)
+    if not ok:
+        assert "faster-whisper" in hint
+
+
+def test_check_codec2_requirements_never_raises():
+    from semif_agent.voice_transport import check_codec2_requirements
+
+    ok, hint = check_codec2_requirements()
+    assert isinstance(ok, bool)
+    if not ok:
+        assert "pycodec2" in hint
+
+
+def test_decode_codec2_without_a_full_frame_is_none():
+    from semif_agent.voice_transport import decode_codec2
+
+    # Nothing to decode (shorter than a frame, empty, or no bitrate) -> None,
+    # whether or not pycodec2 is installed.
+    assert decode_codec2(b"x", 2400) is None
+    assert decode_codec2(b"", 2400) is None
+    assert decode_codec2(b"data", 0) is None
+
+
+def test_decode_codec2_uses_bindings(monkeypatch):
+    import sys
+    import types
+
+    import pytest
+
+    np = pytest.importorskip("numpy")
+    calls = []
+
+    class FakeCodec2:
+        def __init__(self, rate):
+            self.rate = rate
+
+        def bytes_per_frame(self):
+            return 4
+
+        def samples_per_frame(self):
+            return 8
+
+        def decode(self, data):
+            calls.append(data)
+            return np.full(8, 7, dtype=np.int16)
+
+    fake = types.ModuleType("pycodec2")
+    fake.Codec2 = FakeCodec2
+    monkeypatch.setitem(sys.modules, "pycodec2", fake)
+    from semif_agent.voice_transport import decode_codec2
+
+    pcm = decode_codec2(b"aaaa" * 2, 2400)  # two 4-byte frames
+    assert len(pcm) == 2 * 8 * 2  # frames * samples/frame * 2 bytes
+    assert calls == [b"aaaa", b"aaaa"]
+    assert pcm[:2] == b"\x07\x00"
+
+
+def test_pcm_to_wav_is_a_readable_wav():
+    import io
+    import wave
+
+    from semif_agent.voice_transport import pcm_to_wav
+
+    pcm = b"\x01\x00\x02\x00"
+    data = pcm_to_wav(pcm, 8000)
+    assert data[:4] == b"RIFF"
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 8000
+        assert wav.readframes(2) == pcm
+
+
+# ---- voice replies (Piper + Opus/OGG) --------------------------------------
+
+
+def test_synthesis_requirements_never_raises():
+    from semif_agent.voice_transport import check_synthesis_requirements
+
+    ok, hint = check_synthesis_requirements()
+    assert isinstance(ok, bool)
+    if not ok:
+        assert "piper" in hint
+
+
+def test_build_synthesizer_reads_the_tts_block(monkeypatch):
+    import semif_agent.voice_transport as vt
+
+    captured = {}
+
+    class FakePiper:
+        def __init__(self, voice, speaker_id=0, length_scale=1.0, volume=1.0):
+            captured.update(
+                voice=voice, speaker_id=speaker_id,
+                length_scale=length_scale, volume=volume,
+            )
+
+    monkeypatch.setattr(vt, "PiperSynthesizer", FakePiper)
+    vt.build_synthesizer(
+        {"tts": {"voice": "en_US-lessac-medium", "speaker_id": 3, "length_scale": 0.9}}
+    )
+    assert captured["voice"] == "en_US-lessac-medium"
+    assert captured["speaker_id"] == 3
+    assert captured["length_scale"] == 0.9
+
+
+def test_pcm_to_opus_ogg_empty_input_is_empty():
+    from semif_agent.voice_transport import pcm_to_opus_ogg
+
+    assert pcm_to_opus_ogg(b"", 22050) == b""
+    assert pcm_to_opus_ogg(b"\x01", 22050) == b""
+
+
+def test_pcm_to_opus_ogg_encodes_when_pyav_is_present():
+    import pytest
+
+    pytest.importorskip("av")
+    import io
+
+    import av
+
+    from semif_agent.voice_transport import pcm_to_opus_ogg
+
+    # 0.5 s of 22.05 kHz silence -> resampled + encoded to OGG/Opus.
+    pcm = b"\x00\x00" * 11025
+    data = pcm_to_opus_ogg(pcm, 22050)
+    assert data[:4] == b"OggS"
+    container = av.open(io.BytesIO(data))
+    stream = container.streams.audio[0]
+    assert stream.codec_context.name == "opus"
+    assert stream.sample_rate == 48000
+
+
 def test_tone_pcm_length():
     from semif_agent.voice_transport import _tone_pcm
 
