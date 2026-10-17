@@ -15,8 +15,14 @@ Audio contract: 16 kHz, mono, signed 16-bit little-endian PCM, read in fixed
 resampling is done in the loop.
 
 Design notes:
-- **Half-duplex.** Capture frames are discarded while a reply is being spoken,
-  so the agent never transcribes its own voice (no barge-in yet).
+- **Half-duplex by default, barge-in optional.** Capture frames are normally
+  discarded while a reply is being spoken, so the agent never transcribes its
+  own voice. With barge-in enabled (`barge_in.enabled`), the wake word is still
+  scored during playback: the user can interrupt a spoken reply, the playback
+  is aborted, and the following command is captured and handed to the front end
+  (which decides whether it is a stop or a new request). Speech is muted while
+  the interrupt command is captured and handled, so the interrupted reply does
+  not resume over the user.
 - The engine interfaces are plain classes so tests can inject fakes and drive
   the loop without hardware or the optional packages.
 """
@@ -149,6 +155,17 @@ class AudioIO:
 
     def write(self, pcm16: bytes, sample_rate: int) -> None:
         raise NotImplementedError
+
+    def play(self, pcm16: bytes, sample_rate: int, stop_event=None) -> bool:
+        """Play PCM, returning `False` if aborted early via `stop_event`.
+
+        The default plays the whole buffer in one `write`. The real device
+        overrides this to stream in small chunks so a barge-in stops the reply
+        promptly instead of after the whole buffer; a fake that only implements
+        `write` still plays through here.
+        """
+        self.write(pcm16, sample_rate)
+        return True
 
     def flush(self) -> None:
         """Drop any buffered capture frames (called after speaking to clear echo)."""
@@ -562,6 +579,40 @@ class SoundDeviceAudio(AudioIO):
         ) as stream:
             stream.write(pcm16)
 
+    def play(self, pcm16: bytes, sample_rate: int, stop_event=None) -> bool:
+        """Stream PCM in small chunks so a barge-in can abort playback.
+
+        A single `write` of the whole buffer blocks until the device drains it,
+        so an interrupt could only take effect after the reply had finished. The
+        buffer is played in ~50 ms chunks instead, checking `stop_event` between
+        them; on a stop the stream is aborted (discarding what is still buffered)
+        and `False` is returned. One output stream is opened for the whole
+        buffer, so the chunks play gaplessly.
+        """
+        import sounddevice as sd
+
+        rate = self.output_sample_rate or self._device_rate(
+            self.output_device, "output"
+        )
+        if rate != int(sample_rate):
+            pcm16 = _resample_pcm16(pcm16, int(sample_rate), rate)
+        chunk = max(BYTES_PER_SAMPLE, int(rate * 0.05) * BYTES_PER_SAMPLE)  # 50 ms
+        with sd.RawOutputStream(
+            samplerate=rate,
+            channels=1,
+            dtype="int16",
+            device=self.output_device,
+        ) as stream:
+            for offset in range(0, len(pcm16), chunk):
+                if stop_event is not None and stop_event.is_set():
+                    try:
+                        stream.abort()
+                    except Exception:
+                        pass
+                    return False
+                stream.write(pcm16[offset : offset + chunk])
+        return True
+
     def flush(self) -> None:
         try:
             while not self._frames.empty():
@@ -889,7 +940,7 @@ class VoiceDaemon:
     """
 
     def __init__(self, cfg: dict | None = None, trace=None, engines: VoiceEngines | None = None,
-                 name: str = "voice", input_ready=None):
+                 name: str = "voice", input_ready=None, on_barge_in=None):
         cfg = cfg or {}
         self.config = cfg
         self.trace = trace
@@ -899,6 +950,11 @@ class VoiceDaemon:
         #: is still running the current request), so a second command cannot be
         #: started before the first reaches a result. None = always ready.
         self.input_ready = input_ready
+        #: Optional callback the loop invokes around a barge-in: `True` when the
+        #: wake word is heard over a spoken reply (playback aborted, listening
+        #: begins), `False` once that listening session ends. The front end uses
+        #: it to classify the following utterance as an interrupt.
+        self.on_barge_in = on_barge_in
         self.wake_threshold = float((cfg.get("wake", {}) or {}).get("threshold", 0.2))
         #: After the wake word, how long to wait for the command's speech to
         #: begin before giving up (a natural pause after "hey <word>" — e.g.
@@ -944,12 +1000,29 @@ class VoiceDaemon:
         self.cue_submit_notes = _parse_notes(cue.get("submit_notes"))
         self.cue_note_gap_ms = int(cue.get("note_gap_ms", 20) or 0)
 
+        #: Barge-in: keep scoring the wake word while a reply is playing, abort
+        #: the playback on a wake, and mute speech while the interrupt command
+        #: is captured/handled. `wait_s` bounds how long to wait for the
+        #: interrupted playback to release the audio device. `threshold`
+        #: overrides the wake threshold for barge-in only (a higher bar keeps
+        #: the agent's own TTS from self-triggering; 0 = use `wake.threshold`).
+        barge_cfg = cfg.get("barge_in", {}) or {}
+        self.barge_in_enabled = bool(barge_cfg.get("enabled", True))
+        self.barge_in_wait_s = float(barge_cfg.get("wait_s", 2.0) or 0.0)
+        self.barge_in_threshold = (
+            float(barge_cfg.get("threshold", 0.0) or 0.0) or self.wake_threshold
+        )
+
         self._engines = engines
         self._engines_lock = threading.Lock()
         self._audio_lock = threading.Lock()  # serialize cue/speak playback
         self._on_utterance: UtteranceHandler | None = None
         self._stop = threading.Event()
         self._speaking = threading.Event()
+        #: Set while a reply is being played; `_interrupt` aborts that playback.
+        self._interrupt = threading.Event()
+        #: While set, `speak` drops text (a barge-in is being captured/handled).
+        self._mute = threading.Event()
 
     # ---- requirements ----
 
@@ -1022,49 +1095,111 @@ class VoiceDaemon:
                 return
             if not pcm:
                 continue
+            barge_in = False
             if self._speaking.is_set():
-                continue
-            score = engines.wake.score(pcm)
-            if score < self.wake_threshold:
-                continue
-            if self.input_ready is not None and not self.input_ready():
-                # The single scheduler slot is still running the current
-                # request: hold the wake word until it reaches a result (or
-                # pauses for the user's answer), so a new command cannot start
-                # while one is in flight. Reset the detector so the same wake
-                # phrase does not immediately re-fire once the slot frees.
+                # Half-duplex by default: the agent's own voice is discarded.
+                # With barge-in enabled the wake word is still scored, so the
+                # user can interrupt a spoken reply ("hey <word>, stop").
+                if not self.barge_in_enabled:
+                    continue
+                score = engines.wake.score(pcm)
+                if score < self.barge_in_threshold:
+                    continue
+                barge_in = True
+                self._begin_barge_in(engines, score)
+            else:
+                score = engines.wake.score(pcm)
+                if score < self.wake_threshold:
+                    continue
+            delivered = False
+            try:
+                if self.input_ready is not None and not self.input_ready():
+                    # The single scheduler slot is still running the current
+                    # request: hold the wake word until it reaches a result (or
+                    # pauses for the user's answer), so a new command cannot
+                    # start while one is in flight. Reset the detector so the
+                    # same wake phrase does not immediately re-fire once the
+                    # slot frees.
+                    try:
+                        engines.wake.reset()
+                    except Exception:
+                        pass
+                    self._event("voice_wake_blocked", score=round(float(score), 3))
+                    continue
+                if not barge_in:
+                    self._event("voice_wake", score=round(float(score), 3))
                 try:
                     engines.wake.reset()
                 except Exception:
                     pass
-                self._event("voice_wake_blocked", score=round(float(score), 3))
-                continue
-            self._event("voice_wake", score=round(float(score), 3))
+                self._cue(self.cue_frequency, self.cue_duration_ms)
+                # Wait for the command to start rather than assuming it is glued
+                # to the wake word (the wake frame + a natural pause are
+                # discarded so the command is not truncated).
+                wait_for_speech_ms = self.listen_timeout_ms
+                utterance = self._collect(engines, pcm, wait_for_speech_ms=wait_for_speech_ms)
+                if not utterance:
+                    continue
+                try:
+                    text = engines.stt.transcribe(utterance)
+                except Exception as exc:
+                    self._event("voice_stt_failed", message=str(exc)[:300])
+                    continue
+                text = (text or "").strip()
+                if not text:
+                    self._event("voice_stt_empty", samples=len(utterance) // BYTES_PER_SAMPLE)
+                    continue
+                self._event("voice_transcribed", chars=len(text))
+                self._bling()
+                delivered = True
+                if self._on_utterance is not None:
+                    self._on_utterance(text)
+            finally:
+                if barge_in:
+                    self._end_barge_in(delivered)
+
+    def _begin_barge_in(self, engines: VoiceEngines, score: float) -> None:
+        """Abort the current reply and start listening for an interrupt.
+
+        The playback is stopped (the daemon's `play` watches `_interrupt`) and
+        speech is muted so the interrupted reply cannot resume over the user
+        while the interrupt command is captured and handled. The front end is
+        told via `on_barge_in(True)` so it can classify the next utterance.
+        """
+        self._event("voice_barge_in", score=round(float(score), 3))
+        self._mute.set()
+        self._interrupt.set()
+        if self.on_barge_in is not None:
             try:
-                engines.wake.reset()
+                self.on_barge_in(True)
             except Exception:
                 pass
-            self._cue(self.cue_frequency, self.cue_duration_ms)
-            # Wait for the command to start rather than assuming it is glued to
-            # the wake word (the wake frame + a natural pause are discarded so
-            # the command is not truncated).
-            wait_for_speech_ms = self.listen_timeout_ms
-            utterance = self._collect(engines, pcm, wait_for_speech_ms=wait_for_speech_ms)
-            if not utterance:
-                continue
+        # Wait for the interrupted playback to release the audio device so the
+        # wake cue and the captured command are not played over it.
+        deadline = time.time() + self.barge_in_wait_s
+        while self._speaking.is_set() and time.time() < deadline:
+            time.sleep(0.005)
+        try:
+            engines.audio.flush()  # drop the reply's echo captured while speaking
+        except Exception:
+            pass
+
+    def _end_barge_in(self, delivered: bool) -> None:
+        """Close a barge-in session.
+
+        `delivered` is True when a command was transcribed and handed to the
+        front end; the front end then owns un-muting (it un-mutes only after the
+        interrupt has been handled, so the interrupted reply never resumes). A
+        barge-in that captured nothing un-mutes here.
+        """
+        self._interrupt.clear()
+        if self.on_barge_in is not None:
             try:
-                text = engines.stt.transcribe(utterance)
-            except Exception as exc:
-                self._event("voice_stt_failed", message=str(exc)[:300])
-                continue
-            text = (text or "").strip()
-            if not text:
-                self._event("voice_stt_empty", samples=len(utterance) // BYTES_PER_SAMPLE)
-                continue
-            self._event("voice_transcribed", chars=len(text))
-            self._bling()
-            if self._on_utterance is not None:
-                self._on_utterance(text)
+                self.on_barge_in(False)
+            except Exception:
+                pass
+        if not delivered or self.on_barge_in is None:
+            self._mute.clear()
 
     def _collect(self, engines: VoiceEngines, first_frame: bytes, wait_for_speech_ms: int = 0) -> bytes:
         """Accumulate frames from the wake word until trailing silence.
@@ -1243,15 +1378,34 @@ class VoiceDaemon:
             except Exception as exc:
                 self._event("voice_cue_failed", message=str(exc)[:200])
 
+    def set_muted(self, muted: bool) -> None:
+        """Mute/unmute spoken replies (used around a barge-in)."""
+        if muted:
+            self._mute.set()
+        else:
+            self._mute.clear()
+
     def speak(self, text: str) -> None:
         """Synthesize and play `text`; called from the outbound pump thread."""
         text = (text or "").strip()
         if not text:
             return
+        if self._mute.is_set():
+            # A barge-in is in progress: the user interrupted and is giving a
+            # new command, so a pending reply is dropped rather than played over
+            # them. Replies after the interrupt is handled are spoken normally.
+            self._event("voice_speak_suppressed", chars=len(text))
+            return
         if self.max_speak_chars and len(text) > self.max_speak_chars:
             clipped = text[: self.max_speak_chars].rsplit(" ", 1)[0]
             text = (clipped or text[: self.max_speak_chars]) + "…"
         engines = self._ensure_engines()
+        # Start from a clean wake-detector state so the reply's own audio does
+        # not inherit a stale partial match.
+        try:
+            engines.wake.reset()
+        except Exception:
+            pass
         self._speaking.set()
         self._event("voice_speak_start", chars=len(text))
         try:
@@ -1266,11 +1420,19 @@ class VoiceDaemon:
                 else 0.0,
             )
             if pcm:
-                with self._audio_lock:
-                    engines.audio.open_output(sample_rate)
-                    # The instant the first reply audio is handed to the device.
-                    self._event("voice_playback_start", ts=time.time(), chars=len(text))
-                    engines.audio.write(pcm, sample_rate)
+                if self._interrupt.is_set():
+                    # A barge-in landed during synthesis; skip playback.
+                    self._event("voice_speak_aborted", chars=len(text))
+                else:
+                    with self._audio_lock:
+                        engines.audio.open_output(sample_rate)
+                        # The instant the first reply audio is handed to the device.
+                        self._event("voice_playback_start", ts=time.time(), chars=len(text))
+                        completed = engines.audio.play(
+                            pcm, sample_rate, stop_event=self._interrupt
+                        )
+                        if not completed:
+                            self._event("voice_speak_interrupted", chars=len(text))
             self._event("voice_spoke", chars=len(text))
         except Exception as exc:
             self._event("voice_speak_failed", message=str(exc)[:300])

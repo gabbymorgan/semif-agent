@@ -353,8 +353,9 @@ voice_transport.py
                 neutral voice transport: a 16 kHz mono capture loop with an
                 always-on wake word (openWakeWord), VAD endpointing
                 (webrtcvad, energy fallback), speech-to-text (faster-whisper)
-                and text-to-speech (Piper) over `sounddevice`; half-duplex
-                (capture discarded while speaking). Every heavy dep is
+                and text-to-speech (Piper) over `sounddevice`; half-duplex by
+                default with optional wake-word barge-in (abort a spoken reply
+                and listen for an interrupt command). Every heavy dep is
                 lazy-imported, keeping the module stdlib-only; the engine
                 interfaces are plain classes so tests inject fakes. Knows
                 nothing about the scheduler or the gateway.
@@ -705,11 +706,19 @@ CLI, unit tests (24) + integration tests (2).
   single-session routing, `needs_input` questions, repairs, and approvals all
   work through `GatewayService` unchanged — a spoken command is just text from
   `voice:<chat_id>`, and every reply is spoken. No remote peer and no allowlist
-  (physical mic access is the authorization). Half-duplex: capture is discarded
-  while a reply is speaking (no barge-in yet); the wake word is required before
+  (physical mic access is the authorization). The wake word is required before
   every command and is held while the scheduler's single slot is still running
   the current request (`GatewayService.input_ready`), so a second command cannot
-  start until the first reaches a result (or pauses for the user's answer). The
+  start until the first reaches a result (or pauses for the user's answer).
+  **Barge-in** (`gateway.voice.barge_in.enabled`, default on): while a reply is
+  speaking the wake word is still scored, so the user can interrupt — the
+  playback is aborted (chunked streaming with a `stop_event`; the reply is muted
+  until the interrupt is handled so it never resumes over the user) and the
+  following command is captured. A bare "stop"/"cancel" (or a short variant)
+  aborts the spoken reply and drops anything queued behind it; anything else is
+  run as a new command. `barge_in.threshold` raises the wake bar for barge-in
+  only (0 = use `wake.threshold`) so the agent's own TTS cannot self-trigger.
+  Disable for strict half-duplex. The
   whole voice stack is optional and lazy-imported (`requirements/voice.txt`,
   pinned separately from the engine set since it is hardware-dependent); the
   gateway refuses to start with an install hint. `bootstrap.sh --voice`
@@ -1493,9 +1502,19 @@ CLI, unit tests (24) + integration tests (2).
   phrase's tail, not the command — until `vad.min_command_ms` of speech is in
   hand the trailing-silence endpoint uses `vad.initial_silence_ms`, so a natural
   pause before the command does not end the capture (then `vad.silence_ms`).
-  **Half-duplex**: capture frames are discarded while a
-  reply is speaking, so the agent never transcribes itself (no barge-in yet);
-  the wake word is required before every command, and is **held while the
+  **Half-duplex by default, barge-in optional** (`gateway.voice.barge_in`):
+  capture frames are normally discarded while a reply is speaking, so the agent
+  never transcribes itself; with `barge_in.enabled` the wake word is still
+  scored during playback, so the user can interrupt. The daemon's `play` streams
+  the reply in small chunks and watches a `stop_event`, so a barge-in aborts the
+  playback promptly; the daemon then mutes speech (`_mute`), tells the front end
+  via `on_barge_in(True/False)`, and captures the following command.
+  `barge_in.threshold` (0 = `wake.threshold`) is a separate, usually higher wake
+  bar for barge-in so the agent's own TTS cannot self-trigger. The
+  `VoiceAdapter` tags that utterance (`raw["barge_in"]`): a bare "stop"/"cancel"
+  (`_is_stop_command`) drops any queued replies and unmutes without submitting,
+  while anything else is run as a new command and unmutes when handled. The wake
+  word is required before every command, and is **held while the
   scheduler slot is busy** (`GatewayService.input_ready`): a wake that fires
   while the current request is still running is ignored (traced
   `voice_wake_blocked`), so a second command cannot start until the first
@@ -1621,7 +1640,8 @@ CLI, unit tests (24) + integration tests (2).
   the Nextcloud/Outlook/Browser bridges over a loopback `http.server` with a fake
   service or driver).
   `tests/test_voice_gateway.py` drives the voice loop
-  with injected fake engines (wake gating, endpointing, half-duplex,
+  with injected fake engines (wake gating, endpointing, half-duplex and
+  barge-in — wake-abort, mute, stop/new-command classification,
   `speak` truncation/failure, adapter + CLI wiring) plus the transcribe-only
   helpers (`check_codec2_requirements`, `decode_codec2` over an injected fake
   `pycodec2`, `pcm_to_wav`) and the voice-reply helpers

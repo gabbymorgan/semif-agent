@@ -10,7 +10,8 @@ non-`b"SIL"` frame speech, and the fake STT returns a fixed string.
 """
 
 from semif_agent.cli import _build_gateway_adapter, _resolve_platforms
-from semif_agent.gateway.voice import VoiceAdapter
+from semif_agent.gateway.base import OutboundMessage
+from semif_agent.gateway.voice import VoiceAdapter, _is_stop_command
 from semif_agent.voice_transport import VoiceDaemon, VoiceEngines
 
 
@@ -26,6 +27,9 @@ class FakeAudio:
         self.writes = []
         self.closed = False
         self.input_opens = 0
+        #: Optional hook run at the start of `play` (to simulate a barge-in
+        #: landing mid-playback by setting the `stop_event`).
+        self.on_play = None
 
     def open_input(self, sample_rate, frame_ms, device=""):
         self.input_opens += 1
@@ -40,6 +44,14 @@ class FakeAudio:
 
     def write(self, pcm16, sample_rate):
         self.writes.append((pcm16, sample_rate))
+
+    def play(self, pcm16, sample_rate, stop_event=None):
+        if self.on_play is not None:
+            self.on_play(stop_event)
+        if stop_event is not None and stop_event.is_set():
+            return False
+        self.writes.append((pcm16, sample_rate))
+        return True
 
     def flush(self):
         pass  # the scripted `frames` are input, not a capture buffer
@@ -327,13 +339,94 @@ def test_watchdog_disabled_uses_blocking_read(monkeypatch):
 # ---- half-duplex / speaking ------------------------------------------------
 
 
-def test_frames_ignored_while_speaking():
-    daemon, engines = make_daemon([b"WAKE", b"speech", b"SIL"])
+def test_frames_ignored_while_speaking_when_barge_in_disabled():
+    # Strict half-duplex: with barge-in off the wake word is not even scored
+    # while a reply is playing, so the agent never transcribes its own voice.
+    daemon, engines = make_daemon(
+        [b"WAKE", b"speech", b"SIL"], config={"barge_in": {"enabled": False}}
+    )
     daemon._speaking.set()
     heard = []
     daemon.run(heard.append)
     assert heard == []
     assert engines.stt.calls == []
+
+
+def test_barge_in_wake_aborts_playback_and_captures_command():
+    # A reply is playing; the wake word fires over it -> the daemon stops the
+    # playback, tells the front end (on_barge_in True then False), and captures
+    # the command that follows.
+    daemon, engines = make_daemon([b"WAKE", b"command", b"SIL", b"SIL"])
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    barges = []
+
+    def on_barge(active):
+        barges.append(active)
+        if active:
+            daemon._speaking.clear()  # the interrupted playback has stopped
+
+    daemon.on_barge_in = on_barge
+    daemon._speaking.set()  # a reply is playing when the wake word lands
+    heard = []
+    daemon.run(heard.append)
+    assert heard == ["hello"]
+    assert barges == [True, False]
+    assert "voice_barge_in" in events
+    assert "voice_wake" not in events  # barge-in, not a fresh wake
+
+
+def test_barge_in_threshold_gates_interruption():
+    # A barge-in threshold above the wake score means the reply is not
+    # interrupted (the agent's own TTS cannot self-trigger a barge-in).
+    daemon, engines = make_daemon(
+        [b"WAKE", b"command", b"SIL", b"SIL"],
+        config={"barge_in": {"threshold": 2.0}},  # FakeWake scores 1.0
+    )
+    daemon._speaking.set()
+    heard = []
+    daemon.run(heard.append)
+    assert heard == []
+    assert engines.stt.calls == []
+
+
+def test_barge_in_without_command_releases_mute():
+    # The wake word interrupts, but no command follows: the listening session
+    # ends and the mute is lifted (the front end is not left muted).
+    daemon, engines = make_daemon([b"WAKE", b"SIL", b"SIL", b"SIL"])
+    daemon._speaking.set()
+
+    def on_barge(active):
+        if active:
+            daemon._speaking.clear()
+
+    daemon.on_barge_in = on_barge
+    daemon.run(lambda text: None)
+    assert daemon._mute.is_set() is False
+
+
+def test_speak_muted_while_barge_in():
+    daemon, engines = make_daemon([])
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+    daemon.set_muted(True)
+    daemon.speak("should not be spoken")
+    assert engines.tts.spoken == []
+    assert engines.audio.writes == []
+    assert "voice_speak_suppressed" in events
+
+
+def test_speak_interrupted_mid_playback():
+    daemon, engines = make_daemon([])
+    events = []
+    daemon._event = lambda kind, **kw: events.append(kind)
+
+    def on_play(stop_event):
+        stop_event.set()  # a barge-in lands while the buffer is playing
+
+    engines.audio.on_play = on_play
+    daemon.speak("a long reply")
+    assert "voice_speak_interrupted" in events
 
 
 def test_speak_synthesizes_and_plays():
@@ -436,6 +529,95 @@ def test_adapter_is_result_only():
     # The spoken front end speaks only the skill's result line, not the
     # scheduler's bookkeeping (overridable via gateway.voice.result_only).
     assert VoiceAdapter({}).result_only is True
+
+
+# ---- barge-in (adapter classification) -------------------------------------
+
+
+def test_is_stop_command():
+    assert _is_stop_command("Stop.") is True
+    assert _is_stop_command("cancel") is True
+    assert _is_stop_command("stop please") is True
+    assert _is_stop_command("shut up already") is True
+    assert _is_stop_command("  Quiet!  ") is True
+    assert _is_stop_command("never mind") is True
+    # A longer utterance is a real command, not a stop.
+    assert _is_stop_command("stop the timer") is False
+    assert _is_stop_command("shut the door") is False
+    assert _is_stop_command("turn on the lights") is False
+    assert _is_stop_command("") is False
+
+
+def test_adapter_barge_in_stop_drops_replies_and_does_not_forward():
+    import queue
+
+    adapter = VoiceAdapter({})
+    seen = []
+    adapter._on_inbound = seen.append
+    outbound: "queue.Queue" = queue.Queue()
+    outbound.put(OutboundMessage("voice", "one"))
+    outbound.put(OutboundMessage("voice", "two"))
+    adapter._outbound = outbound
+    events = []
+    adapter.daemon._event = lambda kind, **kw: events.append(kind)
+    adapter.daemon.set_muted(True)
+    adapter._barged_in = True
+    adapter._on_utterance("stop")
+    adapter._handle(adapter._inbound.get())
+    assert seen == []  # never submitted as a request
+    assert outbound.empty()  # the queued replies were dropped
+    assert "gateway_barge_in_stop" in events
+    assert "gateway_speech_dropped" in events
+    assert adapter.daemon._mute.is_set() is False  # unmuted for later replies
+
+
+def test_adapter_barge_in_stop_preserves_shutdown_sentinel():
+    import queue
+
+    adapter = VoiceAdapter({})
+    adapter._on_inbound = lambda message: None
+    outbound: "queue.Queue" = queue.Queue()
+    outbound.put(OutboundMessage("voice", "stale"))
+    outbound.put(None)
+    adapter._outbound = outbound
+    adapter._barged_in = True
+    adapter._on_utterance("cancel")
+    adapter._handle(adapter._inbound.get())
+    # The stale reply is dropped but the pump's sentinel is preserved.
+    assert outbound.get() is None
+
+
+def test_adapter_barge_in_new_command_is_forwarded():
+    adapter = VoiceAdapter({})
+    seen = []
+    adapter._on_inbound = seen.append
+    adapter.daemon.set_muted(True)
+    adapter._barged_in = True
+    adapter._on_utterance("turn on the lights")
+    message = adapter._inbound.get()
+    assert message.raw.get("barge_in") is True
+    adapter._handle(message)
+    assert [m.text for m in seen] == ["turn on the lights"]
+    assert adapter.daemon._mute.is_set() is False
+
+
+def test_adapter_normal_utterance_is_not_a_barge_in():
+    adapter = VoiceAdapter({})
+    seen = []
+    adapter._on_inbound = seen.append
+    adapter._on_utterance("hello")
+    message = adapter._inbound.get()
+    assert message.raw.get("barge_in") is not True
+    adapter._handle(message)
+    assert [m.text for m in seen] == ["hello"]
+
+
+def test_adapter_on_barge_in_callback_sets_flag():
+    adapter = VoiceAdapter({})
+    adapter._on_barge_in(True)
+    assert adapter._barged_in is True
+    adapter._on_barge_in(False)
+    assert adapter._barged_in is False
 
 
 # ---- CLI wiring ------------------------------------------------------------

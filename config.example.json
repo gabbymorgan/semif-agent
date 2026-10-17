@@ -246,7 +246,12 @@
         "aggressiveness": 2,
         "energy_threshold": 200.0
       },
-      "follow_up_window_s": 0.0
+      "follow_up_window_s": 0.0,
+      "barge_in": {
+        "enabled": true,
+        "wait_s": 2.0,
+        "threshold": 0.0
+      }
     }
   },
   "dashboard": {

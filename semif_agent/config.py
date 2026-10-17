@@ -237,7 +237,16 @@ CORE_SCHEMA: dict[str, Any] = {'tau': {'default': 0.6, 'type': 'float', 'doc': '
                                'initial_silence_ms': {'default': 1500, 'type': 'int'},
                                'aggressiveness': {'default': 2, 'type': 'int'},
                                'energy_threshold': {'default': 200.0, 'type': 'float'}},
-                       'follow_up_window_s': {'default': 0.0, 'type': 'float'}}},
+                       'follow_up_window_s': {'default': 0.0, 'type': 'float'},
+                       # Interrupt a spoken reply with the wake word: stop the
+                       # playback, listen for a command, and either abort (a
+                       # bare "stop"/"cancel") or run the new command. Disable
+                       # for strict half-duplex (the agent never listens while
+                       # speaking). `wait_s` bounds how long to wait for the
+                       # interrupted playback to release the audio device.
+                       'barge_in': {'enabled': {'default': True, 'type': 'bool'},
+                                    'wait_s': {'default': 2.0, 'type': 'float'},
+                                    'threshold': {'default': 0.0, 'type': 'float'}}}},
  'dashboard': {'port': {'default': 8765, 'type': 'int'},
                'host': {'default': '127.0.0.1', 'type': 'str'}},
  'skill_packs': {'default': 'packs',
