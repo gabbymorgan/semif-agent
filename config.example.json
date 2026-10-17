@@ -326,6 +326,9 @@
   "packs": {
     "essentials": {
       "enabled": true
+    },
+    "gutendex": {
+      "enabled": true
     }
   }
 }
