@@ -180,3 +180,54 @@ def test_enqueue_carries_audio_on_the_outbound_queue():
     # The stop sentinel is unchanged.
     daemon.enqueue(None)
     assert daemon._outbound.get_nowait() is None
+
+
+# ---- interface-transition re-announce ----
+
+def test_announce_records_time_and_reason():
+    daemon = LxmfDaemon(config_dir="x", storage_path="y")
+    announced = []
+
+    class _Router:
+        def announce(self, destination_hash):
+            announced.append(destination_hash)
+
+    class _Destination:
+        hash = b"\x00" * 16
+
+    daemon._router = _Router()
+    daemon._destination = _Destination()
+    assert daemon._last_announce == 0.0
+    daemon._announce("startup")
+    assert announced == [b"\x00" * 16]
+    assert daemon._last_announce > 0.0
+
+
+def test_scan_interfaces_flags_only_newly_online(monkeypatch):
+    import sys
+    import types
+
+    class _Iface:
+        def __init__(self, name, online):
+            self._name = name
+            self.online = online
+
+        def __str__(self):
+            return self._name
+
+    a = _Iface("A", False)
+    b = _Iface("B", True)
+    fake_rns = types.SimpleNamespace(
+        Transport=types.SimpleNamespace(interfaces=[a, b])
+    )
+    monkeypatch.setitem(sys.modules, "RNS", fake_rns)
+
+    daemon = LxmfDaemon(config_dir="x", storage_path="y")
+    daemon._interface_states = {"A": False, "B": True}
+
+    assert daemon._scan_interfaces() is False  # steady state: nothing changed
+    a.online = True
+    assert daemon._scan_interfaces() is True  # A came online
+    assert daemon._scan_interfaces() is False  # now recorded online
+    fake_rns.Transport.interfaces.append(_Iface("C", True))
+    assert daemon._scan_interfaces() is True  # a fresh peer interface

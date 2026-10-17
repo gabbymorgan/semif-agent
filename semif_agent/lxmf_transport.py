@@ -57,6 +57,11 @@ CODEC2_MODE_RATES = {
     0x07: 1600, 0x08: 2400, 0x09: 3200,
 }
 
+#: How often the announce loop wakes to re-check the clock and interfaces.
+ANNOUNCE_TICK = 1.0
+#: How often to scan Reticulum interfaces for online/offline transitions.
+PEER_SCAN_INTERVAL = 10.0
+
 
 def audio_mode_name(codec: int) -> str:
     """A human-readable name for an audio mode id (e.g. `AM_OPUS_OGG` ->
@@ -198,7 +203,10 @@ class LxmfDaemon:
     """One in-process Reticulum instance + LXMF router.
 
     `run(on_message)` blocks, announcing the delivery destination periodically
-    and delivering each received message to `on_message`. `enqueue(chat_id,
+    — and whenever a Reticulum interface or AutoInterface peer comes online, so
+    a peer that was not yet reachable at startup (or that joined mid-interval)
+    learns the destination promptly instead of waiting out `announce_interval`.
+    Each received message is delivered to `on_message`. `enqueue(chat_id,
     text)` queues an outbound send (a `None` chat_id is the stop sentinel),
     drained by an internal pump thread. `address` is the bot's LXMF address.
 
@@ -242,6 +250,13 @@ class LxmfDaemon:
         )
         self._stop = threading.Event()
         self._on_message: MessageHandler | None = None
+        #: Last announce time, and whether an interface transition asked for
+        #: an immediate re-announce (set by the announce loop's interface scan).
+        self._last_announce = 0.0
+        self._announce_due = False
+        #: `str(interface) -> online`, so the scan can spot interfaces and
+        #: AutoInterface peers that just came up.
+        self._interface_states: dict[str, bool] = {}
 
     # ---- requirements ----
 
@@ -317,6 +332,15 @@ class LxmfDaemon:
                 )
             except Exception as exc:
                 self._event("lxmf_propagation_error", message=str(exc)[:300])
+        # Snapshot the interfaces Reticulum brought up so the announce loop can
+        # tell which ones (and which AutoInterface peers) come online later.
+        try:
+            self._interface_states = {
+                str(interface): bool(getattr(interface, "online", False))
+                for interface in RNS.Transport.interfaces
+            }
+        except Exception as exc:
+            self._event("lxmf_error", phase="interface_snapshot", message=str(exc)[:300])
         self._event("lxmf_ready", address=self._address)
         return self._router
 
@@ -326,7 +350,7 @@ class LxmfDaemon:
         threading.Thread(
             target=self._pump, name="lxmf-outbound-pump", daemon=True
         ).start()
-        self._announce()
+        self._announce("startup")
         if self.on_connected is not None:
             try:
                 self.on_connected()
@@ -335,8 +359,61 @@ class LxmfDaemon:
                     "lxmf_error", phase="on_connected", message=str(exc)[:300]
                 )
 
-        while not self._stop.wait(self._announce_wait()):
-            self._announce()
+        self._announce_loop()
+
+    def _announce_loop(self) -> None:
+        """Announce on the interval, and whenever an interface/peer comes up.
+
+        The startup announce fires before AutoInterface has finished its
+        peering handshake, so it reaches no peer; a peer discovered later (or a
+        link that recovers) would otherwise have to wait out the whole
+        `announce_interval`. Re-announcing on every online transition makes a
+        newly-reachable peer learn the destination promptly.
+        """
+        last_scan = 0.0
+        while not self._stop.is_set():
+            try:
+                now = time.time()
+                if self._announce_due:
+                    self._announce_due = False
+                    self._announce("peer discovered")
+                elif now - self._last_announce >= self._announce_wait():
+                    self._announce("interval")
+
+                if now - last_scan >= PEER_SCAN_INTERVAL:
+                    last_scan = now
+                    if self._scan_interfaces():
+                        self._announce_due = True
+            except Exception as exc:
+                self._event(
+                    "lxmf_error", phase="announce_loop", message=str(exc)[:300]
+                )
+            self._stop.wait(ANNOUNCE_TICK)
+
+    def _scan_interfaces(self) -> bool:
+        """Note interface transitions; True when one newly came online.
+
+        AutoInterface reports `online` only after its peering wait, and every
+        discovered peer is a fresh `AutoInterfacePeer` interface, so an online
+        transition is exactly "we may now be reachable by someone new".
+        """
+        changed = False
+        try:
+            import RNS
+
+            for interface in RNS.Transport.interfaces:
+                key = str(interface)
+                online = bool(getattr(interface, "online", False))
+                prev = self._interface_states.get(key)
+                self._interface_states[key] = online
+                if online and prev is not True:
+                    self._event("lxmf_interface_online", interface=key)
+                    changed = True
+        except Exception as exc:
+            self._event(
+                "lxmf_error", phase="interface_scan", message=str(exc)[:300]
+            )
+        return changed
 
     def enqueue(
         self, chat_id: str | None, text: str = "", audio: bytes | None = None
@@ -385,12 +462,13 @@ class LxmfDaemon:
             return 3600.0
         return self.announce_interval
 
-    def _announce(self) -> None:
+    def _announce(self, reason: str = "") -> None:
         if self._router is None or self._destination is None:
             return
         try:
             self._router.announce(self._destination.hash)
-            self._event("lxmf_announced", address=self._address)
+            self._last_announce = time.time()
+            self._event("lxmf_announced", address=self._address, reason=reason or None)
         except Exception as exc:
             self._event("lxmf_error", phase="announce", message=str(exc)[:300])
 
